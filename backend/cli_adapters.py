@@ -12,6 +12,7 @@ AI圆桌 — 真实本地 CLI 流式适配层（精准模型档位白名单 + 7�
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import glob
 import json
@@ -361,8 +362,12 @@ _BINARY_FILE_EXTS = {
 }
 
 _AT_FILE_REF_RE = re.compile(
-    r"@([A-Za-z0-9_\u4e00-\u9fa5./-]+\.[A-Za-z0-9]{1,10})(?::(\d+)(?:-(\d+))?)?"
+    r"@([A-Za-z0-9_\u4e00-\u9fa5./-]+\.[A-Za-z0-9]{1,10})(?::[Ll]?(\d+)(?:-[Ll]?(\d+))?)?"
 )
+
+FULL_FILE_LINE_THRESHOLD = 350
+MAX_SLICE_LINES = 400
+MAX_ROUND_SOURCE_CHARS = 30000
 
 
 def get_persona_spec(persona_key: str, fallback_agent_id: str = "carbon") -> dict:
@@ -692,17 +697,150 @@ def list_workspace_files(workspace_dir: str, query: str = "", limit: int = 200) 
     }
 
 
+def build_file_outline_skeleton(rel_path: str, all_lines: List[str]) -> str:
+    """
+    针对超过 350 行的长源码文件，提取「文件头部说明 + 函数/类/关键常量行号大纲骨架」，
+    避免整份大文件全量注入造成 19 万字符级上下文爆炸，同时支持模型按行号范围精准只读一次。
+    """
+    total_lines = len(all_lines)
+    ext = os.path.splitext(rel_path)[1].lower()
+
+    # 1. 提取头部说明（前 32 行内的注释/模块说明/核心导入概览）
+    header_lines: List[str] = []
+    header_chars = 0
+    for idx, raw_ln in enumerate(all_lines[:32], start=1):
+        s_ln = raw_ln.rstrip()
+        if not s_ln and len(header_lines) >= 4:
+            continue
+        clipped = s_ln[:140] + ("…" if len(s_ln) > 140 else "")
+        entry = f"L{idx}: {clipped}"
+        if header_chars + len(entry) > 1200:
+            break
+        header_lines.append(entry)
+        header_chars += len(entry) + 1
+
+    # 2. 提取类 / 函数 / 关键常量 / 样式与结构锚点行号大纲
+    outline_items: List[str] = []
+
+    if ext == ".py":
+        parsed_ok = False
+        try:
+            tree = ast.parse("\n".join(all_lines))
+            parsed_ok = True
+            for node in tree.body:
+                if isinstance(node, ast.Assign):
+                    for tgt in node.targets:
+                        if isinstance(tgt, ast.Name) and (tgt.id.isupper() or tgt.id.startswith("DEFAULT_")):
+                            end_ln = getattr(node, "end_lineno", node.lineno) or node.lineno
+                            outline_items.append(f"  L{node.lineno}-L{end_ln}: const {tgt.id}")
+                elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                    tid = node.target.id
+                    if tid.isupper() or tid.startswith("DEFAULT_"):
+                        end_ln = getattr(node, "end_lineno", node.lineno) or node.lineno
+                        outline_items.append(f"  L{node.lineno}-L{end_ln}: const {tid}")
+                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
+                    args = [a.arg for a in node.args.args[:5]]
+                    if len(node.args.args) > 5:
+                        args.append("...")
+                    end_ln = getattr(node, "end_lineno", node.lineno) or node.lineno
+                    outline_items.append(f"  L{node.lineno}-L{end_ln}: {prefix} {node.name}({', '.join(args)})")
+                elif isinstance(node, ast.ClassDef):
+                    end_ln = getattr(node, "end_lineno", node.lineno) or node.lineno
+                    outline_items.append(f"  L{node.lineno}-L{end_ln}: class {node.name}")
+                    for sub in node.body:
+                        if isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                            m_prefix = "async def" if isinstance(sub, ast.AsyncFunctionDef) else "def"
+                            m_end = getattr(sub, "end_lineno", sub.lineno) or sub.lineno
+                            outline_items.append(f"    L{sub.lineno}-L{m_end}: {m_prefix} {sub.name}(...)")
+        except Exception:
+            parsed_ok = False
+
+        if not parsed_ok:
+            py_re = re.compile(r"^(\s*)(class\s+\w+|(?:async\s+)?def\s+\w+|[A-Z][A-Z0-9_]{2,}\s*=)")
+            for idx, raw_ln in enumerate(all_lines, start=1):
+                m = py_re.match(raw_ln)
+                if m:
+                    indent = "    " if len(m.group(1)) > 0 else "  "
+                    outline_items.append(f"{indent}L{idx}: {raw_ln.strip()[:100]}")
+
+    elif ext in (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"):
+        js_re = re.compile(
+            r"^\s*(?:"
+            r"(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([A-Za-z0-9_$]+)"
+            r"|(?:export\s+)?class\s+([A-Za-z0-9_$]+)"
+            r"|(?:export\s+)?(?:const|let|var)\s+([A-Za-z0-9_$]+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z0-9_$]+)\s*=>"
+            r"|(?:export\s+)?const\s+([A-Z][A-Z0-9_]{2,})\s*="
+            r"|/\*\s*={2,}\s*(.+?)\s*={2,}\s*\*/"
+            r"|//\s*[-=]{3,}\s*(.+)"
+            r")"
+        )
+        for idx, raw_ln in enumerate(all_lines, start=1):
+            s = raw_ln.strip()
+            if not s:
+                continue
+            if js_re.match(raw_ln) or "addEventListener(" in s:
+                outline_items.append(f"  L{idx}: {s[:110]}")
+
+    elif ext in (".css", ".scss", ".less"):
+        css_re = re.compile(
+            r"^(?:/\*\s*[-=]*\s*([^*]+?)\s*[-=]*\s*\*/|(@media[^{]+|@keyframes\s+[^{]+|:root|[.#][A-Za-z0-9_-]+(?:\s+[.#][A-Za-z0-9_-]+)?)\s*\{)"
+        )
+        for idx, raw_ln in enumerate(all_lines, start=1):
+            s = raw_ln.strip()
+            m = css_re.match(s)
+            if m:
+                outline_items.append(f"  L{idx}: {s[:100]}")
+
+    elif ext in (".html", ".htm", ".vue", ".svelte"):
+        html_re = re.compile(
+            r'^\s*(?:<!--\s*(.+?)\s*-->|<(header|aside|main|section|nav|footer|dialog|form|details)\b[^>]*>|<\w+[^>]*\bid="[^"]+"[^>]*>)'
+        )
+        for idx, raw_ln in enumerate(all_lines, start=1):
+            s = raw_ln.strip()
+            if html_re.search(raw_ln):
+                outline_items.append(f"  L{idx}: {s[:110]}")
+
+    else:
+        gen_re = re.compile(
+            r"^\s*(?:#{1,4}\s+.+|(?:pub\s+)?(?:async\s+)?(?:fn|func|def|class|struct|interface|enum|impl)\s+[A-Za-z0-9_]+|[A-Za-z0-9_]+\(\)\s*\{)"
+        )
+        for idx, raw_ln in enumerate(all_lines, start=1):
+            s = raw_ln.strip()
+            if gen_re.match(raw_ln):
+                outline_items.append(f"  L{idx}: {s[:110]}")
+
+    if len(outline_items) > 95:
+        head_part = outline_items[:75]
+        tail_part = outline_items[-18:]
+        omitted = len(outline_items) - len(head_part) - len(tail_part)
+        outline_items = head_part + [f"  ...（中间省略 {omitted} 个次级符号锚点，可按行号区间只读）..."] + tail_part
+
+    header_txt = "\n".join(header_lines) if header_lines else "（无文件头说明）"
+    outline_txt = "\n".join(outline_items) if outline_items else f"  L1-L{total_lines}: （未检测到显式类/函数定义，可按行号分段只读）"
+    skeleton = (
+        f"[文件头部说明 (L1-L{min(total_lines, 32)})]\n{header_txt}\n\n"
+        f"[函数/类/关键常量与结构行号大纲 (共 {total_lines} 行)]\n{outline_txt}\n\n"
+        f"[按需精准读取指引] 该文件共 {total_lines} 行（>{FULL_FILE_LINE_THRESHOLD} 行已自动转为大纲骨架）；"
+        f"已提供结构大纲的文件请勿全量重复读取，仅在确需某处实现细节时按上述 L起始-L结束 行号范围只读一次。"
+    )
+    return skeleton[:6200]
+
+
 def extract_referenced_files_context(
     workspace_dir: str,
     reference_texts: str,
     max_files: int = 12,
-    max_lines_per_file: int = 2500,
-    max_chars_per_file: int = 100000,
+    max_lines_per_file: int = MAX_SLICE_LINES,
+    max_chars_per_file: int = 18000,
+    max_total_chars: int = MAX_ROUND_SOURCE_CHARS,
     exclude_refs: Optional[Set[str]] = None,
 ) -> Tuple[str, Set[str]]:
     """
-    解析文本中的 @path/to/file.ext 或 @path/to/file.ext:start-end 引用并读取真实源码内容。
-    单轮最高支持注入 12 个文件，单文件最高 2500 行 / 100K 字符，彻底消除代码审计截断盲区。
+    解析文本中的 @path/to/file.ext 或 @path/to/file.ext:start-end 引用并构建高信噪比源码附件：
+    - 支持 @path:start-end 按行号切片注入；
+    - 引用整份文件且超过 350 行时，自动转为「文件头部说明 + 函数/类/关键常量行号大纲骨架」，禁止全量塞入；
+    - 单轮源码附件总注入上限严格控制在 30,000 字符以内。
     """
     bound, real_ws = is_real_bound_workspace(workspace_dir)
     if not bound or not reference_texts:
@@ -711,6 +849,7 @@ def extract_referenced_files_context(
     skip_set = exclude_refs or set()
     blocks: List[str] = []
     loaded_keys: Set[str] = set()
+    used_chars = 0
 
     for m in _AT_FILE_REF_RE.finditer(reference_texts):
         rel_raw = m.group(1).lstrip("/")
@@ -726,45 +865,77 @@ def extract_referenced_files_context(
             with open(cand_path, "r", encoding="utf-8", errors="replace") as rf:
                 all_lines = rf.read().splitlines()
             total_lines = len(all_lines)
+            if total_lines == 0:
+                continue
+
+            ext = os.path.splitext(rel_raw)[1].lstrip(".")
             if start_s:
                 s_ln = max(1, int(start_s))
                 e_ln = int(end_s) if end_s else min(total_lines, s_ln + max_lines_per_file - 1)
                 if e_ln < s_ln:
                     s_ln, e_ln = e_ln, s_ln
                 e_ln = min(total_lines, s_ln + max_lines_per_file - 1, e_ln)
-                sliced = all_lines[s_ln - 1 : e_ln]
-                range_label = f"第 {s_ln}–{e_ln} 行 / 共 {total_lines} 行"
+                sliced = [f"L{ln_no}: {all_lines[ln_no - 1]}" for ln_no in range(s_ln, e_ln + 1)]
+                body_txt = "\n".join(sliced)
+                if len(body_txt) > max_chars_per_file:
+                    body_txt = body_txt[:max_chars_per_file] + "\n... [片段超长已截断，请缩小行号区间]"
+                range_label = f"行号切片 L{s_ln}–L{e_ln} / 共 {total_lines} 行"
+                block = f"【引用源码片段 @{rel_raw}（{range_label}）】：\n```{ext}\n{body_txt}\n```"
+            elif total_lines <= FULL_FILE_LINE_THRESHOLD:
+                numbered_lines = [f"L{ln_no}: {ln_txt}" for ln_no, ln_txt in enumerate(all_lines, start=1)]
+                body_txt = "\n".join(numbered_lines)
+                if len(body_txt) > max_chars_per_file:
+                    body_txt = body_txt[:max_chars_per_file] + "\n... [单文件字符超限已截断]"
+                range_label = f"完整源码 L1–L{total_lines}（共 {total_lines} 行）"
+                block = f"【引用源码 @{rel_raw}（{range_label}）】：\n```{ext}\n{body_txt}\n```"
             else:
-                e_ln = min(total_lines, max_lines_per_file)
-                sliced = all_lines[:e_ln]
-                range_label = (
-                    f"完整共 {total_lines} 行"
-                    if total_lines <= max_lines_per_file
-                    else f"前 {e_ln} 行 / 共 {total_lines} 行（可用 @{rel_raw}:{e_ln + 1}-{min(total_lines, e_ln + 1200)} 查看后续）"
-                )
+                skeleton_txt = build_file_outline_skeleton(rel_raw, all_lines)
+                range_label = f"结构大纲骨架（全文件共 {total_lines} 行 > {FULL_FILE_LINE_THRESHOLD} 行阈值）"
+                block = f"【引用文件大纲 @{rel_raw}（{range_label}）】：\n```text\n{skeleton_txt}\n```"
 
-            numbered_body = "\n".join(sliced)
-            if len(numbered_body) > max_chars_per_file:
-                numbered_body = numbered_body[:max_chars_per_file] + "\n... [单文件超 100K 字符已截断]"
+            if not block.strip():
+                continue
 
-            if numbered_body.strip():
-                ext = os.path.splitext(rel_raw)[1].lstrip(".")
-                blocks.append(
-                    f"【引用源码 @{rel_raw}（{range_label}）】：\n```{ext}\n{numbered_body}\n```"
-                )
+            remaining_budget = max_total_chars - used_chars
+            if remaining_budget <= 320:
+                blocks.append(f"【提示：已达单轮源码附件 {max_total_chars:,} 字符总预算上限，其余引用文件请按需用行号范围精准只读】")
+                break
+            if len(block) > remaining_budget:
+                clipped_block = block[: max(260, remaining_budget - 110)].rstrip()
+                if clipped_block.count("```") % 2 == 1:
+                    clipped_block += "\n```"
+                clipped_block += f"\n... [已达单轮源码附件 {max_total_chars:,} 字符上限，后续请按行号精准只读]"
+                blocks.append(clipped_block)
                 loaded_keys.add(ref_key)
-                if len(blocks) >= max_files:
-                    break
+                used_chars = max_total_chars
+                break
+
+            blocks.append(block)
+            loaded_keys.add(ref_key)
+            used_chars += len(block) + 2
+            if len(blocks) >= max_files:
+                break
         except Exception:
             continue
 
-    return "\n\n".join(blocks), loaded_keys
+    if not blocks:
+        return "", set()
+
+    anti_reread_notice = (
+        "【源码上下文使用规则：已提供结构大纲或片段的文件请勿全量重复读取；"
+        "若确需核对大纲中某段实现细节，仅限按大纲标注的行号区间精准只读一次】"
+    )
+    return anti_reread_notice + "\n\n" + "\n\n".join(blocks), loaded_keys
 
 
-def build_workspace_context_snapshot(workspace_dir: str, reference_texts: str = "") -> str:
+def build_workspace_context_snapshot(
+    workspace_dir: str,
+    reference_texts: str = "",
+    prebuilt_ref_block: Optional[str] = None,
+) -> str:
     """
-    构建深度本地项目快照（3 层目录树 + 最多 5 份核心工程清单 + @文件名 完整引用源码），
-    兼顾毫秒级读取速度与全栈代码架构全景感知。
+    构建深度本地项目快照（3 层目录树 + 最多 5 份核心工程清单 + @文件名 智能大纲/切片源码），
+    兼顾毫秒级读取速度与全栈代码架构全景感知，杜绝超大文件全量注入爆炸。
     """
     bound, real_ws = is_real_bound_workspace(workspace_dir)
     if not bound:
@@ -837,16 +1008,19 @@ def build_workspace_context_snapshot(workspace_dir: str, reference_texts: str = 
         if os.path.isfile(mf_path):
             try:
                 with open(mf_path, "r", encoding="utf-8", errors="replace") as f:
-                    head_lines = [ln.rstrip() for _, ln in zip(range(120), f)]
-                snippet = "\n".join(head_lines).strip()[:5000]
+                    head_lines = [ln.rstrip() for _, ln in zip(range(90), f)]
+                snippet = "\n".join(head_lines).strip()[:3600]
                 if snippet:
                     manifest_snippets.append(f"[{mf} 关键内容]:\n{snippet}")
-                if len(manifest_snippets) >= 5:
+                if len(manifest_snippets) >= 4:
                     break
             except Exception:
                 pass
 
-    ref_block, _ = extract_referenced_files_context(real_ws, reference_texts)
+    if prebuilt_ref_block is not None:
+        ref_block = prebuilt_ref_block
+    else:
+        ref_block, _ = extract_referenced_files_context(real_ws, reference_texts)
 
     parts = [
         f"【当前绑定本地项目】：{os.path.basename(real_ws)} ({real_ws})",
@@ -1080,7 +1254,7 @@ def classify_cli_error(
         dur_txt = f"超过 {int(timeout_sec)} 秒" if timeout_sec > 0 else "等待逾时"
         msg = (
             f"{cli_label} 调用超时（{dur_txt}，模型 {model or '默认'} · 档位 {effort or '默认'}）。"
-            "可点击「单席重试」或适当调低推理档位。"
+            "可直接点击卡片内「降档并单席重试」或「原档重试」。"
         )
         return CLIInvocationError(
             msg,
@@ -1296,6 +1470,7 @@ class AgentRoleConfig:
     model: str = ""
     discussion_effort: str = "high"
     execution_effort: str = "high"
+    lock_discussion_effort: bool = False
     _cached_probe_path: str = field(default="", repr=False)
     _cached_meta: Dict[str, str] = field(default_factory=dict, repr=False)
 
@@ -1364,6 +1539,8 @@ class AgentRoleConfig:
 class RuntimeSettings:
     workspace_dir: str = field(default_factory=lambda: os.getcwd())
     allow_single_cli_fallback: bool = True
+    idle_timeout_sec: int = 90
+    turn_timeout_sec: int = 300
     agents: Dict[str, AgentRoleConfig] = field(default_factory=dict)
 
     @classmethod
@@ -1505,8 +1682,106 @@ class RuntimeSettings:
                 "effective_discussion_effort": eff_discuss,
                 "execution_effort": eff_exec,
                 "effective_execution_effort": eff_exec,
+                "lock_discussion_effort": bool(cfg.lock_discussion_effort),
             }
         return result
+
+
+def _short_activity_path(raw_path: str, cwd: str = "") -> str:
+    p = str(raw_path or "").strip().strip("'\"")
+    if not p:
+        return ""
+    if cwd:
+        try:
+            real_cwd = os.path.realpath(cwd)
+            real_p = os.path.realpath(os.path.join(real_cwd, p) if not os.path.isabs(p) else p)
+            if real_p.startswith(real_cwd + os.sep):
+                p = os.path.relpath(real_p, real_cwd)
+        except Exception:
+            pass
+    parts = [seg for seg in p.replace("\\", "/").split("/") if seg]
+    if len(parts) > 2:
+        p = "/".join(parts[-2:])
+    return p[:48]
+
+
+def _format_cli_tool_activity(driver_key: str, tool_name: str, info: object, cwd: str = "") -> str:
+    """将底层 CLI 工具读取或思考事件格式化为简洁可读的前端实时状态文案。"""
+    tname = str(tool_name or "").strip().lower()
+    meta = info if isinstance(info, dict) else {}
+
+    if driver_key == "agy":
+        params = meta.get("parameters") if isinstance(meta.get("parameters"), dict) else {}
+        if not params and isinstance(meta.get("tool_info"), dict):
+            params = meta["tool_info"].get("parameters") or {}
+        if "read" in tname or "view" in tname:
+            target_p = _short_activity_path(params.get("Path") or params.get("path") or params.get("file_path") or "", cwd)
+            s_ln = params.get("StartLine") or params.get("start_line")
+            e_ln = params.get("EndLine") or params.get("end_line")
+            if target_p and s_ln and e_ln:
+                return f"正在读取 {target_p} (L{s_ln}-L{e_ln})…"
+            if target_p:
+                return f"正在读取 {target_p}…"
+            return "正在只读查看源码…"
+        if "grep" in tname or "search" in tname or "find" in tname:
+            q = str(params.get("Query") or params.get("query") or params.get("pattern") or "").strip()[:26]
+            return f"正在检索代码「{q}」…" if q else "正在检索项目源码…"
+        if "list" in tname or "glob" in tname or "dir" in tname:
+            return "正在浏览项目目录…"
+        if tname:
+            return f"正在执行只读检查 ({tname[:20]})…"
+        return ""
+
+    if driver_key == "grok":
+        raw_in = meta.get("rawInput") if isinstance(meta.get("rawInput"), dict) else {}
+        locs = meta.get("locations") if isinstance(meta.get("locations"), list) else []
+        loc_path = ""
+        if locs and isinstance(locs[0], dict):
+            loc_path = str(locs[0].get("path") or "")
+        if "read" in tname or (not tname and loc_path):
+            target_p = _short_activity_path(
+                raw_in.get("target_file") or raw_in.get("path") or raw_in.get("file_path") or loc_path,
+                cwd,
+            )
+            offset = raw_in.get("offset") or raw_in.get("start_line")
+            limit = raw_in.get("limit")
+            if target_p and offset and limit:
+                try:
+                    s_i = int(offset)
+                    e_i = s_i + int(limit) - 1
+                    return f"正在读取 {target_p} (L{s_i}-L{e_i})…"
+                except Exception:
+                    pass
+            if target_p:
+                return f"正在读取 {target_p}…"
+            return "正在只读查看源码…"
+        if "grep" in tname or "search" in tname:
+            q = str(raw_in.get("pattern") or raw_in.get("query") or "").strip()[:26]
+            return f"正在检索代码「{q}」…" if q else "正在检索项目源码…"
+        if "list" in tname or "dir" in tname or "glob" in tname:
+            target_p = _short_activity_path(raw_in.get("target_directory") or raw_in.get("path") or loc_path, cwd)
+            return f"正在浏览目录 {target_p}…" if target_p else "正在浏览项目目录…"
+        if tname:
+            return f"正在分析上下文 ({tname[:20]})…"
+        return ""
+
+    if driver_key == "codex":
+        if tname == "reasoning":
+            return "正在深度推演方案与边界…"
+        if tname in ("command_execution", "local_shell_call"):
+            cmd_str = str(meta.get("command") or "").strip()
+            m_file = re.search(r"([A-Za-z0-9_./-]+\.(?:py|js|ts|tsx|jsx|css|html|json|md|sh))\b", cmd_str)
+            if m_file:
+                short_f = _short_activity_path(m_file.group(1), cwd)
+                if any(k in cmd_str for k in ("rg ", "grep ")):
+                    return f"正在检索 {short_f}…"
+                return f"正在读取 {short_f}…"
+            if any(k in cmd_str for k in ("rg ", "grep ")):
+                return "正在检索项目代码…"
+            return "正在只读核对项目上下文…"
+        if "search" in tname or "read" in tname:
+            return "正在读取项目源码…"
+    return ""
 
 
 class WarmAntigravityProcess:
@@ -1522,6 +1797,7 @@ class WarmAntigravityProcess:
         seat_id: str = "",
         disable_slash: bool = True,
         supports_effort: bool = True,
+        sandbox: bool = True,
         help_text: str = "",
     ):
         self.binary_path = binary_path
@@ -1533,6 +1809,7 @@ class WarmAntigravityProcess:
         self.seat_id = seat_id
         self.disable_slash = disable_slash
         self.supports_effort = supports_effort
+        self.sandbox = sandbox
         self.proc: Optional[asyncio.subprocess.Process] = None
         self.turn_count: int = 0
         self._lock = asyncio.Lock()
@@ -1558,6 +1835,8 @@ class WarmAntigravityProcess:
         ]
         if self.disable_slash:
             cmd.append("--disable-slash-commands")
+        if self.sandbox and "--sandbox" in self.help_text:
+            cmd.append("--sandbox")
         if self.model:
             cmd.extend(["--model", self.model])
         norm_eff = self.normalize_agy_effort(self.effort, help_text=self.help_text, model=self.model)
@@ -1570,9 +1849,10 @@ class WarmAntigravityProcess:
             stderr=asyncio.subprocess.PIPE,
             cwd=self.cwd if os.path.isdir(self.cwd) else None,
             env=build_host_env(),
+            limit=4 * 1024 * 1024,
         )
 
-    async def stream_turn(self, prompt: str) -> AsyncGenerator[str, None]:
+    async def stream_turn(self, prompt: str) -> AsyncGenerator[dict, None]:
         async with self._lock:
             await self.ensure_started()
             assert self.proc and self.proc.stdin and self.proc.stdout
@@ -1581,65 +1861,96 @@ class WarmAntigravityProcess:
             await self.proc.stdin.drain()
 
             emitted = False
-            while True:
-                line_b = await self.proc.stdout.readline()
-                if not line_b:
-                    err_msg = ""
-                    rc: Optional[int] = None
-                    if self.proc.stderr:
-                        err_msg = (await self.proc.stderr.read()).decode("utf-8", errors="replace").strip()
+            saw_tool_since_text = False
+            ended_with_nl = True
+            last_activity = ""
+            turn_finished = False
+            try:
+                while True:
+                    line_b = await self.proc.stdout.readline()
+                    if not line_b:
+                        turn_finished = True
+                        err_msg = ""
+                        rc: Optional[int] = None
+                        if self.proc.stderr:
+                            err_msg = (await self.proc.stderr.read()).decode("utf-8", errors="replace").strip()
+                        try:
+                            rc = await asyncio.wait_for(self.proc.wait(), timeout=1.0)
+                        except Exception:
+                            rc = self.proc.returncode
+                        self.proc = None
+                        self.turn_count = 0
+                        if not emitted:
+                            raise classify_cli_error(
+                                "agy",
+                                raw_err=err_msg,
+                                stderr=err_msg,
+                                exit_code=rc,
+                                model=self.model,
+                                effort=self.effort,
+                            )
+                        break
+
+                    line = line_b.decode("utf-8", errors="replace").strip()
+                    if not line:
+                        continue
                     try:
-                        rc = await asyncio.wait_for(self.proc.wait(), timeout=1.0)
-                    except Exception:
-                        rc = self.proc.returncode
-                    self.proc = None
-                    self.turn_count = 0
-                    if not emitted:
-                        raise classify_cli_error(
-                            "agy",
-                            raw_err=err_msg,
-                            stderr=err_msg,
-                            exit_code=rc,
-                            model=self.model,
-                            effort=self.effort,
-                        )
-                    break
+                        evt = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
 
-                line = line_b.decode("utf-8", errors="replace").strip()
-                if not line:
-                    continue
-                try:
-                    evt = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-
-                etype = evt.get("event")
-                if etype == "step_update":
-                    su = evt.get("step_update", {})
-                    if su.get("step_type") == "agent_response":
-                        delta = su.get("text_delta", "")
-                        if delta:
+                    etype = evt.get("event")
+                    if etype == "step_update":
+                        su = evt.get("step_update", {})
+                        st_type = su.get("step_type", "")
+                        if st_type == "agent_response":
+                            delta = su.get("text_delta", "")
+                            if delta:
+                                if saw_tool_since_text and emitted and not ended_with_nl:
+                                    yield {"type": "delta", "text": "\n\n"}
+                                saw_tool_since_text = False
+                                emitted = True
+                                ended_with_nl = delta.endswith("\n")
+                                yield {"type": "delta", "text": delta}
+                            elif su.get("state") in ("ACTIVE", "RUNNING") and not emitted:
+                                act = "正在深度推演方案与边界…"
+                                if act != last_activity:
+                                    last_activity = act
+                                    yield {"type": "activity", "text": act}
+                        elif st_type == "tool" and su.get("state") in ("ACTIVE", "RUNNING", None):
+                            saw_tool_since_text = True
+                            act = _format_cli_tool_activity("agy", su.get("tool_name", ""), su, cwd=self.cwd)
+                            if act and act != last_activity:
+                                last_activity = act
+                                yield {"type": "activity", "text": act}
+                        elif st_type in ("thinking", "thought") and not emitted:
+                            act = "正在深度推演方案与边界…"
+                            if act != last_activity:
+                                last_activity = act
+                                yield {"type": "activity", "text": act}
+                    elif etype == "result":
+                        turn_finished = True
+                        res = evt.get("result", {})
+                        if not emitted and res.get("response"):
                             emitted = True
-                            yield delta
-                elif etype == "result":
-                    res = evt.get("result", {})
-                    if res.get("status") not in ("SUCCESS", None) and not emitted:
-                        raw_res_err = str(res.get("error") or f"Antigravity 状态异常: {res.get('status')}")
-                        raise classify_cli_error(
-                            "agy",
-                            raw_err=raw_res_err,
-                            stderr=raw_res_err,
-                            exit_code=self.proc.returncode,
-                            model=self.model,
-                            effort=self.effort,
-                        )
-                    if not emitted and res.get("response"):
-                        emitted = True
-                        yield res["response"]
-                    break
+                            yield {"type": "delta", "text": res["response"]}
+                        if res.get("status") not in ("SUCCESS", None) and not emitted:
+                            raw_res_err = str(res.get("error") or f"Antigravity 状态异常: {res.get('status')}")
+                            raise classify_cli_error(
+                                "agy",
+                                raw_err=raw_res_err,
+                                stderr=raw_res_err,
+                                exit_code=self.proc.returncode,
+                                model=self.model,
+                                effort=self.effort,
+                            )
+                        break
 
-            if emitted:
-                self.turn_count += 1
+                if emitted:
+                    self.turn_count += 1
+            finally:
+                if not turn_finished:
+                    await self.close()
 
     async def close(self) -> None:
         if self.proc and self.proc.returncode is None:
@@ -1694,19 +2005,25 @@ class UnifiedAgentRunner:
                 return
             eff_model = resolve_effective_model_for_driver("agy", cfg.model, is_shared_fb=is_fb)
             effort_spec = get_model_effort_spec("agy", model=eff_model, help_text=help_text)
+            bound_ws, real_ws = is_real_bound_workspace(self.settings.workspace_dir)
+            prewarm_cwd = real_ws if bound_ws else self._discussion_sandbox_cwd()
+            prewarm_eff = WarmAntigravityProcess.normalize_agy_effort(
+                cfg.discussion_effort,
+                help_text=help_text,
+                model=eff_model,
+            )
+            if prewarm_eff in ("xhigh", "max") and not cfg.lock_discussion_effort and "high" in (effort_spec.get("allowed") or []):
+                prewarm_eff = "high"
             self._prewarmed_agy = WarmAntigravityProcess(
                 binary_path=bpath,
                 model=eff_model,
-                effort=WarmAntigravityProcess.normalize_agy_effort(
-                    cfg.discussion_effort,
-                    help_text=help_text,
-                    model=eff_model,
-                ),
-                cwd=self._discussion_sandbox_cwd(),
+                effort=prewarm_eff,
+                cwd=prewarm_cwd,
                 session_id="",
                 seat_id="",
                 disable_slash="--disable-slash-commands" in help_text,
                 supports_effort=("--effort" in help_text) and effort_spec.get("supports_effort", True),
+                sandbox=True,
                 help_text=help_text,
             )
             await self._prewarmed_agy.ensure_started()
@@ -1789,6 +2106,11 @@ class UnifiedAgentRunner:
                 else base_cfg.execution_effort
             )
             persona_val = str(override.get("persona", base_cfg.persona) or base_cfg.persona).strip()
+            lock_eff = (
+                bool(override.get("lock_discussion_effort"))
+                if "lock_discussion_effort" in override
+                else base_cfg.lock_discussion_effort
+            )
             cfg = AgentRoleConfig(
                 agent_id=base_cfg.agent_id,
                 name=base_cfg.name,
@@ -1802,6 +2124,7 @@ class UnifiedAgentRunner:
                 model=model_val,
                 discussion_effort=disc_eff,
                 execution_effort=exec_eff,
+                lock_discussion_effort=lock_eff,
             )
         else:
             cfg = base_cfg
@@ -1890,6 +2213,47 @@ class UnifiedAgentRunner:
         lines.reverse()
         return "\n".join(lines)
 
+    @staticmethod
+    def _format_whiteboard_for_prompt(whiteboard: dict) -> str:
+        """
+        拼装白板上下文摘要：优先全量注入「已置顶 / 已采纳共识项」，其次补充近期未置顶讨论摘录，
+        同时平滑兼容旧版仅含纯字符串数组的会话白板。
+        """
+        seat_labels = {"carbon": "Carbon", "grok": "Grok", "astra": "Astra", "chair": "主持"}
+        raw_items = whiteboard.get("items")
+        if isinstance(raw_items, list) and raw_items:
+            confirmed_lines: List[str] = []
+            excerpt_lines: List[str] = []
+            for it in raw_items:
+                if not isinstance(it, dict) or it.get("bucket") == "chair_constraints":
+                    continue
+                txt = str(it.get("text") or "").strip()
+                if not txt:
+                    continue
+                src = seat_labels.get(str(it.get("source_seat") or "").lower(), "白板")
+                if it.get("pinned") or it.get("adopted"):
+                    confirmed_lines.append(f"  · [{src}] {txt}")
+                else:
+                    excerpt_lines.append(f"  · [{src}] {txt}")
+
+            sections: List[str] = []
+            if confirmed_lines:
+                sections.append("【白板已确认共识与置顶决策（最高优先级）】：\n" + "\n".join(confirmed_lines[:30]))
+            if excerpt_lines:
+                sections.append("【近期白板讨论摘录】：\n" + "\n".join(excerpt_lines[-16:]))
+            return ("\n" + "\n".join(sections)) if sections else ""
+
+        wb_digest_parts: List[str] = []
+        for wb_label, wb_key in (
+            ("Carbon要点", "carbon_plan"),
+            ("Grok要点", "grok_risks"),
+            ("Astra要点", "astra_actions"),
+        ):
+            pts = whiteboard.get(wb_key) or []
+            if pts:
+                wb_digest_parts.append(f"  · {wb_label}：{'；'.join(pts[-8:])}")
+        return ("\n【当前白板已沉淀要点】：\n" + "\n".join(wb_digest_parts)) if wb_digest_parts else ""
+
     @classmethod
     def _build_prompt(
         cls,
@@ -1921,26 +2285,17 @@ class UnifiedAgentRunner:
             )
 
         constraints = "；".join(whiteboard.get("chair_constraints", [])) or "无"
-        wb_digest_parts: List[str] = []
-        for wb_label, wb_key in (
-            ("Carbon要点", "carbon_plan"),
-            ("Grok要点", "grok_risks"),
-            ("Astra要点", "astra_actions"),
-        ):
-            pts = whiteboard.get(wb_key) or []
-            if pts:
-                wb_digest_parts.append(f"  · {wb_label}：{'；'.join(pts[-8:])}")
-        wb_digest = ("\n【当前白板已沉淀要点】：\n" + "\n".join(wb_digest_parts)) if wb_digest_parts else ""
+        wb_digest = cls._format_whiteboard_for_prompt(whiteboard)
 
-        # 独立长文决议通道：彻底解除短字数上限
+        # 独立长文决议通道：彻底解除字数限制
         if stage == "synthesis":
             synth_instruction = cue_instruction or (
-                "请基于完整会议讨论、白板要点与主持约束，输出一份完整详尽、可直接落地的《会议最终决议》"
+                "请基于完整会议讨论、白板已确认共识与主持约束，输出一份完整详尽、可直接落地的《会议最终决议》"
             )
             synth_tail = (
-                "只读汇总请勿直接调用工具修改磁盘文件；篇幅不设短字数上限，请以结构清晰、细节完整、可直接交由工程师照单执行为准（包含：1. 核心架构结论与取舍；2. 分阶段文件级实施清单；3. 关键边界风险防线与验收标准）。\n"
-                "末尾必须单独换行附带两行结构化标记（禁止省略）：\n"
-                "[白板: 一条核心决议结论（40字内）；第二条关键实施动作（可选）]\n"
+                "只读汇总严禁调用工具修改磁盘文件，也严禁调用任何 shell 命令或脚本统计字数；篇幅不设上限，请以结构清晰、细节完整、可直接交由工程师照单执行为准（包含：1. 核心架构结论与取舍；2. 分阶段文件级实施清单；3. 关键边界风险防线与验收标准）。\n"
+                "末尾必须独立换行附带两行结构化标记（禁止省略）：\n"
+                "[白板: 一条核心决议结论；第二条关键实施动作（可选）]\n"
                 "[状态: 决议已成 | 共识: 已达成 | 点名: 无]"
             )
             if incremental_only and recent_messages:
@@ -1976,27 +2331,30 @@ class UnifiedAgentRunner:
                 else "【当前环节：首轮独立初评】请严格立足你的专属身份视角独立审视议题，直击核心判断、具体路径或锋利漏洞，严禁空泛寒暄、禁止客套附和或复述前序席位观点。"
             ),
             "cross_talk": (
-                "【当前环节：交叉交锋（仅限增量分歧与修正）】绝对禁止“同意/@某人说得好/整体可行/补充一点”等客套附和，禁止复述前人已达成观点！"
-                "仅输出：1) 实质分歧或反例漏洞；2) 增量修正与硬核补漏（可用 @Carbon / @Grok / @Astra 定向质询）；"
-                "若经严苛审视确无实质分歧，直接一句话简明表态共识已达成。"
+                "【当前环节：交叉交锋与边界收敛】绝对禁止“同意/@某人说得好/整体可行/补充一点”等空洞客套附和，禁止复述前人已达成观点！"
+                "请深度推进讨论：1) 对已达成共识项补充关键边界条件、极端异常防线或明确验收标准；"
+                "2) 对存在分歧或盲区的方案给出具体反例、技术依据与可落地的折中方案（可用 @Carbon / @Grok / @Astra 定向质询）。"
             ),
-            "interrupt_reply": "【当前环节：响应主持人指示】请根据主持人最新补充约束输出增量调整或深化方案，禁止复述旧话与客套附和。",
+            "interrupt_reply": "【当前环节：响应主持人指示】请根据主持人最新补充约束输出增量调整、边界防线或深化方案，禁止复述旧话与客套附和。",
             "cue": f"【当前环节：主持人点名提问】具体问题：{cue_instruction}",
         }.get(stage, "【当前环节：会议讨论】")
 
         mention_hint = "无" if is_solo_mode else "@Carbon或@Grok或@Astra或无"
         if stage in ("cue", "interrupt_reply"):
-            length_guide = "正文建议 220–800 字（若涉及源码分析、接口设计或排查清单可充分展开，不强制截断）"
+            structure_guide = "请聚焦问题充分展开核心论点（含判断依据、具体改法与验收边界，篇幅按分析深度自然舒展）"
         elif is_solo_mode:
-            length_guide = "正文控制在 200–380 字，逻辑紧凑直击重点"
+            structure_guide = "请展开 3–4 个核心模块要点（含判断依据、取舍理由与具体实施改法，篇幅自然舒展）"
         else:
-            length_guide = "正文控制在 180–340 字，直击要害不讲空话"
+            structure_guide = "请展开 2–4 个核心论点（每点均需包含明确判断依据与具体改法/验收条件，篇幅自然舒展，不设死板字数硬区间）"
 
         tail_rule = (
-            f"{length_guide}，严禁客套附和，只读讨论勿调工具改文件；"
-            "末尾必须单独换行附带两行结构化标记（禁止省略）：\n"
-            "[白板: 一条精炼可执行结论（36字内）；第二条可执行结论（可选）]\n"
-            f"[状态: 四至六字摘要 | 共识: 已达成或需继续 | 点名: {mention_hint}]"
+            f"{structure_guide}；严禁客套附和；"
+            "圆桌讨论阶段仅允许按需精准只读源码（已提供结构大纲或片段的文件请勿全量重复读取；单轮只读查看请收敛在 1–3 处最关键代码段以内，禁止全仓遍历扫盘），严禁修改任何磁盘文件，"
+            "严禁调用任何 shell 命令、脚本或工具去统计字数、计算篇幅或自我删改截断！"
+            "正文中禁止输出“我先只读某文件/我先核对源码路径”等工具执行独白，直接输出完整分析结论。\n"
+            "末尾请独立换行附带两行结构化标记（独立提取，不挤压正文分析深度）：\n"
+            "[白板: 一条精炼可执行结论；第二条可执行结论（可选）]\n"
+            f"[状态: 核心立场摘要 | 共识: 已达成或需继续 | 点名: {mention_hint}]"
         )
 
         if incremental_only and recent_messages:
@@ -2006,6 +2364,7 @@ class UnifiedAgentRunner:
                 f"【你当前身份】：{seat_display} · {pspec['label']}\n"
                 f"{stage_desc}\n"
                 f"【最新主持约束】：{constraints}"
+                f"{wb_digest}"
                 f"{ref_section}\n"
                 f"【上一轮新增发言】：\n{delta_lines}\n\n"
                 f"请严格站在【{pspec['label']}】立场回应（{tail_rule}）"
@@ -2030,42 +2389,53 @@ class UnifiedAgentRunner:
     @classmethod
     def parse_structured_tail(cls, full_text: str) -> Tuple[str, str, Optional[str], List[str], Optional[bool]]:
         """
-        解析末尾 [白板: ...] 与 [状态: ... | 共识: ... | 点名: ...] 结构化标记，
+        独立解析末尾 [白板: ...] 与 [状态: ... | 共识: ... | 点名: ...] 结构化标记，
+        兼容顺序互换与 CLI 尾部状态行清理，确保完整保留正文分析内容。
         返回 (clean_body, badge, target, wb_points, consensus_reached)。
         """
-        working = (full_text or "").strip()
+        raw_clean = re.sub(r"(?:\r?\n)*Finishing session[….]*\s*$", "", (full_text or "").strip())
+        working = raw_clean.strip()
         wb_points: List[str] = []
         consensus_reached: Optional[bool] = None
         badge = "发言完成"
         target: Optional[str] = None
 
-        status_pat = (
+        status_pat = re.compile(
             r"\[(?:状态|徽章)[:：]\s*([^\]|｜]+?)"
             r"(?:\s*[|｜]\s*共识[:：]\s*([^\]|｜]+?))?"
-            r"\s*[|｜]\s*点名[:：]\s*@?([A-Za-z\u4e00-\u9fa5]+)\s*\]\s*$"
+            r"(?:\s*[|｜]\s*点名[:：]\s*@?([A-Za-z\u4e00-\u9fa5]+))?\s*\]\s*$"
         )
-        m_status = re.search(status_pat, working)
-        if m_status:
-            working = working[: m_status.start()].strip()
-            badge = m_status.group(1).strip() or "发言完成"
-            raw_cons = (m_status.group(2) or "").strip()
-            if raw_cons:
-                if any(k in raw_cons for k in ("已达成", "达成", "同意", "通过", "一致")):
-                    consensus_reached = True
-                elif any(k in raw_cons for k in ("需继续", "分歧", "存疑", "未达成", "继续")):
-                    consensus_reached = False
-            raw_target = (m_status.group(3) or "").strip().lower()
-            target = raw_target if raw_target in ("carbon", "grok", "astra") else None
+        wb_pat = re.compile(r"\[白板(?:要点)?[:：]\s*([^\]]+)\]\s*$")
 
-        wb_pat = r"\[白板(?:要点)?[:：]\s*([^\]]+)\]\s*$"
-        m_wb = re.search(wb_pat, working)
-        if m_wb:
-            working = working[: m_wb.start()].strip()
-            raw_items = re.split(r"[；;｜|\n]+", m_wb.group(1))
-            for item in raw_items:
-                cleaned_item = re.sub(r"^(?:\d+[.)、]|[-*•])\s*", "", item.strip())
-                if len(cleaned_item) >= 4 and cleaned_item not in ("无", "暂无"):
-                    wb_points.append(cleaned_item[:160])
+        for _ in range(3):
+            m_status = status_pat.search(working)
+            if m_status:
+                candidate_body = working[: m_status.start()].strip()
+                if candidate_body:
+                    working = candidate_body
+                badge = m_status.group(1).strip()[:16] or "发言完成"
+                raw_cons = (m_status.group(2) or "").strip()
+                if raw_cons:
+                    if any(k in raw_cons for k in ("已达成", "达成", "同意", "通过", "一致")):
+                        consensus_reached = True
+                    elif any(k in raw_cons for k in ("需继续", "分歧", "存疑", "未达成", "继续")):
+                        consensus_reached = False
+                raw_target = (m_status.group(3) or "").strip().lower()
+                target = raw_target if raw_target in ("carbon", "grok", "astra") else None
+                continue
+
+            m_wb = wb_pat.search(working)
+            if m_wb:
+                candidate_body = working[: m_wb.start()].strip()
+                if candidate_body:
+                    working = candidate_body
+                raw_items = re.split(r"[；;｜|\n]+", m_wb.group(1))
+                for item in raw_items:
+                    cleaned_item = re.sub(r"^(?:\d+[.)、]|[-*•])\s*", "", item.strip())
+                    if len(cleaned_item) >= 4 and cleaned_item not in ("无", "暂无"):
+                        wb_points.append(cleaned_item[:160])
+                continue
+            break
 
         return working, badge, target, wb_points[:2], consensus_reached
 
@@ -2193,7 +2563,7 @@ class UnifiedAgentRunner:
         try:
             async def _collect() -> None:
                 async with sem:
-                    async for delta in self._stream_raw_cli(
+                    async for ev in self._stream_raw_cli(
                         session_id=f"ping_{agent_id}_{int(time.time() * 1000)}",
                         agent_id=agent_id,
                         driver_key=eff_drv,
@@ -2204,8 +2574,10 @@ class UnifiedAgentRunner:
                         prompt=prompt,
                         use_warm=False,
                         cwd_override=ping_cwd,
+                        discuss_readonly=True,
                     ):
-                        chunks.append(delta)
+                        if ev.get("type") == "delta" and ev.get("text"):
+                            chunks.append(ev["text"])
 
             await asyncio.wait_for(_collect(), timeout=timeout_sec)
             elapsed_ms = int((time.perf_counter() - start_ts) * 1000)
@@ -2371,11 +2743,12 @@ class UnifiedAgentRunner:
                 + (whiteboard.get("chair_constraints") or [])
                 + [m["content"] for m in recent_messages[-20:]]
             )
+            full_ref_block, newly_loaded_refs = extract_referenced_files_context(eff_ws, ref_corpus)
             ws_snapshot = build_workspace_context_snapshot(
                 eff_ws,
                 reference_texts=ref_corpus,
+                prebuilt_ref_block=full_ref_block,
             )
-            _, newly_loaded_refs = extract_referenced_files_context(eff_ws, ref_corpus)
 
         prompt = self._build_prompt(
             agent_id=agent_id,
@@ -2400,10 +2773,24 @@ class UnifiedAgentRunner:
             effort=cfg.discussion_effort,
             help_text=help_text,
         )
+        effort_spec = get_model_effort_spec(eff_drv, model=eff_model, help_text=help_text)
+        # 第 1–2 轮讨论阶段（opening / cross_talk）若配置为 xhigh/max 且未显式强锁，默认自动降为 high 档提速
+        if (
+            stage in ("opening", "cross_talk")
+            and eff_effort in ("xhigh", "max")
+            and not getattr(cfg, "lock_discussion_effort", False)
+            and "high" in (effort_spec.get("allowed") or [])
+        ):
+            eff_effort = "high"
+
         chunks: List[str] = []
-        discuss_cwd = self._discussion_sandbox_cwd()
+        bound_ws, real_ws = is_real_bound_workspace(eff_ws)
+        discuss_cwd = real_ws if bound_ws else self._discussion_sandbox_cwd()
         sem = self._get_binary_semaphore(bpath)
-        turn_timeout = 360.0 if stage == "synthesis" else 180.0
+
+        idle_timeout = float(max(20, int(getattr(self.settings, "idle_timeout_sec", 90) or 90)))
+        base_turn_cap = float(max(60, int(getattr(self.settings, "turn_timeout_sec", 300) or 300)))
+        total_timeout = max(base_turn_cap, 420.0) if stage == "synthesis" else base_turn_cap
 
         async with sem:
             stream_iter = self._stream_with_fallback(
@@ -2417,27 +2804,49 @@ class UnifiedAgentRunner:
                 prompt=prompt,
                 use_warm=not stateless,
                 cwd_override=discuss_cwd,
+                discuss_readonly=True,
             ).__aiter__()
-            deadline = time.perf_counter() + turn_timeout
+            hard_deadline = time.perf_counter() + total_timeout
             try:
                 while True:
-                    remaining = max(1.0, deadline - time.perf_counter())
+                    now_ts = time.perf_counter()
+                    total_rem = hard_deadline - now_ts
+                    if total_rem <= 0:
+                        raise asyncio.TimeoutError("turn_cap_exceeded")
+                    step_wait = max(1.0, min(idle_timeout, total_rem))
                     try:
-                        delta = await asyncio.wait_for(stream_iter.__anext__(), timeout=remaining)
+                        ev = await asyncio.wait_for(stream_iter.__anext__(), timeout=step_wait)
                     except StopAsyncIteration:
                         break
-                    if ttft_ms is None:
-                        ttft_ms = int((time.perf_counter() - start_ts) * 1000)
-                    chunks.append(delta)
-                    yield {"type": "delta", "text": delta}
+                    ev_type = ev.get("type")
+                    if ev_type == "activity":
+                        act_txt = str(ev.get("text") or "").strip()
+                        if act_txt:
+                            yield {"type": "activity", "text": act_txt}
+                    elif ev_type == "delta":
+                        delta = ev.get("text") or ""
+                        if delta:
+                            if ttft_ms is None:
+                                ttft_ms = int((time.perf_counter() - start_ts) * 1000)
+                            chunks.append(delta)
+                            yield {"type": "delta", "text": delta}
             except asyncio.TimeoutError:
-                raise classify_cli_error(
-                    eff_drv,
-                    is_timeout=True,
-                    timeout_sec=turn_timeout,
-                    model=eff_model,
-                    effort=eff_effort,
-                )
+                partial_now = "".join(chunks).strip()
+                if len(partial_now) < 80:
+                    hit_total = time.perf_counter() >= (hard_deadline - 0.5)
+                    reported_sec = total_timeout if hit_total else idle_timeout
+                    raise classify_cli_error(
+                        eff_drv,
+                        is_timeout=True,
+                        timeout_sec=reported_sec,
+                        model=eff_model,
+                        effort=eff_effort,
+                    )
+            finally:
+                try:
+                    await stream_iter.aclose()
+                except Exception:
+                    pass
 
         full_raw = "".join(chunks).strip()
         if not full_raw:
@@ -2483,15 +2892,16 @@ class UnifiedAgentRunner:
         prompt: str,
         use_warm: bool = True,
         cwd_override: Optional[str] = None,
-    ) -> AsyncGenerator[str, None]:
+        discuss_readonly: bool = True,
+    ) -> AsyncGenerator[dict, None]:
         """按候选模型与推理档位顺序尝试流式请求；单次波动回退不再篡改用户保存的配置。"""
         attempts = self._build_fallback_attempts(driver_key, model, effort, help_text=help_text)
         last_exc: Optional[Exception] = None
 
         for cand_model, cand_effort in attempts:
-            emitted_any = False
+            emitted_delta = False
             try:
-                async for delta in self._stream_raw_cli(
+                async for ev in self._stream_raw_cli(
                     session_id=session_id,
                     agent_id=agent_id,
                     driver_key=driver_key,
@@ -2502,16 +2912,18 @@ class UnifiedAgentRunner:
                     prompt=prompt,
                     use_warm=use_warm,
                     cwd_override=cwd_override,
+                    discuss_readonly=discuss_readonly,
                 ):
-                    emitted_any = True
-                    yield delta
-                if emitted_any:
+                    if ev.get("type") == "delta" and ev.get("text"):
+                        emitted_delta = True
+                    yield ev
+                if emitted_delta:
                     return
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 last_exc = exc
-                if emitted_any or not _is_model_or_effort_rejection(exc):
+                if emitted_delta or not _is_model_or_effort_rejection(exc):
                     raise
                 continue
 
@@ -2530,7 +2942,8 @@ class UnifiedAgentRunner:
         prompt: str,
         use_warm: bool = True,
         cwd_override: Optional[str] = None,
-    ) -> AsyncGenerator[str, None]:
+        discuss_readonly: bool = True,
+    ) -> AsyncGenerator[dict, None]:
         cwd = cwd_override if (cwd_override and os.path.isdir(cwd_override)) else self._effective_workspace_cwd()
         env = build_host_env()
         seat_key = (session_id, agent_id)
@@ -2557,6 +2970,8 @@ class UnifiedAgentRunner:
                     and self._prewarmed_agy.model == model
                     and self._prewarmed_agy.effort == agy_effort
                     and self._prewarmed_agy.supports_effort == has_effort
+                    and self._prewarmed_agy.cwd == cwd
+                    and self._prewarmed_agy.sandbox == discuss_readonly
                     and self._prewarmed_agy.turn_count == 0
                 ):
                     warm_inst = self._prewarmed_agy
@@ -2570,6 +2985,8 @@ class UnifiedAgentRunner:
                     or warm_inst.model != model
                     or warm_inst.effort != agy_effort
                     or warm_inst.supports_effort != has_effort
+                    or warm_inst.cwd != cwd
+                    or warm_inst.sandbox != discuss_readonly
                 ):
                     if warm_inst:
                         await warm_inst.close()
@@ -2582,12 +2999,13 @@ class UnifiedAgentRunner:
                         seat_id=agent_id,
                         disable_slash=has_disable_slash,
                         supports_effort=has_effort,
+                        sandbox=discuss_readonly,
                         help_text=help_text,
                     )
                     self._warm_agy_pool[seat_key] = warm_inst
                 try:
-                    async for delta in warm_inst.stream_turn(prompt):
-                        yield delta
+                    async for ev in warm_inst.stream_turn(prompt):
+                        yield ev
                     return
                 except asyncio.CancelledError:
                     await warm_inst.close()
@@ -2609,6 +3027,8 @@ class UnifiedAgentRunner:
             cmd = [binary_path, "-p", prompt]
             if has_disable_slash:
                 cmd.append("--disable-slash-commands")
+            if discuss_readonly and "--sandbox" in help_text:
+                cmd.append("--sandbox")
             if supports_stream_json:
                 cmd.extend(["--output-format", "stream-json"])
             if model:
@@ -2623,10 +3043,14 @@ class UnifiedAgentRunner:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
                 env=env,
+                limit=4 * 1024 * 1024,
             )
             try:
                 assert proc.stdout is not None
                 emitted = False
+                saw_tool_since_text = False
+                ended_with_nl = True
+                last_activity = ""
                 stream_err = ""
                 if supports_stream_json:
                     while True:
@@ -2640,26 +3064,44 @@ class UnifiedAgentRunner:
                             evt = json.loads(line_s)
                             if evt.get("event") == "step_update":
                                 su = evt.get("step_update", {})
-                                if su.get("step_type") == "agent_response" and su.get("text_delta"):
+                                st_type = su.get("step_type", "")
+                                if st_type == "agent_response" and su.get("text_delta"):
+                                    delta_t = su["text_delta"]
+                                    if saw_tool_since_text and emitted and not ended_with_nl:
+                                        yield {"type": "delta", "text": "\n\n"}
+                                    saw_tool_since_text = False
                                     emitted = True
-                                    yield su["text_delta"]
+                                    ended_with_nl = delta_t.endswith("\n")
+                                    yield {"type": "delta", "text": delta_t}
+                                elif st_type == "tool" and su.get("state") in ("ACTIVE", "RUNNING", None):
+                                    saw_tool_since_text = True
+                                    act = _format_cli_tool_activity("agy", su.get("tool_name", ""), su, cwd=cwd)
+                                    if act and act != last_activity:
+                                        last_activity = act
+                                        yield {"type": "activity", "text": act}
+                                elif st_type in ("thinking", "thought") and not emitted:
+                                    act = "正在深度推演方案与边界…"
+                                    if act != last_activity:
+                                        last_activity = act
+                                        yield {"type": "activity", "text": act}
                             elif evt.get("event") == "result":
                                 res = evt.get("result", {})
-                                if res.get("status") not in ("SUCCESS", None) and not emitted:
-                                    stream_err = str(res.get("error") or f"Antigravity 状态异常: {res.get('status')}")
                                 if not emitted and res.get("response"):
                                     emitted = True
-                                    yield res["response"]
+                                    yield {"type": "delta", "text": res["response"]}
+                                if res.get("status") not in ("SUCCESS", None) and not emitted:
+                                    stream_err = str(res.get("error") or f"Antigravity 状态异常: {res.get('status')}")
                         except json.JSONDecodeError:
-                            emitted = True
-                            yield line_s + "\n"
+                            if not line_s.startswith("warning:"):
+                                emitted = True
+                                yield {"type": "delta", "text": line_s + "\n"}
                 else:
                     while True:
                         chunk = await proc.stdout.read(256)
                         if not chunk:
                             break
                         emitted = True
-                        yield chunk.decode("utf-8", errors="replace")
+                        yield {"type": "delta", "text": chunk.decode("utf-8", errors="replace")}
 
                 rc = await proc.wait()
                 if not emitted:
@@ -2678,11 +3120,19 @@ class UnifiedAgentRunner:
 
         if driver_key == "grok":
             grok_eff = normalize_model_effort("grok", model=model, effort=effort, help_text=help_text)
+            supports_streaming_json = "streaming-json" in help_text
             cmd = [binary_path, "-p", prompt]
+            if supports_streaming_json:
+                cmd.extend(["--output-format", "streaming-json"])
             if model and ("--model" in help_text or "-m" in help_text):
                 cmd.extend(["--model", model])
             if grok_eff and "--effort" in help_text:
                 cmd.extend(["--effort", grok_eff])
+            if discuss_readonly:
+                if "--tools" in help_text:
+                    cmd.extend(["--tools", "read_file,list_dir,grep"])
+                elif "--disallowed-tools" in help_text:
+                    cmd.extend(["--disallowed-tools", "run_terminal_command,bash,sh,write,search_replace,todo_write"])
             if "--no-plan" in help_text:
                 cmd.append("--no-plan")
             if "--no-subagents" in help_text:
@@ -2697,22 +3147,103 @@ class UnifiedAgentRunner:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
                 env=env,
+                limit=4 * 1024 * 1024,
             )
             try:
                 assert proc.stdout is not None
                 emitted = False
-                while True:
-                    chunk = await proc.stdout.read(256)
-                    if not chunk:
-                        break
-                    emitted = True
-                    yield chunk.decode("utf-8", errors="replace")
+                saw_tool_since_text = False
+                ended_with_nl = True
+                last_activity = ""
+                stream_err = ""
+                saw_json_event = False
+                non_json_lines: List[str] = []
+
+                if supports_streaming_json:
+                    while True:
+                        line_b = await proc.stdout.readline()
+                        if not line_b:
+                            break
+                        line_s = line_b.decode("utf-8", errors="replace").rstrip("\r\n")
+                        stripped = line_s.strip()
+                        if not stripped:
+                            continue
+                        if stripped.startswith("Finishing session") or stripped.startswith("warning:"):
+                            continue
+                        try:
+                            evt = json.loads(stripped)
+                            saw_json_event = True
+                        except json.JSONDecodeError:
+                            non_json_lines.append(line_s)
+                            continue
+
+                        etype = str(evt.get("type") or "")
+                        if etype in ("text", "text_delta", "content_block_delta"):
+                            txt = evt.get("data")
+                            if txt is None:
+                                delta_obj = evt.get("delta")
+                                if isinstance(delta_obj, dict):
+                                    txt = delta_obj.get("text") or ""
+                                else:
+                                    txt = evt.get("text") or ""
+                            txt_s = str(txt or "")
+                            if txt_s:
+                                if saw_tool_since_text and emitted and not ended_with_nl:
+                                    yield {"type": "delta", "text": "\n\n"}
+                                saw_tool_since_text = False
+                                emitted = True
+                                ended_with_nl = txt_s.endswith("\n")
+                                yield {"type": "delta", "text": txt_s}
+                        elif etype in ("tool_call", "tool_call_update"):
+                            saw_tool_since_text = True
+                            tname = str(evt.get("toolName") or evt.get("title") or "")
+                            act = _format_cli_tool_activity("grok", tname, evt, cwd=cwd)
+                            if act and act != last_activity:
+                                last_activity = act
+                                yield {"type": "activity", "text": act}
+                        elif etype in ("thinking", "reasoning") and not emitted:
+                            act = "正在深度推演方案与边界…"
+                            if act != last_activity:
+                                last_activity = act
+                                yield {"type": "activity", "text": act}
+                        elif etype in ("message", "assistant") and not emitted:
+                            msg_obj = evt.get("message") if isinstance(evt.get("message"), dict) else evt
+                            content_blocks = msg_obj.get("content")
+                            if isinstance(content_blocks, list):
+                                joined = "".join(
+                                    str(b.get("text") or "")
+                                    for b in content_blocks
+                                    if isinstance(b, dict) and b.get("type") == "text"
+                                )
+                                if joined:
+                                    emitted = True
+                                    yield {"type": "delta", "text": joined}
+                        elif etype == "error":
+                            stream_err = str(evt.get("message") or evt.get("error") or stream_err)
+                        elif etype == "end":
+                            if evt.get("error") and not emitted:
+                                stream_err = str(evt.get("error"))
+
+                    if not emitted and not saw_json_event and non_json_lines:
+                        fallback_plain = "\n".join(non_json_lines).strip()
+                        if fallback_plain:
+                            emitted = True
+                            yield {"type": "delta", "text": fallback_plain}
+                else:
+                    while True:
+                        chunk = await proc.stdout.read(256)
+                        if not chunk:
+                            break
+                        emitted = True
+                        yield {"type": "delta", "text": chunk.decode("utf-8", errors="replace")}
+
                 rc = await proc.wait()
+                # 只要本回合已生成有效分析正文（即便后续工具被权限拦截提前结束），一律完整保留已输出正文
                 if not emitted:
                     err_txt = (await proc.stderr.read()).decode("utf-8", errors="replace").strip() if proc.stderr else ""
                     raise classify_cli_error(
                         "grok",
-                        raw_err="",
+                        raw_err=stream_err,
                         stderr=err_txt,
                         exit_code=rc,
                         model=model,
@@ -2741,6 +3272,7 @@ class UnifiedAgentRunner:
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
             env=env,
+            limit=4 * 1024 * 1024,
         )
         try:
             assert proc.stdin is not None and proc.stdout is not None
@@ -2751,6 +3283,7 @@ class UnifiedAgentRunner:
             seen_lengths: Dict[str, int] = {}
             completed_item_count = 0
             emitted = False
+            last_activity = ""
             stream_err = ""
             while True:
                 line_b = await proc.stdout.readline()
@@ -2763,12 +3296,19 @@ class UnifiedAgentRunner:
                     evt = json.loads(line_s)
                 except json.JSONDecodeError:
                     emitted = True
-                    yield line_s + "\n"
+                    yield {"type": "delta", "text": line_s + "\n"}
                     continue
 
                 etype = evt.get("type", "")
                 if etype == "thread.started" and evt.get("thread_id") and use_warm:
                     self._codex_threads[seat_key] = evt["thread_id"]
+                elif etype == "item.started":
+                    item = evt.get("item", {})
+                    itype = item.get("type", "")
+                    act = _format_cli_tool_activity("codex", itype, item, cwd=cwd)
+                    if act and act != last_activity:
+                        last_activity = act
+                        yield {"type": "activity", "text": act}
                 elif etype in ("item.updated", "item.completed"):
                     item = evt.get("item", {})
                     itype = item.get("type", "")
@@ -2778,12 +3318,17 @@ class UnifiedAgentRunner:
                         prev_len = seen_lengths.get(item_id, 0)
                         if len(txt) > prev_len:
                             if prev_len == 0 and completed_item_count > 0:
-                                yield "\n"
+                                yield {"type": "delta", "text": "\n\n"}
                             emitted = True
-                            yield txt[prev_len:]
+                            yield {"type": "delta", "text": txt[prev_len:]}
                             seen_lengths[item_id] = len(txt)
                         if etype == "item.completed" and txt:
                             completed_item_count += 1
+                    elif itype == "command_execution" and etype == "item.updated":
+                        act = _format_cli_tool_activity("codex", itype, item, cwd=cwd)
+                        if act and act != last_activity:
+                            last_activity = act
+                            yield {"type": "activity", "text": act}
                     elif itype == "error":
                         stream_err = item.get("message") or stream_err
                 elif etype in ("error", "turn.failed"):
@@ -2968,8 +3513,18 @@ class UnifiedAgentRunner:
         pspec = get_persona_spec(persona_key or cfg.persona, fallback_agent_id=target_aid)
         cwd = self._effective_workspace_cwd(session_workspace)
 
+        raw_wb_items = whiteboard.get("items")
+        confirmed_exec_pts: List[str] = []
+        if isinstance(raw_wb_items, list) and raw_wb_items:
+            for it in raw_wb_items:
+                if isinstance(it, dict) and it.get("bucket") != "chair_constraints" and (it.get("pinned") or it.get("adopted")):
+                    t = str(it.get("text") or "").strip()
+                    if t:
+                        confirmed_exec_pts.append(f"- [{str(it.get('source_seat') or '共识').upper()}] {t}")
+
         ref_corpus = "\n".join(
             [topic]
+            + confirmed_exec_pts
             + (whiteboard.get("chair_constraints") or [])
             + (whiteboard.get("carbon_plan") or [])
             + (whiteboard.get("grok_risks") or [])
@@ -2979,6 +3534,11 @@ class UnifiedAgentRunner:
         has_real_project = bool(ws_snapshot)
 
         constraints = "\n".join(f"- {x}" for x in whiteboard.get("chair_constraints", []))
+        confirmed_section = (
+            "【已确认置顶共识（最高优先级交付基准）】：\n" + "\n".join(confirmed_exec_pts) + "\n"
+            if confirmed_exec_pts
+            else ""
+        )
         plans = "\n".join(f"- {x}" for x in whiteboard.get("carbon_plan", [])) or "- 按议题目标推进"
         risks = "\n".join(f"- {x}" for x in whiteboard.get("grok_risks", [])) or "- 注意边界异常处理"
         actions = "\n".join(f"- {x}" for x in whiteboard.get("astra_actions", [])) or "- 输出实施方案与交付物"
@@ -2995,6 +3555,7 @@ class UnifiedAgentRunner:
             f"请综合白板共识高质量完成交付{mode_instruction}：\n"
             f"【议题】：{topic}\n"
             f"{('【主持人补充约束】：' + chr(10) + constraints + chr(10)) if constraints else ''}"
+            f"{confirmed_section}"
             f"{ws_snapshot + chr(10) if ws_snapshot else ''}"
             f"【Carbon 要点】：\n{plans}\n"
             f"【Grok 要点】：\n{risks}\n"
@@ -3043,19 +3604,24 @@ class UnifiedAgentRunner:
                         if "--dangerously-skip-permissions" in help_text:
                             cmd.append("--dangerously-skip-permissions")
                     else:
-                        if "--mode" in help_text and "plan" in help_text:
-                            cmd.extend(["--mode", "plan"])
                         if "--sandbox" in help_text:
                             cmd.append("--sandbox")
+                        elif "--mode" in help_text and "plan" in help_text and "--disable-slash-commands" not in help_text:
+                            cmd.extend(["--mode", "plan"])
                 else:
                     grok_eff = normalize_model_effort("grok", model=cand_model, effort=cand_effort, help_text=help_text)
                     cmd = [bpath, "-p", exec_prompt]
+                    if "streaming-json" in help_text:
+                        cmd.extend(["--output-format", "streaming-json"])
                     if cand_model.strip():
                         cmd.extend(["--model", cand_model.strip()])
                     if "--effort" in help_text and grok_eff:
                         cmd.extend(["--effort", grok_eff])
-                    if "--permission-mode" in help_text and not allow_workspace_write:
-                        cmd.extend(["--permission-mode", "dontAsk"])
+                    if not allow_workspace_write:
+                        if "--tools" in help_text:
+                            cmd.extend(["--tools", "read_file,list_dir,grep"])
+                        if "--permission-mode" in help_text:
+                            cmd.extend(["--permission-mode", "dontAsk"])
 
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
@@ -3064,6 +3630,7 @@ class UnifiedAgentRunner:
                     stderr=asyncio.subprocess.PIPE,
                     cwd=cwd,
                     env=build_host_env(),
+                    limit=4 * 1024 * 1024,
                 )
                 try:
                     assert proc.stdout is not None
@@ -3074,11 +3641,12 @@ class UnifiedAgentRunner:
                         if not line_b:
                             break
                         line_s = line_b.decode("utf-8", errors="replace").rstrip("\r\n")
-                        if not line_s.strip():
+                        stripped_s = line_s.strip()
+                        if not stripped_s or stripped_s.startswith("Finishing session") or stripped_s.startswith("warning:"):
                             continue
-                        if eff_drv == "agy" and line_s.lstrip().startswith("{"):
+                        if eff_drv == "agy" and stripped_s.startswith("{"):
                             try:
-                                evt = json.loads(line_s.strip())
+                                evt = json.loads(stripped_s)
                                 if evt.get("event") == "step_update":
                                     su = evt.get("step_update", {})
                                     st_type = su.get("step_type", "")
@@ -3087,7 +3655,8 @@ class UnifiedAgentRunner:
                                         collected.append(delta_txt)
                                         yield {"type": "exec_delta", "text": delta_txt}
                                     elif st_type and st_type != "agent_response":
-                                        yield {"type": "term_log", "line": f"▶ [{st_type}] 执行步骤推进中..."}
+                                        act = _format_cli_tool_activity("agy", su.get("tool_name", st_type), su, cwd=cwd)
+                                        yield {"type": "term_log", "line": f"▶ {act or f'[{st_type}] 执行步骤推进中...'}"}
                                 elif evt.get("event") == "result":
                                     res = evt.get("result", {})
                                     if res.get("status") not in ("SUCCESS", None):
@@ -3095,6 +3664,24 @@ class UnifiedAgentRunner:
                                     if not collected and res.get("response"):
                                         collected.append(res["response"])
                                         yield {"type": "exec_delta", "text": res["response"]}
+                                continue
+                            except json.JSONDecodeError:
+                                pass
+                        elif eff_drv == "grok" and stripped_s.startswith("{"):
+                            try:
+                                evt = json.loads(stripped_s)
+                                gtype = str(evt.get("type") or "")
+                                if gtype in ("text", "text_delta"):
+                                    gtxt = str(evt.get("data") or evt.get("text") or "")
+                                    if gtxt:
+                                        collected.append(gtxt)
+                                        yield {"type": "exec_delta", "text": gtxt}
+                                elif gtype in ("tool_call", "tool_call_update"):
+                                    act = _format_cli_tool_activity("grok", evt.get("toolName") or evt.get("title") or "", evt, cwd=cwd)
+                                    if act:
+                                        yield {"type": "term_log", "line": f"▶ {act}"}
+                                elif gtype == "error":
+                                    stream_err = str(evt.get("message") or evt.get("error") or stream_err)
                                 continue
                             except json.JSONDecodeError:
                                 pass

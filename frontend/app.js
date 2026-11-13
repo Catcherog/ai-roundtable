@@ -108,8 +108,25 @@ const SPEAKER_AMBIENT_GLOW = {
   chair: ["rgba(196, 181, 253, 0.44)", "rgba(251, 207, 232, 0.36)"],
 };
 
-const AT_REF_REGEX = /@([A-Za-z0-9_\u4e00-\u9fa5./-]+\.[A-Za-z0-9]{1,10})(?::(\d+)(?:-(\d+))?)?/g;
+const AT_REF_REGEX = /@([A-Za-z0-9_\u4e00-\u9fa5./-]+\.[A-Za-z0-9]{1,10})(?::L?(\d+)(?:-L?(\d+))?)?/gi;
 const NOISE_PIN_PREFIX = /^(?:我只查公开资料|先核实|同意|完全赞同|赞同|收到|好的|补充一点|针对\s*@|工程侧赞同|综合\s*@|以下是|作为)/i;
+const TOOL_MONOLOGUE_NOISE_RE = /^(?:我(?:先|这就|来|去|将|准备|需要|正在|只)?\s*(?:只读|核对|查看|读取|检查|检索|扫描|查阅|浏览|打开|看下|看一下|查一下|只查|核实)|先\s*(?:只读|核对|查看|读取|检查|检索|看下|看一下|看源码|核实|对一下)|让我(?:先)?\s*(?:只读|核对|查看|读取|检查|看下)|正在\s*(?:只读|读取|核对|查看|检索|扫描)|接下来我(?:先)?\s*(?:只读|核对|查看|读取)|Finishing\s+session)/i;
+const PURE_PROCEDURAL_TAIL_RE = /(?:我先(?:只读|核对|查看|检查)[^。；\n]{0,40}$|只读[^。；\n]{0,20}不改任何文件[。.]?$)/i;
+
+const WB_EXCERPT_COMPACT_LIMIT = 12;
+const WB_EXCERPT_SOFT_CAP = 60;
+
+function isClientWhiteboardNoise(rawText) {
+  const s = String(rawText || "")
+    .replace(/^(?:[-*•]+|\d+[.)、]|[①②③④⑤])\s*/, "")
+    .trim();
+  if (s.length < 4) return true;
+  if (["无", "暂无", "待补充", "发言完成"].includes(s)) return true;
+  if (NOISE_PIN_PREFIX.test(s)) return true;
+  if (TOOL_MONOLOGUE_NOISE_RE.test(s)) return true;
+  if (s.length <= 64 && PURE_PROCEDURAL_TAIL_RE.test(s)) return true;
+  return false;
+}
 
 const pendingDeltaIds = new Set();
 let deltaRafId = 0;
@@ -118,6 +135,7 @@ let thinkingTimerId = 0;
 let atSearchTimer = 0;
 let composingLock = false;
 let composingUnlockTimer = 0;
+let sourceHighlightTimer = 0;
 
 const state = {
   currentSessionId: null,
@@ -142,6 +160,13 @@ const state = {
   thinkingStartById: new Map(),
   seatThinkingStart: new Map(),
   whiteboard: null,
+  wbFilterSeat: "all",
+  wbExcerptsExpanded: false,
+  wbEditingDraft: null,
+  wbConflictState: null,
+  knownWbIds: new Set(),
+  wbInitialSeeded: false,
+  lastWbTotalCount: 0,
   currentTopic: "",
   stage: "idle",
   isBusy: false,
@@ -150,6 +175,7 @@ const state = {
   seatStates: {},
   executorAgent: "astra",
   activePersonaSeat: null,
+  activePopoverAnchor: null,
   rawDiffText: "",
   stickToBottom: true,
   pendingNativeFolderModal: false,
@@ -211,7 +237,7 @@ function formatInlineMarkdown(escapedLine) {
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/@(Carbon|Grok|Astra)\b/gi, '<span class="mention-tag">@$1</span>')
     .replace(
-      /@([A-Za-z0-9_\u4e00-\u9fa5./-]+\.[A-Za-z0-9]{1,10}(?::\d+(?:-\d+)?)?)/g,
+      /@([A-Za-z0-9_\u4e00-\u9fa5./-]+\.[A-Za-z0-9]{1,10}(?::L?\d+(?:-L?\d+)?)?)/gi,
       '<span class="file-mention-tag">@$1</span>'
     );
 }
@@ -759,7 +785,7 @@ function renderAtSuggestMenu(candidates, unbound = false) {
   }
 
   menu.innerHTML =
-    `<div class="at-menu-head"><span>引用项目源码（最高注入 2500 行完整源码，支持 :起始行-结束行）</span><span>↑↓ · Enter</span></div>` +
+    `<div class="at-menu-head"><span>引用项目源码（>350行自动提炼大纲骨架 · 支持 @路径:起始行-结束行 切片）</span><span>↑↓ · Enter</span></div>` +
     state.atCandidates
       .map(
         (item, idx) => `
@@ -901,8 +927,10 @@ function renderAttachedFileChips() {
     seen.add(fullToken);
 
     let cls = "file-chip-valid";
-    let statusHint = "已就绪 · 发送时自动注入完整源码";
-    let badgeTxt = "";
+    let statusHint = rangeTxt
+      ? "已就绪 · 发送时按行号区间精准切片注入"
+      : "已就绪 · ≤350行注入源码，>350行自动提取头说明+行号大纲骨架";
+    let badgeTxt = rangeTxt ? "行切片" : "";
     if (unbound) {
       cls = "file-chip-warn";
       statusHint = "尚未绑定本地项目目录，点击绑定后生效";
@@ -927,27 +955,78 @@ function renderAttachedFileChips() {
   bar.classList.remove("hidden");
 }
 
-// ==================== 预设身份快速切换浮层与独奏/主刀同步 ====================
+// ==================== 顶栏席位轻量配置浮层 & 参会阵容预设 ====================
 
 function closePersonaPopover() {
   state.activePersonaSeat = null;
+  state.activePopoverAnchor = null;
   el("personaPopover")?.classList.add("hidden");
 }
 
-function openPersonaPopover(agentId, anchorBtn) {
-  const pop = el("personaPopover");
+function renderSeatPopoverContents(agentId) {
   const titleEl = el("personaPopoverTitle");
+  const quickEl = el("seatPopoverQuickActions");
+  const effortEl = el("seatPopoverEffortBox");
   const listEl = el("personaOptionList");
-  if (!pop || !listEl || !anchorBtn) return;
+  if (!listEl || !agentId) return;
 
-  if (state.activePersonaSeat === agentId && !pop.classList.contains("hidden")) {
-    closePersonaPopover();
-    return;
+  const seatName = AGENT_NAMES[agentId] || agentId;
+  const isSolo = state.enabledAgents.length === 1 && state.enabledAgents[0] === agentId;
+  const seatOn = state.enabledAgents.includes(agentId);
+  const info = state.systemStatus?.agents?.[agentId] || {};
+  const shownModel = info.effective_model || info.model || "";
+
+  if (titleEl) {
+    titleEl.textContent = `${seatName} · 席位快捷控制${shownModel ? ` (${shownModel})` : ""}`;
   }
 
-  state.activePersonaSeat = agentId;
-  if (titleEl) {
-    titleEl.textContent = `切换 ${AGENT_NAMES[agentId]} 的预设身份侧重`;
+  if (quickEl) {
+    quickEl.innerHTML = `
+      <button type="button" class="seat-pop-btn primary-act" data-seat-pop-act="mention" title="在底部输入框插入 @${escapeHtml(seatName)} 点名回应">
+        <span>@${escapeHtml(seatName)} 点名</span>
+      </button>
+      <button type="button" class="seat-pop-btn ${isSolo ? "active" : ""}" data-seat-pop-act="solo" title="${isSolo ? "恢复三席多视角圆桌" : `仅由 ${escapeHtml(seatName)} 单人包揽设计与落地执行`}">
+        <span>${isSolo ? "✓ 独奏中（点此恢复三席）" : "🎯 仅该席独奏"}</span>
+      </button>
+      <button type="button" class="seat-pop-btn ${seatOn ? "" : "warn-act"}" data-seat-pop-act="toggle-enable" title="${seatOn ? `暂停 ${escapeHtml(seatName)} 参会` : `恢复 ${escapeHtml(seatName)} 参会`}">
+        <span>${seatOn ? "⏸ 暂停参会" : "▶ 恢复参会"}</span>
+      </button>
+    `;
+  }
+
+  if (effortEl) {
+    const spec = resolveFrontendEffortSpec(info.driver || info.effective_driver, shownModel, agentId);
+    if (!spec.supportsEffort || !spec.allowed.length) {
+      effortEl.innerHTML = `<div class="seat-pop-effort-note">当前模型自动省略 <code>--effort</code> 参数</div>`;
+    } else {
+      const curEffort = clampEffortBySpec(
+        info.effective_discussion_effort || info.discussion_effort || spec.defaultEffort,
+        spec,
+        false
+      );
+      const isLocked = Boolean(info.lock_discussion_effort);
+      const hasHighTier = spec.allowed.includes("xhigh") || spec.allowed.includes("max");
+      effortEl.innerHTML = `
+        <div class="seat-pop-effort-head">
+          <span>讨论推理档位</span>
+          ${
+            hasHighTier
+              ? `<button type="button" class="seat-lock-pill ${isLocked ? "locked" : ""}" data-seat-pop-lock="1" title="默认第 1–2 轮自动将 xhigh/max 降为 high 提速；开启强锁后全程保持所选最高档">
+                  ${isLocked ? "🔒 已强锁高档" : "⚡ 首2轮自动降high提速"}
+                 </button>`
+              : ""
+          }
+        </div>
+        <div class="seat-effort-pills">
+          ${spec.allowed
+            .map(
+              (lv) =>
+                `<button type="button" class="seat-effort-pill ${lv === curEffort ? "active" : ""}" data-seat-pop-effort="${escapeHtml(lv)}">${escapeHtml(lv)}</button>`
+            )
+            .join("")}
+        </div>
+      `;
+    }
   }
 
   const curKey = state.seatPersonas[agentId] || "planner";
@@ -974,20 +1053,127 @@ function openPersonaPopover(agentId, anchorBtn) {
         <button type="button" class="persona-opt-btn ${active ? "active" : ""}" data-pick-persona="${escapeHtml(k)}">
           <div class="persona-opt-top">
             <span>${escapeHtml(p.label)}（${escapeHtml(p.short_tag)}）</span>
-            ${active ? '<span>✓</span>' : ""}
+            ${active ? "<span>✓</span>" : ""}
           </div>
           <div class="persona-opt-desc">${escapeHtml(shortDesc)}</div>
         </button>
       `;
     })
     .join("");
+}
+
+function openPersonaPopover(agentId, anchorBtn) {
+  const pop = el("personaPopover");
+  if (!pop || !anchorBtn) return;
+
+  if (state.activePersonaSeat === agentId && !pop.classList.contains("hidden")) {
+    closePersonaPopover();
+    return;
+  }
+
+  state.activePersonaSeat = agentId;
+  state.activePopoverAnchor = anchorBtn;
+  renderSeatPopoverContents(agentId);
 
   pop.classList.remove("hidden");
   const rect = anchorBtn.getBoundingClientRect();
-  const left = Math.max(12, Math.min(rect.left, window.innerWidth - 284));
-  const top = Math.min(rect.bottom + 8, window.innerHeight - 360);
+  const popWidth = Math.max(304, pop.offsetWidth || 312);
+  const popHeight = Math.min(480, pop.offsetHeight || 420);
+  const left = Math.max(12, Math.min(rect.left, window.innerWidth - popWidth - 12));
+  const top = Math.max(12, Math.min(rect.bottom + 8, window.innerHeight - popHeight - 12));
   pop.style.left = `${left}px`;
   pop.style.top = `${top}px`;
+}
+
+async function toggleSoloSeat(agentId) {
+  if (!state.currentSessionId || !AGENT_NAMES[agentId]) return;
+  const isAlreadySolo = state.enabledAgents.length === 1 && state.enabledAgents[0] === agentId;
+  const nextEnabled = isAlreadySolo ? [...AGENT_ORDER] : [agentId];
+  const nextExec = isAlreadySolo ? "astra" : agentId;
+  try {
+    const res = await apiFetch(`/api/sessions/${state.currentSessionId}/seats`, {
+      method: "POST",
+      body: JSON.stringify({
+        enabled_agents: nextEnabled,
+        executor_agent: nextExec,
+      }),
+    });
+    applySeatsResponse(res);
+    if (state.activePersonaSeat === agentId) {
+      renderSeatPopoverContents(agentId);
+    }
+    showToast(
+      isAlreadySolo
+        ? "已恢复三席多视角圆桌模式"
+        : `已切换为 ${AGENT_NAMES[agentId]} 独奏模式（单人包揽设计与执行）`,
+      "ok",
+      2000
+    );
+  } catch (err) {
+    showToast(err.message, "err");
+  }
+}
+
+async function toggleSeatParticipation(agentId) {
+  if (!state.currentSessionId || !AGENT_NAMES[agentId]) return;
+  const isCurrentlyOn = state.enabledAgents.includes(agentId);
+  const nextList = isCurrentlyOn
+    ? state.enabledAgents.filter((x) => x !== agentId)
+    : AGENT_ORDER.filter((x) => x === agentId || state.enabledAgents.includes(x));
+  if (nextList.length === 0) {
+    showToast("至少需要保留一位参会成员", "warn");
+    return;
+  }
+  try {
+    const res = await apiFetch(`/api/sessions/${state.currentSessionId}/seats`, {
+      method: "POST",
+      body: JSON.stringify({ enabled_agents: nextList }),
+    });
+    applySeatsResponse(res);
+    if (state.activePersonaSeat === agentId) {
+      renderSeatPopoverContents(agentId);
+    }
+    showToast(
+      `${AGENT_NAMES[agentId]} 已${isCurrentlyOn ? "暂停参会" : "加入参会"}`,
+      "info",
+      1600
+    );
+  } catch (err) {
+    showToast(err.message, "err");
+  }
+}
+
+async function updateSeatEffortQuickly(agentId, patch) {
+  if (!AGENT_NAMES[agentId]) return;
+  try {
+    const res = await apiFetch("/api/config", {
+      method: "POST",
+      body: JSON.stringify({
+        active_session_id: state.currentSessionId || "",
+        agents: { [agentId]: patch },
+      }),
+    });
+    if (res.system) {
+      renderSystemStatus(res.system);
+    }
+    if (state.activePersonaSeat === agentId) {
+      renderSeatPopoverContents(agentId);
+    }
+    const updated = res.system?.agents?.[agentId];
+    if (patch.discussion_effort) {
+      showToast(`${AGENT_NAMES[agentId]} 讨论推理档位已设为 ${updated?.effective_discussion_effort || patch.discussion_effort}`, "ok", 1800);
+    } else if (patch.lock_discussion_effort !== undefined) {
+      showToast(
+        patch.lock_discussion_effort
+          ? `已强锁 ${AGENT_NAMES[agentId]} 在第 1–2 轮保持最高推理档`
+          : `已恢复 ${AGENT_NAMES[agentId]} 第 1–2 轮自动降为 high 提速`,
+        "info",
+        2000
+      );
+    }
+  } catch (err) {
+    showToast(`更新档位失败：${err.message}`, "err");
+  }
 }
 
 async function applySeatPersonaChange(agentId, personaKey) {
@@ -1003,6 +1189,152 @@ async function applySeatPersonaChange(agentId, personaKey) {
     showToast(`${AGENT_NAMES[agentId]} 已切换为「${pspec.label}」身份`, "ok", 1800);
   } catch (err) {
     showToast(`切换身份失败：${err.message}`, "err");
+  }
+}
+
+function detectActiveLineupPreset() {
+  const agentsSys = state.systemStatus?.agents || {};
+  const drivers = AGENT_ORDER.map((a) => agentsSys[a]?.effective_driver || agentsSys[a]?.driver || "");
+  const allSameDriver =
+    state.enabledAgents.length === 3 &&
+    drivers[0] &&
+    drivers.every((d) => d === drivers[0]) &&
+    agentsSys.carbon?.driver === agentsSys.grok?.driver &&
+    agentsSys.grok?.driver === agentsSys.astra?.driver;
+  if (state.enabledAgents.length === 1) {
+    return "solo_lead";
+  }
+  if (allSameDriver) {
+    return "single_cli";
+  }
+  if (
+    state.seatPersonas.grok === "red_team" &&
+    state.seatPersonas.astra === "qa_audit"
+  ) {
+    return "red_blue";
+  }
+  return "triad";
+}
+
+function syncLineupPresetUI() {
+  const activeKey = detectActiveLineupPreset();
+  document.querySelectorAll("[data-lineup-preset]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.lineupPreset === activeKey);
+  });
+}
+
+async function applyLineupPreset(presetKey) {
+  if (!state.currentSessionId) return;
+  try {
+    if (presetKey === "single_cli") {
+      const chosenDriver = detectFirstReadyDriver();
+      const defaultModelMap = {
+        agy: "gemini-4-carbon",
+        grok: "grok-4.7",
+        codex: "gpt-6-astra",
+      };
+      const triadPersonas = { carbon: "planner", grok: "red_team", astra: "implementer" };
+      const agentsPayload = {};
+      AGENT_ORDER.forEach((aid) => {
+        const spec = resolveFrontendEffortSpec(chosenDriver, defaultModelMap[chosenDriver] || "", aid);
+        agentsPayload[aid] = {
+          driver: chosenDriver,
+          persona: triadPersonas[aid],
+          model: defaultModelMap[chosenDriver] || "",
+          discussion_effort: spec.defaultEffort,
+          execution_effort: spec.defaultEffort,
+        };
+      });
+      const cfgRes = await apiFetch("/api/config", {
+        method: "POST",
+        body: JSON.stringify({
+          active_session_id: state.currentSessionId,
+          allow_single_cli_fallback: true,
+          agents: agentsPayload,
+        }),
+      });
+      if (cfgRes.system) renderSystemStatus(cfgRes.system);
+      const seatRes = await apiFetch(`/api/sessions/${state.currentSessionId}/seats`, {
+        method: "POST",
+        body: JSON.stringify({
+          enabled_agents: ["carbon", "grok", "astra"],
+          seat_personas: triadPersonas,
+          executor_agent: "astra",
+        }),
+      });
+      applySeatsResponse(seatRes);
+      showToast(`已切换为「单 CLI 分饰三席」（使用 ${chosenDriver} 串行无状态发言）`, "ok", 2400);
+      return;
+    }
+
+    // 若之前处于「单 CLI 分饰三席」锁定同源驱动状态，切回多席预设时自动恢复三席默认异构驱动
+    const curSysAgents = state.systemStatus?.agents || {};
+    if (
+      curSysAgents.carbon?.driver &&
+      curSysAgents.carbon?.driver === curSysAgents.grok?.driver &&
+      curSysAgents.grok?.driver === curSysAgents.astra?.driver
+    ) {
+      const resetRes = await apiFetch("/api/config", {
+        method: "POST",
+        body: JSON.stringify({
+          active_session_id: state.currentSessionId,
+          allow_single_cli_fallback: true,
+          agents: {
+            carbon: { driver: "agy", model: "" },
+            grok: { driver: "grok", model: "" },
+            astra: { driver: "codex", model: "" },
+          },
+        }),
+      });
+      if (resetRes.system) renderSystemStatus(resetRes.system);
+    }
+
+    if (presetKey === "solo_lead") {
+      const readySeat =
+        AGENT_ORDER.find((a) => state.systemStatus?.agents?.[a]?.binary_detected && a === "astra") ||
+        AGENT_ORDER.find((a) => state.systemStatus?.agents?.[a]?.binary_detected) ||
+        "carbon";
+      const seatRes = await apiFetch(`/api/sessions/${state.currentSessionId}/seats`, {
+        method: "POST",
+        body: JSON.stringify({
+          enabled_agents: [readySeat],
+          seat_personas: { [readySeat]: "fullstack_solo" },
+          executor_agent: readySeat,
+        }),
+      });
+      applySeatsResponse(seatRes);
+      showToast(`已切换为「单席主程」模式：由 ${AGENT_NAMES[readySeat]} 独立完成方案与执行`, "ok", 2200);
+      return;
+    }
+
+    if (presetKey === "red_blue") {
+      syncCollabModeUI("red_blue_debate");
+      const seatRes = await apiFetch(`/api/sessions/${state.currentSessionId}/seats`, {
+        method: "POST",
+        body: JSON.stringify({
+          enabled_agents: ["carbon", "grok", "astra"],
+          seat_personas: { carbon: "planner", grok: "red_team", astra: "qa_audit" },
+          executor_agent: "carbon",
+        }),
+      });
+      applySeatsResponse(seatRes);
+      showToast("已切换为「红蓝质询」阵容（规划立论 + 红队挑刺 + 测试验收）", "ok", 2200);
+      return;
+    }
+
+    // 默认 triad 三席圆桌
+    const seatRes = await apiFetch(`/api/sessions/${state.currentSessionId}/seats`, {
+      method: "POST",
+      body: JSON.stringify({
+        enabled_agents: ["carbon", "grok", "astra"],
+        seat_personas: { carbon: "planner", grok: "red_team", astra: "implementer" },
+        executor_agent: "astra",
+      }),
+    });
+    applySeatsResponse(seatRes);
+    showToast("已切换为「三席圆桌」标准阵容（规划 + 挑刺 + 落地）", "ok", 2000);
+  } catch (err) {
+    showToast(`切换阵容失败：${err.message}`, "err");
   }
 }
 
@@ -1033,46 +1365,25 @@ function syncPersonasAndExecutorUI() {
   const execAid = AGENT_NAMES[state.executorAgent] ? state.executorAgent : "astra";
   const execName = AGENT_NAMES[execAid] || "Astra";
 
-  // 1. 席位头衔、独奏高亮与白板分栏标题
+  // 1. 席位胶囊头衔与独奏/暂停状态同步
   AGENT_ORDER.forEach((aid) => {
     const pKey = state.seatPersonas[aid] || "planner";
     const pspec = getPersonaSpec(pKey, aid);
+    const thisSolo = isSolo && soloAid === aid;
+    const seatOn = state.enabledAgents.includes(aid);
     const roleTxt = el(`seat-role-text-${aid}`);
-    if (roleTxt) roleTxt.textContent = pspec.short_tag;
-
-    const soloBtn = el(`seat-solo-${aid}`);
-    if (soloBtn) {
-      const thisSolo = isSolo && soloAid === aid;
-      soloBtn.classList.toggle("active", thisSolo);
-      soloBtn.textContent = thisSolo ? "独奏中" : "独奏";
-      soloBtn.title = thisSolo
-        ? `当前由 ${AGENT_NAMES[aid]} 单人独奏中（再次点击恢复三席圆桌）`
-        : `独奏模式：仅由 ${AGENT_NAMES[aid]} 单人包揽设计与落地执行（自动暂停其余两席）`;
+    if (roleTxt) {
+      roleTxt.textContent = thisSolo ? `${pspec.short_tag} · 独奏` : pspec.short_tag;
     }
 
     const card = el(`seat-${aid}`);
     if (card) {
-      const seatOn = state.enabledAgents.includes(aid);
-      card.classList.toggle("seat-is-solo", isSolo && soloAid === aid);
-      const toggleBtn = card.querySelector("[data-seat-toggle]");
-      if (toggleBtn) {
-        toggleBtn.classList.toggle("on", seatOn);
-        toggleBtn.title = seatOn
-          ? `参会启用开关：已开启（点击暂停 ${AGENT_NAMES[aid]} 参会）`
-          : `参会启用开关：已暂停（点击启用 ${AGENT_NAMES[aid]} 参会）`;
-      }
-    }
-
-    const cap = aid.charAt(0).toUpperCase() + aid.slice(1);
-    const wbTitle = el(`wbTitle${cap}`);
-    if (wbTitle) {
-      wbTitle.textContent = `${AGENT_NAMES[aid]} · ${pspec.wb_title}`;
-    }
-    const wbCard = el(`wbCard${cap}`);
-    if (wbCard) {
-      wbCard.classList.toggle("wb-card-inactive", !state.enabledAgents.includes(aid));
+      card.classList.toggle("seat-is-solo", thisSolo);
+      card.classList.toggle("seat-disabled", !seatOn);
     }
   });
+
+  syncLineupPresetUI();
 
   // 2. 动态生成底部快捷点名追问按钮组 (#cueGroupLeft)
   const cueLeft = el("cueGroupLeft");
@@ -1260,6 +1571,18 @@ function updateWorkspaceCardDisplay(dirPath, isGitOverride = undefined) {
   const pickQuickBtn = el("pickFolderQuickBtn");
   if (pickQuickBtn) {
     pickQuickBtn.textContent = unbound ? "选择目录" : "切换目录";
+  }
+
+  const emptyWsNameEl = el("emptyWsName");
+  const emptyBindBtn = el("emptyBindWsBtn");
+  if (emptyWsNameEl) {
+    emptyWsNameEl.textContent = unbound
+      ? "点击绑定本地项目目录"
+      : `${folderName}${state.workspaceIsGit ? " · Git" : ""}`;
+  }
+  if (emptyBindBtn) {
+    emptyBindBtn.classList.toggle("ws-bound", !unbound);
+    emptyBindBtn.title = unbound ? "点击选择本地项目文件夹" : `当前已绑定：${wsDir}（点击切换）`;
   }
 
   const headerName = el("headerWsName");
@@ -1464,6 +1787,14 @@ function renderSystemStatus(sys) {
   }
   updateWorkspaceCardDisplay(state.sessionWorkspaceDir || sys.workspace_dir);
 
+  if (el("quickIdleTimeoutInput") && sys.idle_timeout_sec) {
+    el("quickIdleTimeoutInput").value = String(sys.idle_timeout_sec);
+  }
+  if (el("quickTurnTimeoutInput") && sys.turn_timeout_sec) {
+    el("quickTurnTimeoutInput").value = String(sys.turn_timeout_sec);
+  }
+  syncLineupPresetUI();
+
   const container = el("cliEngineCards");
   if (!container) return;
   container.innerHTML = "";
@@ -1494,8 +1825,12 @@ function renderSystemStatus(sys) {
       : "";
     const seatCard = el(`seat-${aid}`);
     if (seatCard) {
-      const effortTip = supportsEffort && effDiscuss ? ` · 档位 ${effDiscuss}` : " · 自动省略档位";
-      seatCard.title = `${info.name} (${info.persona_label || info.title}) · ${info.cli_name}${shownModel ? ` · ${shownModel}` : ""}${effortTip} — 点击点名提问`;
+      const autoFastNote =
+        supportsEffort && ["xhigh", "max"].includes(effDiscuss) && !info.lock_discussion_effort
+          ? "（首2轮自动降high提速）"
+          : "";
+      const effortTip = supportsEffort && effDiscuss ? ` · 档位 ${effDiscuss}${autoFastNote}` : " · 自动省略档位";
+      seatCard.title = `${info.name} (${info.persona_label || info.title}) · ${info.cli_name}${shownModel ? ` · ${shownModel}` : ""}${effortTip} — 点击打开席位快捷控制`;
     }
 
     const ping = state.pingResults[aid];
@@ -1754,19 +2089,11 @@ function updateSeatUI(seat) {
   card.className = `seat-card seat-${aid} status-${seat.status || "idle"}${enabled ? "" : " seat-disabled"}${isSolo ? " seat-is-solo" : ""}`;
 
   if (seat.title && el(`seat-role-text-${aid}`)) {
-    el(`seat-role-text-${aid}`).textContent = seat.title;
+    el(`seat-role-text-${aid}`).textContent = isSolo ? `${seat.title} · 独奏` : seat.title;
   }
 
   if (seat.status === "speaking" || seat.status === "executing") {
     shiftAmbientGlowForSpeaker(aid);
-  }
-
-  const toggleBtn = card.querySelector("[data-seat-toggle]");
-  if (toggleBtn) {
-    toggleBtn.classList.toggle("on", enabled);
-    toggleBtn.title = enabled
-      ? `参会启用开关：已开启（点击暂停 ${AGENT_NAMES[aid]} 参会）`
-      : `参会启用开关：已暂停（点击启用 ${AGENT_NAMES[aid]} 参会）`;
   }
 
   const badgeEl = el(`seat-badge-${aid}`);
@@ -1796,7 +2123,7 @@ function updateSeatUI(seat) {
 
   if (seat.ttft_ms > 0 || seat.elapsed_ms > 0) {
     if (seat.ttft_ms > 0) {
-      card.title = `${AGENT_NAMES[aid]} (${seat.persona_label || seat.title || ""}) · 首字 ${seat.ttft_ms}ms / 总计 ${(seat.elapsed_ms / 1000).toFixed(1)}s（点击点名）`;
+      card.title = `${AGENT_NAMES[aid]} (${seat.persona_label || seat.title || ""}) · 首字 ${seat.ttft_ms}ms / 总计 ${(seat.elapsed_ms / 1000).toFixed(1)}s（点击打开席位控制）`;
     }
     if (seat.elapsed_ms > 0 && state.systemStatus && !state.pingResults[aid]) {
       renderSystemStatus(state.systemStatus);
@@ -1845,7 +2172,7 @@ function extractSmartPinSnippet(msg, cardEl) {
     const bulletMatch = ln.match(/^(?:[-*•]|\d+[.)、]|[①②③④⑤])\s*(.+)$/);
     if (bulletMatch) {
       const cleanItem = bulletMatch[1].replace(/[*`]/g, "").trim();
-      if (cleanItem.length >= 6 && !NOISE_PIN_PREFIX.test(cleanItem)) {
+      if (cleanItem.length >= 6 && !isClientWhiteboardNoise(cleanItem)) {
         return cleanItem.length > 165 ? `${cleanItem.slice(0, 165)}…` : cleanItem;
       }
     }
@@ -1855,11 +2182,90 @@ function extractSmartPinSnippet(msg, cardEl) {
     .replace(/[#>*`]/g, "")
     .split(/[。！？!\n；;]+/)
     .map((s) => s.replace(/^[-•\d.)、\s]+/, "").trim())
-    .filter((s) => s.length >= 8 && !NOISE_PIN_PREFIX.test(s));
+    .filter((s) => s.length >= 8 && !isClientWhiteboardNoise(s));
 
-  const best = sentences[0] || lines[0] || "";
+  const best = sentences[0] || lines.find((x) => !isClientWhiteboardNoise(x)) || "";
   if (!best) return "";
   return best.length > 165 ? `${best.slice(0, 165)}…` : best;
+}
+
+function computeStepDownEffort(msg) {
+  const aid = msg.speaker;
+  if (!AGENT_NAMES[aid]) return null;
+  const sysInfo = state.systemStatus?.agents?.[aid] || {};
+  const errDetail = String(msg.error_detail || "");
+  const parsedFromDetail = (errDetail.match(/effort=([a-z]+)/i)?.[1] || "").toLowerCase();
+  const curEff = String(
+    msg.failed_effort ||
+      (parsedFromDetail && parsedFromDetail !== "none" ? parsedFromDetail : "") ||
+      sysInfo.effective_discussion_effort ||
+      sysInfo.discussion_effort ||
+      ""
+  )
+    .trim()
+    .toLowerCase();
+
+  const drv = msg.failed_driver || sysInfo.effective_driver || sysInfo.driver || "";
+  const mdl = msg.failed_model || sysInfo.effective_model || sysInfo.model || "";
+  const spec = resolveFrontendEffortSpec(drv, mdl, aid);
+  if (!spec.supportsEffort || !Array.isArray(spec.allowed) || spec.allowed.length === 0) {
+    return null;
+  }
+
+  let target = "";
+  if (curEff === "max" || curEff === "xhigh") {
+    target = spec.allowed.includes("high") ? "high" : spec.allowed.includes("medium") ? "medium" : spec.allowed[0];
+  } else if (curEff === "high") {
+    target = spec.allowed.includes("medium") ? "medium" : spec.allowed.includes("low") ? "low" : "";
+  } else if (curEff === "medium") {
+    target = spec.allowed.includes("low") ? "low" : "";
+  } else if (msg.error_kind === "unsupported_effort_or_model" || msg.error_kind === "timeout") {
+    target = spec.allowed.includes("high") ? "high" : spec.allowed[0];
+  }
+
+  if (!target || target === curEff) return null;
+  return { currentEffort: curEff, nextEffort: target };
+}
+
+async function downgradeAndRetrySeat(msg, nextEffort, btnEl) {
+  if (!msg || !AGENT_NAMES[msg.speaker] || !state.currentSessionId || !nextEffort) return;
+  const origLabel = btnEl ? btnEl.textContent : "";
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.textContent = `正在降为 ${nextEffort} 并重试…`;
+  }
+  state.stickToBottom = true;
+  try {
+    const cfgRes = await apiFetch("/api/config", {
+      method: "POST",
+      body: JSON.stringify({
+        active_session_id: state.currentSessionId,
+        agents: {
+          [msg.speaker]: {
+            discussion_effort: nextEffort,
+            lock_discussion_effort: false,
+          },
+        },
+      }),
+    });
+    if (cfgRes.system) {
+      renderSystemStatus(cfgRes.system);
+    }
+    await apiFetch(`/api/sessions/${state.currentSessionId}/retry`, {
+      method: "POST",
+      body: JSON.stringify({
+        agent_id: msg.speaker,
+        message_id: msg.id,
+      }),
+    });
+    showToast(`${AGENT_NAMES[msg.speaker]} 已自动降为 ${nextEffort} 档并启动单席重试`, "ok", 2400);
+  } catch (err) {
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.textContent = origLabel;
+    }
+    showToast(`降档重试失败：${err.message}`, "err");
+  }
 }
 
 function createOrUpdateMessageCard(msg) {
@@ -1902,8 +2308,9 @@ function createOrUpdateMessageCard(msg) {
   const rawTrimmed = (msg.content || "").trim();
   const cleanContent = stripTrailingStatusTag(msg.content || "");
   const isWaitingFirstToken = Boolean(msg.streaming && !rawTrimmed);
+  const preserveFlash = card.classList.contains("msg-source-flash");
 
-  card.className = `msg-card speaker-${msg.speaker}${msg.error ? " msg-error" : ""}`;
+  card.className = `msg-card speaker-${msg.speaker}${msg.error ? " msg-error" : ""}${preserveFlash ? " msg-source-flash" : ""}`;
   card.querySelector(".msg-avatar-mini").textContent = avatarCharForSpeaker(msg.speaker);
   card.querySelector(".msg-speaker").textContent = msg.speaker_name || msg.speaker;
 
@@ -1967,16 +2374,18 @@ function createOrUpdateMessageCard(msg) {
     timingEl.textContent = `思考 ${elapsedText}`;
     bodyEl.classList.remove("streaming");
     bodyEl.classList.add("thinking-only");
-    const waitHint =
-      msg.phase_label === "最终决议"
-        ? "正在通盘梳理全量记录并撰写完整决议书…"
-        : msg.phase_label === "执行交付"
-        ? "正在读取工作区并实时执行决议任务…"
-        : "正在深度思考并组织观点…";
+    const liveAct = String(msg.activity || "").trim();
+    const waitHint = liveAct
+      ? `🔍 ${escapeHtml(liveAct)}`
+      : msg.phase_label === "最终决议"
+      ? "正在通盘梳理全量记录并撰写完整决议书…"
+      : msg.phase_label === "执行交付"
+      ? "正在读取工作区并实时执行决议任务…"
+      : "正在深度思考并组织观点…";
     bodyEl.innerHTML =
-      `<div class="thinking-placeholder">` +
+      `<div class="thinking-placeholder${liveAct ? " has-live-act" : ""}">` +
       `<span class="thinking-spinner" aria-hidden="true"></span>` +
-      `<span>${waitHint} <span class="thinking-timer">${elapsedText}</span></span>` +
+      `<span class="thinking-status-wrap"><span class="thinking-activity-text">${waitHint}</span> <span class="thinking-timer">${elapsedText}</span></span>` +
       `</div>`;
   } else {
     if (state.thinkingStartById.delete(msg.id)) {
@@ -1988,10 +2397,15 @@ function createOrUpdateMessageCard(msg) {
     if (msg.error && !msg.streaming) {
       const canRetrySeat = Boolean(AGENT_NAMES[msg.speaker]);
       const rawErrDetail = String(msg.error_detail || "").trim();
+      const downgradeInfo = canRetrySeat ? computeStepDownEffort(msg) : null;
+      const downgradeBtnHtml = downgradeInfo
+        ? `<button type="button" class="msg-downgrade-retry-btn" data-msg-act="downgrade-retry" data-next-effort="${escapeHtml(downgradeInfo.nextEffort)}" title="将 ${escapeHtml(AGENT_NAMES[msg.speaker])} 讨论档位从 ${escapeHtml(downgradeInfo.currentEffort || "高档")} 调降至 ${escapeHtml(downgradeInfo.nextEffort)} 并立即补发">⚡ 降为 ${escapeHtml(downgradeInfo.nextEffort)} 并单席重试</button>`
+        : "";
       const actionBtns = canRetrySeat
         ? `<div class="msg-error-actions">` +
-          `<button type="button" class="msg-retry-seat-btn" data-msg-act="retry-seat" title="单独重新调用 ${escapeHtml(AGENT_NAMES[msg.speaker])} 补发本轮发言">↻ 单席重试</button>` +
-          `<button type="button" class="msg-open-cfg-btn" data-msg-act="open-settings">检查模型与档位</button>` +
+          downgradeBtnHtml +
+          `<button type="button" class="msg-retry-seat-btn" data-msg-act="retry-seat" title="保持当前档位单独重新调用 ${escapeHtml(AGENT_NAMES[msg.speaker])} 补发本轮发言">↻ 原档重试</button>` +
+          `<button type="button" class="msg-open-cfg-btn" data-msg-act="open-settings">检查配置</button>` +
           `</div>`
         : "";
       const detailBlock = rawErrDetail
@@ -2045,8 +2459,164 @@ function bindAutoGrowTextarea(ta) {
   requestAnimationFrame(resize);
 }
 
-function renderWhiteboard(wb, forceRender = false) {
-  if (!wb) return;
+function hashShortClient(str) {
+  let h = 2166136261;
+  const s = String(str || "");
+  for (let i = 0; i < s.length; i += 1) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(16).padStart(8, "0");
+}
+
+function normalizeWhiteboardClient(wb) {
+  if (!wb || typeof wb !== "object") {
+    return { items: [], chair_constraints: [], wb_version: 1 };
+  }
+  if (Array.isArray(wb.items)) {
+    wb.items = wb.items.filter((it) => {
+      if (!it || typeof it !== "object") return false;
+      const txt = String(it.text || "").trim();
+      if (!txt) return false;
+      if (!it.pinned && !it.adopted && isClientWhiteboardNoise(txt)) return false;
+      return true;
+    });
+    return wb;
+  }
+  const migrated = [];
+  const seen = new Set();
+  const bucketMap = [
+    ["carbon_plan", "carbon"],
+    ["grok_risks", "grok"],
+    ["astra_actions", "astra"],
+  ];
+  bucketMap.forEach(([bkey, seat]) => {
+    const arr = Array.isArray(wb[bkey]) ? wb[bkey] : [];
+    arr.forEach((rawTxt, idx) => {
+      const txt = String(rawTxt || "").trim();
+      if (!txt || isClientWhiteboardNoise(txt)) return;
+      const norm = normalizeCompareText(txt);
+      if (!norm || seen.has(norm)) return;
+      seen.add(norm);
+      migrated.push({
+        id: `wb_${seat}_${idx}_${hashShortClient(`${seat}:${idx}:${norm}`)}`,
+        text: txt,
+        bucket: bkey,
+        source_seat: seat,
+        source_msg_id: "",
+        pinned: false,
+        adopted: false,
+        version: 1,
+      });
+    });
+  });
+  wb.items = migrated;
+  return wb;
+}
+
+function scrollToSourceMessage(sourceMsgId, sourceSeat, snippetText = "") {
+  let targetId = String(sourceMsgId || "").trim();
+  if (!targetId || !document.getElementById(`msg-${targetId}`)) {
+    const normNeedle = normalizeCompareText(snippetText).slice(0, 12);
+    const candidates = Array.from(state.messagesById.values())
+      .filter((m) => m && m.speaker === sourceSeat && m.id)
+      .reverse();
+    const exact = normNeedle
+      ? candidates.find((m) => normalizeCompareText(m.content || "").includes(normNeedle))
+      : null;
+    const picked = exact || candidates[0];
+    targetId = picked ? picked.id : "";
+  }
+
+  if (!targetId) {
+    showToast("未找到对应的左侧发言卡片", "info", 1600);
+    return;
+  }
+
+  const msgObj = state.messagesById.get(targetId);
+  let card = document.getElementById(`msg-${targetId}`);
+  if (!card) {
+    showToast("对应发言不在当前视图中", "info", 1600);
+    return;
+  }
+
+  if (card.classList.contains("is-collapsed") && msgObj) {
+    state.msgCollapseState.set(targetId, false);
+    createOrUpdateMessageCard(msgObj);
+    card = document.getElementById(`msg-${targetId}`);
+  }
+
+  state.stickToBottom = false;
+  document.querySelectorAll(".msg-card.msg-source-flash").forEach((n) => {
+    n.classList.remove("msg-source-flash");
+  });
+  card.scrollIntoView({ behavior: "smooth", block: "center" });
+  card.classList.add("msg-source-flash");
+  if (sourceHighlightTimer) clearTimeout(sourceHighlightTimer);
+  sourceHighlightTimer = setTimeout(() => {
+    card?.classList.remove("msg-source-flash");
+    sourceHighlightTimer = 0;
+  }, 1900);
+}
+
+function renderWhiteboardConflictBanner() {
+  const banner = el("wbConflictBanner");
+  if (!banner) return;
+  const c = state.wbConflictState;
+  if (!c || !c.message) {
+    banner.classList.add("hidden");
+    banner.innerHTML = "";
+    return;
+  }
+  const canForceSave = Boolean(c.itemId && c.draftText && c.latestVersion);
+  banner.innerHTML = `
+    <div class="wb-conflict-text">⚠️ ${escapeHtml(c.message)}</div>
+    <div class="wb-conflict-actions">
+      ${
+        canForceSave
+          ? `<button type="button" class="wb-conflict-btn primary" data-wb-conflict-act="force-save">保留草稿覆盖保存</button>`
+          : ""
+      }
+      <button type="button" class="wb-conflict-btn" data-wb-conflict-act="dismiss">知道了</button>
+    </div>
+  `;
+  banner.classList.remove("hidden");
+}
+
+async function postWhiteboardMutation(payload) {
+  if (!state.currentSessionId) return null;
+  const res = await apiFetch(`/api/sessions/${state.currentSessionId}/whiteboard`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  const wb = res.whiteboard || res;
+  if (wb && wb.conflict) {
+    state.wbConflictState = {
+      message: wb.conflict_message || "检测到并发版本变更，已保护当前草稿",
+      itemId: payload.item_id || "",
+      draftText: payload.text || "",
+      latestVersion: wb.conflict_item?.version || null,
+    };
+    renderWhiteboardConflictBanner();
+    showToast(state.wbConflictState.message, "warn", 3200);
+    return wb;
+  }
+  state.wbConflictState = null;
+  renderWhiteboardConflictBanner();
+  return wb;
+}
+
+function triggerWbBadgePulse() {
+  const cntBadge = el("wbCountBadge");
+  if (!cntBadge) return;
+  cntBadge.classList.remove("badge-pulse");
+  void cntBadge.offsetWidth;
+  cntBadge.classList.add("badge-pulse");
+}
+
+function renderWhiteboard(rawWb, forceRender = false, isInitialSnapshot = false) {
+  if (!rawWb) return;
+  const wb = normalizeWhiteboardClient(rawWb);
   state.whiteboard = wb;
   if (wb.executor_agent && AGENT_NAMES[wb.executor_agent]) {
     state.executorAgent = wb.executor_agent;
@@ -2064,19 +2634,63 @@ function renderWhiteboard(wb, forceRender = false) {
     wb.chair_constraints || []
   );
 
-  const totalItems =
-    dedupedChairEntries.length +
-    (wb.carbon_plan?.length || 0) +
-    (wb.grok_risks?.length || 0) +
-    (wb.astra_actions?.length || 0);
+  const allItems = Array.isArray(wb.items) ? wb.items : [];
+  const confirmedItems = allItems.filter((it) => it.pinned || it.adopted);
+  const unpinnedItems = allItems.filter((it) => !it.pinned && !it.adopted);
+
+  // 计算新增卡片 ID（仅在会话首包加载完成后对新入板条目播放上浮微动效）
+  const newlyAddedIds = new Set();
+  if (!state.wbInitialSeeded || isInitialSnapshot) {
+    state.knownWbIds.clear();
+    allItems.forEach((it) => state.knownWbIds.add(it.id));
+    state.wbInitialSeeded = true;
+  } else {
+    allItems.forEach((it) => {
+      if (!state.knownWbIds.has(it.id)) {
+        newlyAddedIds.add(it.id);
+        state.knownWbIds.add(it.id);
+      }
+    });
+  }
+
+  const totalItems = dedupedChairEntries.length + allItems.length;
   const cntBadge = el("wbCountBadge");
-  if (cntBadge) cntBadge.textContent = String(totalItems);
+  if (cntBadge) {
+    cntBadge.textContent = String(totalItems);
+    if (!isInitialSnapshot && totalItems > state.lastWbTotalCount) {
+      triggerWbBadgePulse();
+    }
+  }
+  state.lastWbTotalCount = totalItems;
 
-  const isInlineEditing = Boolean(
+  if (el("wbConfirmedCount")) {
+    el("wbConfirmedCount").textContent = String(confirmedItems.length);
+  }
+  if (el("wbExcerptCount")) {
+    el("wbExcerptCount").textContent = `${unpinnedItems.length}/${WB_EXCERPT_SOFT_CAP}`;
+  }
+
+  document.querySelectorAll("#wbSeatFilterBar [data-wb-filter]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.wbFilter === state.wbFilterSeat);
+  });
+
+  renderWhiteboardConflictBanner();
+
+  // 若正在编辑某张白板卡片，捕获实时草稿与光标选区，防止 SSE 局部刷新冲掉输入
+  const activeDraft = state.wbEditingDraft;
+  const activeTa =
     document.activeElement && document.activeElement.classList.contains("wb-edit-input")
-  );
+      ? document.activeElement
+      : null;
+  if (activeDraft && activeTa) {
+    activeDraft.draftText = activeTa.value;
+    activeDraft.selStart = activeTa.selectionStart;
+    activeDraft.selEnd = activeTa.selectionEnd;
+  }
 
-  if (!isInlineEditing || forceRender) {
+  // 1. 议题区（若正在编辑议题且非强制重绘则保留输入框）
+  const isEditingTopic = activeDraft?.kind === "topic" && !forceRender;
+  if (!isEditingTopic) {
     const topicEl = el("wbTopicText");
     if (topicEl) {
       topicEl.innerHTML = "";
@@ -2086,6 +2700,7 @@ function renderWhiteboard(wb, forceRender = false) {
       topicEl.onclick = wb.topic
         ? () => {
             const origTopic = wb.topic;
+            state.wbEditingDraft = { kind: "topic", origText: origTopic, draftText: origTopic };
             topicEl.onclick = null;
             topicEl.innerHTML = "";
             const ta = document.createElement("textarea");
@@ -2101,16 +2716,14 @@ function renderWhiteboard(wb, forceRender = false) {
             const finish = async (save) => {
               if (done) return;
               done = true;
+              state.wbEditingDraft = null;
               const nextTopic = ta.value.trim();
               if (!save || !nextTopic || nextTopic === origTopic) {
                 renderWhiteboard(state.whiteboard, true);
                 return;
               }
               try {
-                await apiFetch(`/api/sessions/${state.currentSessionId}/whiteboard`, {
-                  method: "POST",
-                  body: JSON.stringify({ topic: nextTopic }),
-                });
+                await postWhiteboardMutation({ topic: nextTopic });
               } catch (err) {
                 showToast(`更新议题失败：${err.message}`, "err");
                 renderWhiteboard(state.whiteboard, true);
@@ -2131,94 +2744,350 @@ function renderWhiteboard(wb, forceRender = false) {
           }
         : null;
     }
+  }
 
-    const fillEditableList = (ulId, bucketKey, arr, emptyText) => {
-      const ul = el(ulId);
-      if (!ul) return;
-      ul.innerHTML = "";
-      if (!arr || arr.length === 0) {
-        if (emptyText) {
-          ul.classList.add("empty-hint");
-          ul.innerHTML = `<li>${escapeHtml(emptyText)}</li>`;
-        }
-        return;
-      }
-      ul.classList.remove("empty-hint");
-      arr.forEach((rawEntry, idx) => {
-        const item = typeof rawEntry === "object" && rawEntry !== null ? rawEntry.text : rawEntry;
-        const realIdx =
-          typeof rawEntry === "object" && rawEntry !== null && typeof rawEntry.origIndex === "number"
-            ? rawEntry.origIndex
-            : idx;
-        const li = document.createElement("li");
-        li.className = "wb-item-row";
-        li.innerHTML = `
-          <span class="wb-item-bullet">•</span>
-          <span class="wb-item-text" title="点击直接编辑此条要点">${escapeHtml(item)}</span>
-          <button type="button" class="wb-item-del" title="移除此条">✕</button>
-        `;
+  // 2. 主持约束列表（带 expected_text 防并发错位）
+  const isEditingConstraint = activeDraft?.kind === "constraint" && !forceRender;
+  if (!isEditingConstraint) {
+    const chairUl = el("wbChairList");
+    if (chairUl) {
+      chairUl.innerHTML = "";
+      if (dedupedChairEntries.length === 0) {
+        chairUl.classList.add("empty-hint");
+        chairUl.innerHTML = `<li>暂无独立补充约束</li>`;
+      } else {
+        chairUl.classList.remove("empty-hint");
+        dedupedChairEntries.forEach((entry) => {
+          const itemText = entry.text;
+          const realIdx = entry.origIndex;
+          const li = document.createElement("li");
+          li.className = "wb-item-row";
+          li.innerHTML = `
+            <span class="wb-item-bullet">•</span>
+            <span class="wb-item-text" title="点击直接编辑此条约束">${escapeHtml(itemText)}</span>
+            <button type="button" class="wb-item-del" title="移除此条">✕</button>
+          `;
+          li.querySelector(".wb-item-text").addEventListener("click", () => {
+            state.wbEditingDraft = {
+              kind: "constraint",
+              index: realIdx,
+              origText: itemText,
+              draftText: itemText,
+            };
+            li.classList.add("editing");
+            li.innerHTML = `<span class="wb-item-bullet">•</span><textarea class="wb-edit-input" rows="1"></textarea>`;
+            const ta = li.querySelector(".wb-edit-input");
+            ta.value = itemText;
+            bindAutoGrowTextarea(ta);
+            ta.focus();
+            ta.setSelectionRange(ta.value.length, ta.value.length);
 
-        li.querySelector(".wb-item-text").addEventListener("click", () => {
-          li.classList.add("editing");
-          li.innerHTML = `<span class="wb-item-bullet">•</span><textarea class="wb-edit-input" rows="1"></textarea>`;
-          const ta = li.querySelector(".wb-edit-input");
-          ta.value = item;
-          bindAutoGrowTextarea(ta);
-          ta.focus();
-          ta.setSelectionRange(ta.value.length, ta.value.length);
+            let done = false;
+            const finish = async (save) => {
+              if (done) return;
+              done = true;
+              state.wbEditingDraft = null;
+              const nextVal = ta.value.trim();
+              if (!save || nextVal === itemText) {
+                renderWhiteboard(state.whiteboard, true);
+                return;
+              }
+              try {
+                await postWhiteboardMutation({
+                  op: "update",
+                  bucket: "chair_constraints",
+                  index: realIdx,
+                  expected_text: itemText,
+                  text: nextVal,
+                });
+              } catch (err) {
+                showToast(`编辑失败：${err.message}`, "err");
+                renderWhiteboard(state.whiteboard, true);
+              }
+            };
 
-          let done = false;
-          const finish = async (save) => {
-            if (done) return;
-            done = true;
-            const nextVal = ta.value.trim();
-            if (!save || nextVal === item) {
-              renderWhiteboard(state.whiteboard, true);
-              return;
-            }
+            ta.addEventListener("keydown", (ev) => {
+              if (ev.isComposing || ev.keyCode === 229) return;
+              if (ev.key === "Escape") {
+                ev.preventDefault();
+                finish(false);
+              } else if (ev.key === "Enter" && !ev.shiftKey) {
+                ev.preventDefault();
+                finish(true);
+              }
+            });
+            ta.addEventListener("blur", () => finish(true));
+          });
+
+          li.querySelector(".wb-item-del").addEventListener("click", async (ev) => {
+            ev.stopPropagation();
             try {
-              await apiFetch(`/api/sessions/${state.currentSessionId}/whiteboard`, {
-                method: "POST",
-                body: JSON.stringify({ op: "update", bucket: bucketKey, index: realIdx, text: nextVal }),
+              await postWhiteboardMutation({
+                op: "remove",
+                bucket: "chair_constraints",
+                index: realIdx,
+                expected_text: itemText,
               });
             } catch (err) {
-              showToast(`编辑失败：${err.message}`, "err");
-              renderWhiteboard(state.whiteboard, true);
-            }
-          };
-
-          ta.addEventListener("keydown", (ev) => {
-            if (ev.isComposing || ev.keyCode === 229) return;
-            if (ev.key === "Escape") {
-              ev.preventDefault();
-              finish(false);
-            } else if (ev.key === "Enter" && !ev.shiftKey) {
-              ev.preventDefault();
-              finish(true);
+              showToast(`移除失败：${err.message}`, "err");
             }
           });
-          ta.addEventListener("blur", () => finish(true));
+          chairUl.appendChild(li);
         });
+      }
+    }
+  }
 
-        li.querySelector(".wb-item-del").addEventListener("click", async (ev) => {
-          ev.stopPropagation();
-          try {
-            await apiFetch(`/api/sessions/${state.currentSessionId}/whiteboard`, {
-              method: "POST",
-              body: JSON.stringify({ op: "remove", bucket: bucketKey, index: realIdx }),
-            });
-          } catch (err) {
-            showToast(`移除失败：${err.message}`, "err");
-          }
-        });
-        ul.appendChild(li);
-      });
+  // 3. 结构化白板卡片渲染器（支持置顶 📌、勾选采纳 ☑、来源徽章回跳、版本号校验与编辑态草稿保护）
+  const openInlineItemEditor = (liNode, itemObj, initialDraft = null) => {
+    const startText = initialDraft ? initialDraft.draftText : itemObj.text;
+    const expVer = initialDraft ? initialDraft.expectedVersion : itemObj.version || 1;
+    const origText = initialDraft ? initialDraft.origText : itemObj.text;
+
+    state.wbEditingDraft = {
+      kind: "item",
+      itemId: itemObj.id,
+      expectedVersion: expVer,
+      origText,
+      draftText: startText,
+      selStart: initialDraft?.selStart ?? startText.length,
+      selEnd: initialDraft?.selEnd ?? startText.length,
     };
 
-    fillEditableList("wbChairList", "chair_constraints", dedupedChairEntries, "暂无独立补充约束");
-    fillEditableList("wbCarbonList", "carbon_plan", wb.carbon_plan, "待讨论生成");
-    fillEditableList("wbGrokList", "grok_risks", wb.grok_risks, "待讨论生成");
-    fillEditableList("wbAstraList", "astra_actions", wb.astra_actions, "待讨论生成");
+    if (itemObj.version && itemObj.version !== expVer && itemObj.text !== origText) {
+      state.wbConflictState = {
+        message: "该卡片后台已有新版本，您的编辑草稿已完整保护",
+        itemId: itemObj.id,
+        draftText: startText,
+        latestVersion: itemObj.version,
+      };
+      renderWhiteboardConflictBanner();
+    }
+
+    liNode.className = "wb-pool-item editing";
+    liNode.innerHTML = `
+      <div class="wb-edit-box">
+        <textarea class="wb-edit-input" data-edit-item-id="${escapeHtml(itemObj.id)}" rows="2"></textarea>
+        <div class="wb-edit-toolbar">
+          <span class="wb-edit-ver">v${escapeHtml(String(expVer))} · Enter 保存 / Esc 取消</span>
+          <div class="wb-edit-btns">
+            <button type="button" class="wb-edit-cancel-btn">取消</button>
+            <button type="button" class="wb-edit-save-btn">保存</button>
+          </div>
+        </div>
+      </div>
+    `;
+    const ta = liNode.querySelector(".wb-edit-input");
+    ta.value = startText;
+    bindAutoGrowTextarea(ta);
+    ta.addEventListener("input", () => {
+      if (state.wbEditingDraft?.itemId === itemObj.id) {
+        state.wbEditingDraft.draftText = ta.value;
+        state.wbEditingDraft.selStart = ta.selectionStart;
+        state.wbEditingDraft.selEnd = ta.selectionEnd;
+      }
+    });
+
+    let finished = false;
+    const commitEdit = async (shouldSave) => {
+      if (finished) return;
+      finished = true;
+      const nextVal = ta.value.trim();
+      if (!shouldSave || nextVal === origText) {
+        state.wbEditingDraft = null;
+        renderWhiteboard(state.whiteboard, true);
+        return;
+      }
+      try {
+        const resWb = await postWhiteboardMutation({
+          op: "update",
+          item_id: itemObj.id,
+          expected_version: expVer,
+          text: nextVal,
+        });
+        if (resWb && resWb.conflict) {
+          // 发生版本冲突：保持草稿不丢失，更新冲突横幅供用户确认覆盖
+          finished = false;
+          if (state.wbConflictState) {
+            state.wbConflictState.draftText = nextVal;
+          }
+          renderWhiteboardConflictBanner();
+          return;
+        }
+        state.wbEditingDraft = null;
+      } catch (err) {
+        finished = false;
+        showToast(`保存失败：${err.message}`, "err");
+      }
+    };
+
+    liNode.querySelector(".wb-edit-cancel-btn").addEventListener("mousedown", (ev) => {
+      ev.preventDefault();
+      commitEdit(false);
+    });
+    liNode.querySelector(".wb-edit-save-btn").addEventListener("mousedown", (ev) => {
+      ev.preventDefault();
+      commitEdit(true);
+    });
+    ta.addEventListener("keydown", (ev) => {
+      if (ev.isComposing || ev.keyCode === 229) return;
+      if (ev.key === "Escape") {
+        ev.preventDefault();
+        commitEdit(false);
+      } else if (ev.key === "Enter" && !ev.shiftKey) {
+        ev.preventDefault();
+        commitEdit(true);
+      }
+    });
+
+    requestAnimationFrame(() => {
+      ta.focus();
+      const s0 = Math.min(ta.value.length, state.wbEditingDraft?.selStart ?? ta.value.length);
+      const s1 = Math.min(ta.value.length, state.wbEditingDraft?.selEnd ?? ta.value.length);
+      ta.setSelectionRange(s0, s1);
+    });
+  };
+
+  const renderCardPoolList = (ulId, itemsArr, emptyTipText) => {
+    const ul = el(ulId);
+    if (!ul) return;
+    ul.innerHTML = "";
+    if (!itemsArr || itemsArr.length === 0) {
+      ul.classList.add("empty-hint");
+      ul.innerHTML = `<li class="wb-empty-tip">${escapeHtml(emptyTipText)}</li>`;
+      return;
+    }
+    ul.classList.remove("empty-hint");
+
+    itemsArr.forEach((it) => {
+      const li = document.createElement("li");
+      if (!forceRender && activeDraft?.kind === "item" && activeDraft.itemId === it.id) {
+        ul.appendChild(li);
+        openInlineItemEditor(li, it, activeDraft);
+        return;
+      }
+
+      const seatKey = AGENT_NAMES[it.source_seat] ? it.source_seat : "chair";
+      const seatLabel = AGENT_NAMES[seatKey] || "主持";
+      const seatInitial = avatarCharForSpeaker(seatKey);
+      const isConfirmed = Boolean(it.pinned || it.adopted);
+      const enterCls = newlyAddedIds.has(it.id) ? " wb-card-enter" : "";
+
+      li.className = `wb-pool-item${isConfirmed ? " is-confirmed" : ""}${it.pinned ? " is-pinned" : ""}${enterCls}`;
+      li.dataset.wbId = it.id;
+
+      li.innerHTML = `
+        <div class="wb-pool-main">
+          <button type="button" class="wb-adopt-check ${it.adopted ? "checked" : ""}" title="${it.adopted ? "取消采纳标记" : "勾选采纳为共识决策（优先注入后续 Prompt）"}" aria-label="采纳开关">
+            ${it.adopted ? "✓" : ""}
+          </button>
+          <div class="wb-pool-text" title="点击行内编辑此卡片（带版本号防冲突保护）">${escapeHtml(it.text)}</div>
+        </div>
+        <div class="wb-pool-meta">
+          <button type="button" class="wb-seat-mini-badge badge-seat-${escapeHtml(seatKey)}" title="点击定位并高亮左侧 ${escapeHtml(seatLabel)} 对应原发言">
+            <span class="mini-seat-dot">${escapeHtml(seatInitial)}</span>
+            <span>${escapeHtml(seatLabel)}</span>
+          </button>
+          <div class="wb-pool-actions">
+            <button type="button" class="wb-card-act pin-btn ${it.pinned ? "active" : ""}" title="${it.pinned ? "取消置顶" : "一键置顶至已确认共识（永不自动淘汰）"}">📌</button>
+            <button type="button" class="wb-card-act edit-btn" title="编辑内容">✎</button>
+            <button type="button" class="wb-card-act del-btn" title="删除此条">✕</button>
+          </div>
+        </div>
+      `;
+
+      li.querySelector(".wb-adopt-check").addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        try {
+          await postWhiteboardMutation({ op: "toggle_adopt", item_id: it.id });
+        } catch (err) {
+          showToast(err.message, "err");
+        }
+      });
+
+      li.querySelector(".wb-card-act.pin-btn").addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        try {
+          await postWhiteboardMutation({ op: "toggle_pin", item_id: it.id });
+        } catch (err) {
+          showToast(err.message, "err");
+        }
+      });
+
+      li.querySelector(".wb-seat-mini-badge").addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        scrollToSourceMessage(it.source_msg_id, seatKey, it.text);
+      });
+
+      li.querySelector(".wb-pool-text").addEventListener("click", () => {
+        openInlineItemEditor(li, it);
+      });
+      li.querySelector(".wb-card-act.edit-btn").addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        openInlineItemEditor(li, it);
+      });
+
+      li.querySelector(".wb-card-act.del-btn").addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        try {
+          await postWhiteboardMutation({
+            op: "remove",
+            item_id: it.id,
+            expected_version: it.version || 1,
+          });
+        } catch (err) {
+          showToast(`移除失败：${err.message}`, "err");
+        }
+      });
+
+      ul.appendChild(li);
+    });
+  };
+
+  renderCardPoolList(
+    "wbConsensusList",
+    confirmedItems,
+    "点击下方摘录的 📌 置顶或勾选左侧采纳框，即可沉淀为已确认共识"
+  );
+
+  const filteredExcerpts =
+    state.wbFilterSeat === "all"
+      ? unpinnedItems
+      : unpinnedItems.filter((it) => it.source_seat === state.wbFilterSeat);
+
+  // 若正在编辑的条目位于较早折叠区间，临时保持展开以防编辑框隐藏
+  const editingInHiddenSlice =
+    activeDraft?.kind === "item" &&
+    filteredExcerpts.length > WB_EXCERPT_COMPACT_LIMIT &&
+    filteredExcerpts
+      .slice(0, filteredExcerpts.length - WB_EXCERPT_COMPACT_LIMIT)
+      .some((it) => it.id === activeDraft.itemId);
+
+  const showAllExcerpts = state.wbExcerptsExpanded || editingInHiddenSlice;
+  const visibleExcerpts =
+    !showAllExcerpts && filteredExcerpts.length > WB_EXCERPT_COMPACT_LIMIT
+      ? filteredExcerpts.slice(-WB_EXCERPT_COMPACT_LIMIT)
+      : filteredExcerpts;
+
+  renderCardPoolList(
+    "wbExcerptList",
+    visibleExcerpts,
+    state.wbFilterSeat === "all"
+      ? "讨论开始后将自动过滤工具独白噪音并提炼高信噪比摘录卡片"
+      : `当前暂无来自 ${AGENT_NAMES[state.wbFilterSeat] || state.wbFilterSeat} 的未置顶摘录`
+  );
+
+  const expandBtn = el("wbToggleExpandBtn");
+  if (expandBtn) {
+    if (filteredExcerpts.length > WB_EXCERPT_COMPACT_LIMIT) {
+      expandBtn.classList.remove("hidden");
+      const hiddenCount = filteredExcerpts.length - WB_EXCERPT_COMPACT_LIMIT;
+      expandBtn.textContent = showAllExcerpts
+        ? `收起为紧凑视图（默认展示最新 ${WB_EXCERPT_COMPACT_LIMIT} 条）`
+        : `展开查看全部 ${filteredExcerpts.length} 条摘录（已紧凑折叠较早 ${hiddenCount} 条）`;
+    } else {
+      expandBtn.classList.add("hidden");
+    }
   }
 
   const termLogs = el("astraTermLogs");
@@ -2292,6 +3161,11 @@ function connectToSession(sessionId) {
   state.msgCollapseState.clear();
   state.thinkingStartById.clear();
   state.seatThinkingStart.clear();
+  state.wbEditingDraft = null;
+  state.wbConflictState = null;
+  state.knownWbIds.clear();
+  state.wbInitialSeeded = false;
+  state.lastWbTotalCount = 0;
   state.execStartTs = 0;
   state.execStreamingBuffer = "";
   stopThinkingTickerIfIdle();
@@ -2360,7 +3234,7 @@ function connectToSession(sessionId) {
       state.messagesById.set(m.id, m);
       createOrUpdateMessageCard(m);
     });
-    renderWhiteboard(snap.whiteboard, true);
+    renderWhiteboard(snap.whiteboard, true, true);
     if (!state.isBusy) {
       resetClientBusyTimersIfIdle();
     }
@@ -2373,6 +3247,8 @@ function connectToSession(sessionId) {
     state.messagesById.clear();
     state.msgCollapseState.clear();
     state.thinkingStartById.clear();
+    state.knownWbIds.clear();
+    state.lastWbTotalCount = 0;
     el("chatStream")?.querySelectorAll(".msg-card").forEach((n) => n.remove());
   });
 
@@ -2443,10 +3319,27 @@ function connectToSession(sessionId) {
     createOrUpdateMessageCard(msg);
   });
 
+  es.addEventListener("msg_activity", (e) => {
+    const { id, activity } = JSON.parse(e.data);
+    const msg = state.messagesById.get(id);
+    if (!msg || !msg.streaming || (msg.content || "").trim()) return;
+    msg.activity = activity || "";
+    const card = document.getElementById(`msg-${id}`);
+    const actNode = card?.querySelector(".thinking-activity-text");
+    const placeholder = card?.querySelector(".thinking-placeholder");
+    if (actNode && activity) {
+      actNode.textContent = `🔍 ${activity}`;
+      placeholder?.classList.add("has-live-act");
+    } else {
+      createOrUpdateMessageCard(msg);
+    }
+  });
+
   es.addEventListener("msg_delta", (e) => {
     const { id, delta } = JSON.parse(e.data);
     const msg = state.messagesById.get(id);
     if (!msg) return;
+    msg.activity = "";
     msg.content += delta;
     pendingDeltaIds.add(id);
     if (!deltaRafId) {
@@ -2577,12 +3470,17 @@ function switchWorkbenchTab(tabName) {
 }
 
 function buildMinutesMarkdown() {
-  const wb = state.whiteboard || {};
+  const wb = normalizeWhiteboardClient(state.whiteboard || {});
   const rawWs = state.sessionWorkspaceDir || state.systemStatus?.workspace_dir || "";
   const shownWs = isUnboundWorkspace(rawWs) ? "未绑定本地项目" : rawWs;
-  const cSpec = getPersonaSpec(state.seatPersonas.carbon, "carbon");
-  const gSpec = getPersonaSpec(state.seatPersonas.grok, "grok");
-  const aSpec = getPersonaSpec(state.seatPersonas.astra, "astra");
+  const allItems = Array.isArray(wb.items) ? wb.items : [];
+  const confirmed = allItems.filter((it) => it.pinned || it.adopted);
+  const excerpts = allItems.filter((it) => !it.pinned && !it.adopted);
+  const formatWbLine = (it) => {
+    const seatName = AGENT_NAMES[it.source_seat] || "主持";
+    const flag = it.pinned ? "📌 " : it.adopted ? "☑ " : "";
+    return `- ${flag}[${seatName}] ${it.text}`;
+  };
 
   const lines = [
     `# AI圆桌会议纪要：${wb.topic || "未命名会议"}`,
@@ -2592,19 +3490,16 @@ function buildMinutesMarkdown() {
     `- **参会席位**：${state.enabledAgents.map((a) => `${AGENT_NAMES[a]} (${getPersonaSpec(state.seatPersonas[a], a).label})`).join("、")}`,
     `- **导出时间**：${new Date().toLocaleString()}`,
     ``,
-    `## 一、主持要求与约束`,
-    ...(wb.chair_constraints?.length ? wb.chair_constraints.map((x) => `- ${x}`) : ["- 无"]),
+    `## 一、议题与主持约束`,
+    ...(wb.chair_constraints?.length ? wb.chair_constraints.map((x) => `- ${x}`) : ["- 无补充约束"]),
     ``,
-    `## 二、Carbon · ${cSpec.wb_title}`,
-    ...(wb.carbon_plan?.length ? wb.carbon_plan.map((x) => `- ${x}`) : ["- 无"]),
+    `## 二、已确认共识`,
+    ...(confirmed.length ? confirmed.map(formatWbLine) : ["- 暂无已置顶或勾选采纳的确认共识"]),
     ``,
-    `## 三、Grok · ${gSpec.wb_title}`,
-    ...(wb.grok_risks?.length ? wb.grok_risks.map((x) => `- ${x}`) : ["- 无"]),
+    `## 三、讨论摘录`,
+    ...(excerpts.length ? excerpts.map(formatWbLine) : ["- 无"]),
     ``,
-    `## 四、Astra · ${aSpec.wb_title}`,
-    ...(wb.astra_actions?.length ? wb.astra_actions.map((x) => `- ${x}`) : ["- 无"]),
-    ``,
-    `## 五、会议完整发言记录`,
+    `## 四、会议完整发言记录`,
     ...Array.from(state.messagesById.values()).map(
       (m) => `### [${m.timestamp}] ${m.speaker_name}（${m.phase_label}）\n${stripTrailingStatusTag(m.content)}\n`
     ),
@@ -2677,6 +3572,7 @@ function collectModalAgentDrafts() {
       model,
       discussion_effort: spec.supportsEffort ? clampEffortBySpec(rawDiscuss, spec, false) : "",
       execution_effort: spec.supportsEffort ? clampEffortBySpec(rawExec, spec, true) : "",
+      lock_discussion_effort: Boolean(el(`cfg${cap}LockEffort`)?.checked),
     };
   });
   return out;
@@ -2738,6 +3634,12 @@ function openSettingsModal() {
     const rawWs = state.sessionWorkspaceDir || state.systemStatus.workspace_dir || "";
     const wsInput = el("cfgWorkspaceDir");
     if (wsInput) wsInput.value = isUnboundWorkspace(rawWs) ? "" : rawWs;
+    if (el("cfgIdleTimeout")) {
+      el("cfgIdleTimeout").value = String(state.systemStatus.idle_timeout_sec || 90);
+    }
+    if (el("cfgTurnTimeout")) {
+      el("cfgTurnTimeout").value = String(state.systemStatus.turn_timeout_sec || 300);
+    }
     const singleFallback = el("cfgSingleCliFallback");
     if (singleFallback) {
       singleFallback.checked = state.systemStatus.allow_single_cli_fallback !== false;
@@ -2753,6 +3655,7 @@ function openSettingsModal() {
       if (el("cfgCarbonPersona")) el("cfgCarbonPersona").value = state.seatPersonas.carbon || ag.carbon.persona || "planner";
       if (el("cfgCarbonBin")) el("cfgCarbonBin").value = ag.carbon.custom_binary || "";
       if (el("cfgCarbonModel")) el("cfgCarbonModel").value = ag.carbon.model || "";
+      if (el("cfgCarbonLockEffort")) el("cfgCarbonLockEffort").checked = Boolean(ag.carbon.lock_discussion_effort);
       syncModalEffortOptionsForSeat(
         "carbon",
         ag.carbon.effective_discussion_effort ?? ag.carbon.discussion_effort,
@@ -2764,6 +3667,7 @@ function openSettingsModal() {
       if (el("cfgGrokPersona")) el("cfgGrokPersona").value = state.seatPersonas.grok || ag.grok.persona || "red_team";
       if (el("cfgGrokBin")) el("cfgGrokBin").value = ag.grok.custom_binary || "";
       if (el("cfgGrokModel")) el("cfgGrokModel").value = ag.grok.model || "";
+      if (el("cfgGrokLockEffort")) el("cfgGrokLockEffort").checked = Boolean(ag.grok.lock_discussion_effort);
       syncModalEffortOptionsForSeat(
         "grok",
         ag.grok.effective_discussion_effort ?? ag.grok.discussion_effort,
@@ -2775,6 +3679,7 @@ function openSettingsModal() {
       if (el("cfgAstraPersona")) el("cfgAstraPersona").value = state.seatPersonas.astra || ag.astra.persona || "implementer";
       if (el("cfgAstraBin")) el("cfgAstraBin").value = ag.astra.custom_binary || "";
       if (el("cfgAstraModel")) el("cfgAstraModel").value = ag.astra.model || "";
+      if (el("cfgAstraLockEffort")) el("cfgAstraLockEffort").checked = Boolean(ag.astra.lock_discussion_effort);
       syncModalEffortOptionsForSeat(
         "astra",
         ag.astra.effective_discussion_effort ?? ag.astra.discussion_effort,
@@ -2913,6 +3818,41 @@ async function bootstrap() {
     appPop.addEventListener("click", (e) => e.stopPropagation());
   }
 
+  on("personaPopover", "click", (e) => e.stopPropagation());
+
+  on("seatPopoverQuickActions", "click", (e) => {
+    const btn = e.target.closest("[data-seat-pop-act]");
+    const aid = state.activePersonaSeat;
+    if (!btn || !aid) return;
+    e.stopPropagation();
+    const act = btn.dataset.seatPopAct;
+    if (act === "mention") {
+      closePersonaPopover();
+      insertMentionIntoComposer(`@${AGENT_NAMES[aid]} `);
+    } else if (act === "solo") {
+      toggleSoloSeat(aid);
+    } else if (act === "toggle-enable") {
+      toggleSeatParticipation(aid);
+    }
+  });
+
+  on("seatPopoverEffortBox", "click", (e) => {
+    const aid = state.activePersonaSeat;
+    if (!aid) return;
+    const effBtn = e.target.closest("[data-seat-pop-effort]");
+    if (effBtn) {
+      e.stopPropagation();
+      updateSeatEffortQuickly(aid, { discussion_effort: effBtn.dataset.seatPopEffort });
+      return;
+    }
+    const lockBtn = e.target.closest("[data-seat-pop-lock]");
+    if (lockBtn) {
+      e.stopPropagation();
+      const curLocked = Boolean(state.systemStatus?.agents?.[aid]?.lock_discussion_effort);
+      updateSeatEffortQuickly(aid, { lock_discussion_effort: !curLocked });
+    }
+  });
+
   on("personaOptionList", "click", (e) => {
     const opt = e.target.closest("[data-pick-persona]");
     if (opt && state.activePersonaSeat) {
@@ -2923,7 +3863,11 @@ async function bootstrap() {
 
   document.addEventListener("click", (e) => {
     closeAppearancePopover();
-    if (!e.target.closest("#personaPopover") && !e.target.closest("[data-persona-trigger]")) {
+    if (
+      !e.target.closest("#personaPopover") &&
+      !e.target.closest("[data-persona-trigger]") &&
+      !e.target.closest("[data-agent-seat]")
+    ) {
       closePersonaPopover();
     }
     if (!e.target.closest("#atSuggestMenu") && !e.target.closest("#topicInput") && !e.target.closest("#insertFileRefBtn")) {
@@ -2989,7 +3933,27 @@ async function bootstrap() {
   });
 
   on("pickFolderQuickBtn", "click", () => pickWorkspaceFolder(false));
+  on("emptyBindWsBtn", "click", () => pickWorkspaceFolder(false));
   on("browseWorkspaceBtn", "click", () => pickWorkspaceFolder(true));
+
+  on("saveQuickAdvancedBtn", "click", async () => {
+    const idleSec = Math.max(20, Math.min(600, Number(el("quickIdleTimeoutInput")?.value || 90)));
+    const turnSec = Math.max(idleSec, Math.min(1800, Number(el("quickTurnTimeoutInput")?.value || 300)));
+    try {
+      const res = await apiFetch("/api/config", {
+        method: "POST",
+        body: JSON.stringify({
+          active_session_id: state.currentSessionId || "",
+          idle_timeout_sec: idleSec,
+          turn_timeout_sec: turnSec,
+        }),
+      });
+      if (res.system) renderSystemStatus(res.system);
+      showToast(`已应用超时策略：空闲心跳 ${idleSec}s / 单轮上限 ${turnSec}s`, "ok", 2200);
+    } catch (err) {
+      showToast(`保存超时失败：${err.message}`, "err");
+    }
+  });
 
   on("testCliBtn", "click", () => runConnectivityProbe(false, el("testCliBtn")));
   on("modalTestCliBtn", "click", () => runConnectivityProbe(true, el("modalTestCliBtn")));
@@ -3000,85 +3964,23 @@ async function bootstrap() {
     btn.addEventListener("click", () => syncCollabModeUI(btn.dataset.collabOpt));
   });
 
+  document.querySelectorAll("[data-lineup-preset]").forEach((btn) => {
+    btn.addEventListener("click", () => applyLineupPreset(btn.dataset.lineupPreset));
+  });
+
   on("sessionSearchInput", "input", (e) => {
     state.sessionFilter = e.target.value || "";
     renderSessionList(state.sessions);
   });
   on("newSessionBtn", "click", createNewMeetingSession);
 
-  // 圆桌席位卡片交互：切换预设身份 / 一键独奏 / 参会开关 / 点击点名
+  // 精简顶栏席位胶囊：点击统一打开轻量配置浮层（含 @点名 / 单席独奏 / 暂停参会 / 推理档位 / 身份侧重）
   document.querySelectorAll("[data-agent-seat]").forEach((seatCard) => {
     const aid = seatCard.dataset.agentSeat;
     seatCard.addEventListener("click", (e) => {
-      const personaBtn = e.target.closest("[data-persona-trigger]");
-      if (personaBtn) {
-        e.stopPropagation();
-        openPersonaPopover(aid, personaBtn);
-        return;
-      }
-
-      const soloBtn = e.target.closest("[data-seat-solo]");
-      if (soloBtn) {
-        e.stopPropagation();
-        const isAlreadySolo = state.enabledAgents.length === 1 && state.enabledAgents[0] === aid;
-        const nextEnabled = isAlreadySolo ? [...AGENT_ORDER] : [aid];
-        const nextExec = isAlreadySolo ? "astra" : aid;
-        apiFetch(`/api/sessions/${state.currentSessionId}/seats`, {
-          method: "POST",
-          body: JSON.stringify({
-            enabled_agents: nextEnabled,
-            executor_agent: nextExec,
-          }),
-        })
-          .then((res) => {
-            applySeatsResponse(res);
-            showToast(
-              isAlreadySolo
-                ? "已恢复三人多视角圆桌模式"
-                : `已切换为 ${AGENT_NAMES[aid]} 独奏模式（单人包揽设计与落地执行）`,
-              "ok",
-              2200
-            );
-          })
-          .catch((err) => showToast(err.message, "err"));
-        return;
-      }
-
-      const toggleBtn = e.target.closest("[data-seat-toggle]");
-      if (toggleBtn) {
-        e.stopPropagation();
-        const isCurrentlyOn = state.enabledAgents.includes(aid);
-        const nextList = isCurrentlyOn
-          ? state.enabledAgents.filter((x) => x !== aid)
-          : AGENT_ORDER.filter((x) => x === aid || state.enabledAgents.includes(x));
-        if (nextList.length === 0) {
-          showToast("至少需要保留一位参会成员", "warn");
-          return;
-        }
-        apiFetch(`/api/sessions/${state.currentSessionId}/seats`, {
-          method: "POST",
-          body: JSON.stringify({ enabled_agents: nextList }),
-        })
-          .then((res) => {
-            applySeatsResponse(res);
-            showToast(
-              `${AGENT_NAMES[aid]} 已${isCurrentlyOn ? "暂停参会" : "加入参会"}`,
-              "info",
-              1600
-            );
-          })
-          .catch((err) => showToast(err.message, "err"));
-        return;
-      }
-
+      e.stopPropagation();
       shiftAmbientGlowForSpeaker(aid);
-      const sysAgent = state.systemStatus?.agents?.[aid];
-      if (sysAgent && !sysAgent.binary_detected) {
-        openSettingsModal();
-        showToast(`请先配置 ${AGENT_NAMES[aid]} 的 CLI 驱动或路径`, "warn");
-        return;
-      }
-      insertMentionIntoComposer(`@${AGENT_NAMES[aid]} `);
+      openPersonaPopover(aid, seatCard);
     });
   });
 
@@ -3132,6 +4034,8 @@ async function bootstrap() {
         }
       } else if (act === "open-settings") {
         openSettingsModal();
+      } else if (act === "downgrade-retry") {
+        await downgradeAndRetrySeat(msg, actBtn.dataset.nextEffort, actBtn);
       } else if (act === "retry-seat") {
         if (!AGENT_NAMES[msg.speaker] || !state.currentSessionId) return;
         const origTxt = actBtn.textContent;
@@ -3163,15 +4067,15 @@ async function bootstrap() {
         const snippet = extractSmartPinSnippet(msg, card);
         if (!snippet) return;
         try {
-          await apiFetch(`/api/sessions/${state.currentSessionId}/whiteboard`, {
-            method: "POST",
-            body: JSON.stringify({
-              op: "add",
-              bucket: bucketMap[msg.speaker] || "chair_constraints",
-              text: snippet,
-            }),
+          switchWorkbenchTab("whiteboard");
+          await postWhiteboardMutation({
+            op: "add",
+            bucket: bucketMap[msg.speaker] || "chair_constraints",
+            source_seat: AGENT_NAMES[msg.speaker] ? msg.speaker : "chair",
+            source_msg_id: msg.id,
+            text: snippet,
           });
-          showToast("已摘录核心结论至右侧白板（支持划词精准摘录）", "ok", 2200);
+          showToast("已收入右侧结构化白板（支持划词精准摘录，可一键置顶共识）", "ok", 2200);
         } catch (err) {
           showToast(`加入白板失败：${err.message}`, "err");
         }
@@ -3362,6 +4266,46 @@ async function bootstrap() {
     }
   });
 
+  on("wbConflictBanner", "click", async (e) => {
+    const btn = e.target.closest("[data-wb-conflict-act]");
+    if (!btn) return;
+    const act = btn.dataset.wbConflictAct;
+    const c = state.wbConflictState;
+    if (act === "force-save" && c && c.itemId && c.draftText && c.latestVersion) {
+      try {
+        state.wbEditingDraft = null;
+        await postWhiteboardMutation({
+          op: "update",
+          item_id: c.itemId,
+          expected_version: c.latestVersion,
+          text: c.draftText,
+        });
+        state.wbConflictState = null;
+        renderWhiteboardConflictBanner();
+        showToast("已按最新版本号覆盖保存您的编辑草稿", "ok", 2000);
+      } catch (err) {
+        showToast(`覆盖保存失败：${err.message}`, "err");
+      }
+    } else if (act === "dismiss") {
+      state.wbConflictState = null;
+      state.wbEditingDraft = null;
+      renderWhiteboardConflictBanner();
+      renderWhiteboard(state.whiteboard, true);
+    }
+  });
+
+  on("wbSeatFilterBar", "click", (e) => {
+    const pill = e.target.closest("[data-wb-filter]");
+    if (!pill) return;
+    state.wbFilterSeat = pill.dataset.wbFilter || "all";
+    renderWhiteboard(state.whiteboard, true);
+  });
+
+  on("wbToggleExpandBtn", "click", () => {
+    state.wbExcerptsExpanded = !state.wbExcerptsExpanded;
+    renderWhiteboard(state.whiteboard, true);
+  });
+
   document.querySelectorAll("[data-wb-add]").forEach((btn) => {
     const bucket = btn.dataset.wbAdd;
     const wrap = el(`wb-editor-${bucket}`);
@@ -3385,9 +4329,17 @@ async function bootstrap() {
         input.value = "";
         wrap.classList.add("hidden");
         try {
-          await apiFetch(`/api/sessions/${state.currentSessionId}/whiteboard`, {
-            method: "POST",
-            body: JSON.stringify({ op: "add", bucket, text: val }),
+          const defaultSource =
+            bucket === "excerpt" && state.wbFilterSeat && state.wbFilterSeat !== "all"
+              ? state.wbFilterSeat
+              : "chair";
+          await postWhiteboardMutation({
+            op: "add",
+            bucket,
+            source_seat: defaultSource,
+            pinned: bucket === "consensus",
+            adopted: bucket === "consensus",
+            text: val,
           });
         } catch (err) {
           showToast(err.message, "err");
@@ -3617,10 +4569,14 @@ async function bootstrap() {
 
   on("saveSettingsBtn", "click", async () => {
     const newWsDir = (el("cfgWorkspaceDir")?.value || "").trim();
+    const idleSec = Math.max(20, Math.min(600, Number(el("cfgIdleTimeout")?.value || 90)));
+    const turnSec = Math.max(idleSec, Math.min(1800, Number(el("cfgTurnTimeout")?.value || 300)));
     const agentsDraft = collectModalAgentDrafts();
     const payload = {
       active_session_id: state.currentSessionId || "",
       workspace_dir: newWsDir,
+      idle_timeout_sec: idleSec,
+      turn_timeout_sec: turnSec,
       allow_single_cli_fallback: Boolean(el("cfgSingleCliFallback")?.checked),
       agents: agentsDraft,
     };
