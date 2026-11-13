@@ -1,0 +1,1472 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-palette="pearl" data-fontsize="comfort" data-density="compact" data-bgstyle="ribbon">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI圆桌 — 浅色流线型不对称 UI 交互对比预览</title>
+  <style>
+    /* ==================== 1. 四套浅色主题色系变量 ==================== */
+    :root,
+    [data-palette="pearl"] {
+      --palette-name: "珍珠极昼 · 灵动流体";
+      --bg-canvas: #f5f4fb;
+      --bg-island: rgba(255, 255, 255, 0.78);
+      --bg-island-strong: rgba(255, 255, 255, 0.92);
+      --bg-subtle: rgba(99, 102, 241, 0.055);
+      --bg-hover: rgba(99, 102, 241, 0.09);
+      --bg-code: #eef0f8;
+      --border-glass: rgba(255, 255, 255, 0.85);
+      --border-hairline: rgba(24, 24, 27, 0.075);
+      --border-strong: rgba(99, 102, 241, 0.22);
+
+      --text-main: #18181b;
+      --text-sub: #4b5563;
+      --text-muted: #71717a;
+
+      --accent: #5b5bd6;
+      --accent-soft: rgba(91, 91, 214, 0.11);
+
+      --carbon-c: #3b63f6;
+      --carbon-soft: rgba(59, 99, 246, 0.1);
+      --grok-c: #d96b18;
+      --grok-soft: rgba(217, 107, 24, 0.1);
+      --astra-c: #0d9470;
+      --astra-soft: rgba(13, 148, 112, 0.1);
+      --chair-c: #7c3aed;
+      --chair-soft: rgba(124, 58, 237, 0.085);
+
+      --ribbon-a: #c7d2fe;
+      --ribbon-b: #a5f3fc;
+      --ribbon-c: #fbcfe8;
+      --shadow-island: 0 18px 42px -12px rgba(49, 46, 129, 0.08), 0 2px 10px rgba(15, 23, 42, 0.03);
+      --shadow-card: 0 8px 24px -8px rgba(49, 46, 129, 0.065), 0 1px 3px rgba(15, 23, 42, 0.03);
+    }
+
+    [data-palette="alabaster"] {
+      --palette-name: "暖砂羊皮纸 · 人文护眼";
+      --bg-canvas: #faf6ef;
+      --bg-island: rgba(255, 253, 248, 0.82);
+      --bg-island-strong: rgba(255, 253, 250, 0.95);
+      --bg-subtle: rgba(180, 83, 9, 0.05);
+      --bg-hover: rgba(180, 83, 9, 0.09);
+      --bg-code: #f2ece1;
+      --border-glass: rgba(255, 255, 255, 0.88);
+      --border-hairline: rgba(41, 37, 36, 0.085);
+      --border-strong: rgba(194, 65, 12, 0.22);
+
+      --text-main: #1c1917;
+      --text-sub: #57534e;
+      --text-muted: #78716c;
+
+      --accent: #b45309;
+      --accent-soft: rgba(180, 83, 9, 0.11);
+
+      --carbon-c: #3749b8;
+      --carbon-soft: rgba(55, 73, 184, 0.09);
+      --grok-c: #c2410c;
+      --grok-soft: rgba(194, 65, 12, 0.095);
+      --astra-c: #0f766e;
+      --astra-soft: rgba(15, 118, 110, 0.095);
+      --chair-c: #9a3412;
+      --chair-soft: rgba(154, 52, 18, 0.08);
+
+      --ribbon-a: #fde68a;
+      --ribbon-b: #fed7aa;
+      --ribbon-c: #bbf7d0;
+      --shadow-island: 0 18px 40px -12px rgba(120, 53, 15, 0.075), 0 2px 8px rgba(28, 25, 23, 0.03);
+      --shadow-card: 0 8px 22px -8px rgba(120, 53, 15, 0.06), 0 1px 3px rgba(28, 25, 23, 0.03);
+    }
+
+    [data-palette="glacier"] {
+      --palette-name: "晨雾冰川 · 冷调科技";
+      --bg-canvas: #f1f6fc;
+      --bg-island: rgba(255, 255, 255, 0.8);
+      --bg-island-strong: rgba(255, 255, 255, 0.94);
+      --bg-subtle: rgba(37, 99, 235, 0.05);
+      --bg-hover: rgba(37, 99, 235, 0.09);
+      --bg-code: #e8eff8;
+      --border-glass: rgba(255, 255, 255, 0.9);
+      --border-hairline: rgba(15, 23, 42, 0.08);
+      --border-strong: rgba(37, 99, 235, 0.22);
+
+      --text-main: #0f172a;
+      --text-sub: #475569;
+      --text-muted: #64748b;
+
+      --accent: #2563eb;
+      --accent-soft: rgba(37, 99, 235, 0.1);
+
+      --carbon-c: #2563eb;
+      --carbon-soft: rgba(37, 99, 235, 0.095);
+      --grok-c: #d97706;
+      --grok-soft: rgba(217, 119, 6, 0.095);
+      --astra-c: #0d9488;
+      --astra-soft: rgba(13, 148, 136, 0.095);
+      --chair-c: #4f46e5;
+      --chair-soft: rgba(79, 70, 229, 0.085);
+
+      --ribbon-a: #bae6fd;
+      --ribbon-b: #bfdbfe;
+      --ribbon-c: #99f6e4;
+      --shadow-island: 0 18px 42px -12px rgba(15, 23, 42, 0.075), 0 2px 10px rgba(15, 23, 42, 0.03);
+      --shadow-card: 0 8px 22px -8px rgba(15, 23, 42, 0.055), 0 1px 3px rgba(15, 23, 42, 0.025);
+    }
+
+    [data-palette="sage"] {
+      --palette-name: "鼠尾草微风 · 自然有机";
+      --bg-canvas: #eff5f2;
+      --bg-island: rgba(251, 254, 252, 0.8);
+      --bg-island-strong: rgba(255, 255, 255, 0.93);
+      --bg-subtle: rgba(5, 150, 105, 0.055);
+      --bg-hover: rgba(5, 150, 105, 0.095);
+      --bg-code: #e6efeb;
+      --border-glass: rgba(255, 255, 255, 0.88);
+      --border-hairline: rgba(20, 40, 32, 0.08);
+      --border-strong: rgba(5, 150, 105, 0.22);
+
+      --text-main: #16241e;
+      --text-sub: #43574f;
+      --text-muted: #687d74;
+
+      --accent: #0d8a63;
+      --accent-soft: rgba(13, 138, 99, 0.11);
+
+      --carbon-c: #0284c7;
+      --carbon-soft: rgba(2, 132, 199, 0.095);
+      --grok-c: #b45309;
+      --grok-soft: rgba(180, 83, 9, 0.095);
+      --astra-c: #059669;
+      --astra-soft: rgba(5, 150, 105, 0.1);
+      --chair-c: #4338ca;
+      --chair-soft: rgba(67, 56, 202, 0.08);
+
+      --ribbon-a: #a7f3d0;
+      --ribbon-b: #bae6fd;
+      --ribbon-c: #fde68a;
+      --shadow-island: 0 18px 42px -12px rgba(6, 78, 59, 0.075), 0 2px 10px rgba(6, 78, 59, 0.03);
+      --shadow-card: 0 8px 22px -8px rgba(6, 78, 59, 0.055), 0 1px 3px rgba(6, 78, 59, 0.025);
+    }
+
+    /* ==================== 2. 字号阶梯档位 ==================== */
+    [data-fontsize="standard"] {
+      --fs-body: 14px;
+      --fs-title: 15.5px;
+      --fs-card-head: 13.8px;
+      --fs-wb: 13px;
+      --fs-meta: 11.8px;
+    }
+    [data-fontsize="comfort"] {
+      --fs-body: 15.5px;
+      --fs-title: 17px;
+      --fs-card-head: 15px;
+      --fs-wb: 14px;
+      --fs-meta: 12.5px;
+    }
+    [data-fontsize="large"] {
+      --fs-body: 17px;
+      --fs-title: 18.5px;
+      --fs-card-head: 16.2px;
+      --fs-wb: 15px;
+      --fs-meta: 13.2px;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", sans-serif;
+      background: var(--bg-canvas);
+      color: var(--text-main);
+      height: 100vh;
+      width: 100vw;
+      overflow: hidden;
+      font-size: var(--fs-body);
+      line-height: 1.68;
+      -webkit-font-smoothing: antialiased;
+      transition: background 0.45s ease, color 0.3s ease;
+      position: relative;
+    }
+
+    /* ==================== 3. 流线型不对称背景层 ==================== */
+    .ambient-stage-bg {
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      pointer-events: none;
+      overflow: hidden;
+    }
+
+    .ambient-orb {
+      position: absolute;
+      border-radius: 50%;
+      filter: blur(72px);
+      opacity: 0.55;
+      transition: background 0.8s ease, transform 1.2s ease;
+    }
+
+    .orb-1 {
+      width: 56vw;
+      height: 44vh;
+      top: -12vh;
+      left: -8vw;
+      background: var(--ribbon-a);
+      transform: rotate(-12deg);
+    }
+
+    .orb-2 {
+      width: 48vw;
+      height: 50vh;
+      bottom: -16vh;
+      right: 6vw;
+      background: var(--ribbon-b);
+      transform: rotate(18deg);
+    }
+
+    .orb-3 {
+      width: 34vw;
+      height: 34vh;
+      top: 32vh;
+      left: 38vw;
+      background: var(--ribbon-c);
+      opacity: 0.38;
+    }
+
+    .flow-svg {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      opacity: 0.72;
+      transition: opacity 0.4s ease;
+    }
+
+    [data-bgstyle="minimal"] .flow-svg,
+    [data-bgstyle="minimal"] .orb-3 {
+      opacity: 0;
+    }
+    [data-bgstyle="minimal"] .ambient-orb {
+      opacity: 0.25;
+    }
+
+    [data-bgstyle="wave"] .ribbon-stroke {
+      stroke-width: 110;
+      opacity: 0.28;
+    }
+
+    /* ==================== 4. 顶部悬浮设计预览切换器（仅供预览对比） ==================== */
+    .preview-dock {
+      position: fixed;
+      bottom: 16px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 90;
+      background: rgba(20, 22, 30, 0.86);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      color: #f8fafc;
+      padding: 8px 14px;
+      border-radius: 999px;
+      box-shadow: 0 16px 38px rgba(15, 23, 42, 0.24);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      flex-wrap: wrap;
+      max-width: 96vw;
+      font-size: 12px;
+    }
+
+    .dock-group {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .dock-label {
+      color: #94a3b8;
+      font-weight: 600;
+      margin-right: 2px;
+      white-space: nowrap;
+    }
+
+    .dock-pill {
+      background: rgba(255, 255, 255, 0.08);
+      color: #e2e8f0;
+      border: 1px solid transparent;
+      border-radius: 999px;
+      padding: 4px 10px;
+      font-size: 11.8px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.16s ease;
+      white-space: nowrap;
+    }
+
+    .dock-pill:hover {
+      background: rgba(255, 255, 255, 0.16);
+    }
+
+    .dock-pill.active {
+      background: #ffffff;
+      color: #0f172a;
+      font-weight: 700;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+    }
+
+    .dock-sep {
+      width: 1px;
+      height: 16px;
+      background: rgba(255, 255, 255, 0.16);
+    }
+
+    .dock-toggle-hide {
+      background: transparent;
+      border: none;
+      color: #94a3b8;
+      cursor: pointer;
+      font-size: 11.5px;
+      padding: 2px 6px;
+    }
+    .dock-toggle-hide:hover { color: #fff; }
+
+    /* ==================== 5. 不对称悬浮三岛工作台骨架 ==================== */
+    .studio-shell {
+      position: relative;
+      z-index: 2;
+      display: grid;
+      grid-template-columns: 72px minmax(0, 1fr) 372px;
+      gap: 14px;
+      padding: 14px 16px 70px;
+      height: 100vh;
+      width: 100vw;
+      transition: grid-template-columns 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
+    [data-density="expanded"] .studio-shell {
+      grid-template-columns: 256px minmax(0, 1fr) 372px;
+    }
+
+    /* 左侧悬浮胶囊岛：不对称流线圆角 */
+    .nav-island {
+      background: var(--bg-island);
+      backdrop-filter: blur(22px);
+      -webkit-backdrop-filter: blur(22px);
+      border: 1px solid var(--border-glass);
+      box-shadow: var(--shadow-island);
+      border-radius: 28px 16px 28px 18px;
+      padding: 14px 11px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      overflow: hidden;
+      transition: all 0.28s ease;
+    }
+
+    .brand-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 2px 4px;
+    }
+
+    .brand-gem {
+      width: 38px;
+      height: 38px;
+      border-radius: 14px 18px 12px 18px;
+      background: linear-gradient(135deg, var(--carbon-c), var(--astra-c));
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      box-shadow: 0 6px 16px rgba(59, 99, 246, 0.25);
+      cursor: pointer;
+    }
+
+    .brand-meta {
+      white-space: nowrap;
+      overflow: hidden;
+      opacity: 0;
+      width: 0;
+      transition: opacity 0.2s ease;
+    }
+
+    [data-density="expanded"] .brand-meta {
+      opacity: 1;
+      width: auto;
+    }
+
+    .brand-name {
+      font-weight: 800;
+      font-size: 16px;
+      letter-spacing: -0.2px;
+    }
+
+    .brand-tag {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    /* 紧凑图标轨按钮 */
+    .rail-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .rail-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 9px 11px;
+      border-radius: 16px 12px 16px 12px;
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-sub);
+      cursor: pointer;
+      transition: all 0.16s ease;
+      text-align: left;
+      font-size: var(--fs-meta);
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .rail-item:hover {
+      background: var(--bg-hover);
+      color: var(--text-main);
+    }
+
+    .rail-item.active {
+      background: var(--bg-island-strong);
+      border-color: var(--border-hairline);
+      color: var(--accent);
+      box-shadow: var(--shadow-card);
+    }
+
+    .rail-icon {
+      width: 24px;
+      height: 24px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      font-size: 15px;
+    }
+
+    .rail-text {
+      opacity: 0;
+      width: 0;
+      overflow: hidden;
+      transition: opacity 0.18s ease;
+    }
+
+    [data-density="expanded"] .rail-text {
+      opacity: 1;
+      width: auto;
+    }
+
+    .rail-cli-dots {
+      margin-top: auto;
+      padding-top: 10px;
+      border-top: 1px dashed var(--border-hairline);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      align-items: center;
+    }
+
+    [data-density="expanded"] .rail-cli-dots {
+      align-items: stretch;
+    }
+
+    .mini-cli-pill {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 8px;
+      border-radius: 999px;
+      background: var(--bg-subtle);
+      font-size: 11.8px;
+      color: var(--text-sub);
+      white-space: nowrap;
+      overflow: hidden;
+    }
+
+    .status-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    /* ==================== 6. 中央主舞台（高屏占比无框通透流） ==================== */
+    .main-stage {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      height: 100%;
+      gap: 10px;
+    }
+
+    /* 顶部流线型一体式导航胶囊（二合一压缩高度！） */
+    .stage-ribbon-bar {
+      background: var(--bg-island);
+      backdrop-filter: blur(22px);
+      -webkit-backdrop-filter: blur(22px);
+      border: 1px solid var(--border-glass);
+      box-shadow: var(--shadow-card);
+      border-radius: 22px 30px 18px 24px;
+      padding: 10px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 9px;
+    }
+
+    .ribbon-top-line {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+    }
+
+    .topic-cluster {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+      flex: 1;
+    }
+
+    .ws-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: var(--fs-meta);
+      font-weight: 700;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+
+    .topic-title {
+      font-size: var(--fs-title);
+      font-weight: 750;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      letter-spacing: -0.2px;
+    }
+
+    /* 内嵌式轻量四阶段胶囊 */
+    .inline-stepper {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: var(--bg-subtle);
+      padding: 3px 6px;
+      border-radius: 999px;
+      flex-shrink: 0;
+    }
+
+    .st-pill {
+      font-size: 11.8px;
+      padding: 2.5px 9px;
+      border-radius: 999px;
+      color: var(--text-muted);
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .st-pill.done {
+      color: var(--astra-c);
+    }
+
+    .st-pill.active {
+      background: var(--bg-island-strong);
+      color: var(--accent);
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
+    }
+
+    /* 单行流线型圆桌跑道（紧凑态仅 40px 高；展开态恢复大卡对比） */
+    .seats-track {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    [data-density="expanded"] .seats-track {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    .seat-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 5px 12px 5px 6px;
+      border-radius: 999px;
+      background: var(--bg-island-strong);
+      border: 1px solid var(--border-hairline);
+      cursor: pointer;
+      transition: all 0.2s ease;
+      min-width: 0;
+    }
+
+    [data-density="expanded"] .seat-pill {
+      border-radius: 16px 22px 16px 14px;
+      padding: 10px 12px;
+    }
+
+    .seat-pill:hover {
+      transform: translateY(-1px);
+      border-color: var(--border-strong);
+    }
+
+    .seat-pill.speaking-carbon {
+      background: var(--carbon-soft);
+      border-color: var(--carbon-c);
+    }
+    .seat-pill.speaking-grok {
+      background: var(--grok-soft);
+      border-color: var(--grok-c);
+    }
+    .seat-pill.speaking-astra {
+      background: var(--astra-soft);
+      border-color: var(--astra-c);
+    }
+
+    .seat-badge-avatar {
+      width: 26px;
+      height: 26px;
+      border-radius: 50%;
+      color: #fff;
+      font-weight: 700;
+      font-size: 12.5px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .av-carbon { background: var(--carbon-c); }
+    .av-grok { background: var(--grok-c); }
+    .av-astra { background: var(--astra-c); }
+    .av-chair { background: var(--chair-c); }
+
+    .seat-pill-name {
+      font-weight: 700;
+      font-size: var(--fs-meta);
+      white-space: nowrap;
+    }
+
+    .seat-pill-state {
+      font-size: var(--fs-meta);
+      color: var(--text-sub);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .seat-extra-tele {
+      display: none;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    [data-density="expanded"] .seat-extra-tele {
+      display: block;
+    }
+
+    /* ==================== 7. 发言阅读流（核心屏占比提升至 82%+） ==================== */
+    .stream-viewport {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 6px 8px 14px 4px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .stream-viewport::-webkit-scrollbar { width: 6px; }
+    .stream-viewport::-webkit-scrollbar-thumb {
+      background: rgba(100, 116, 139, 0.22);
+      border-radius: 99px;
+    }
+
+    /* 不对称流线型消息卡片 */
+    .msg-bubble {
+      position: relative;
+      max-width: 920px;
+      background: var(--bg-island-strong);
+      backdrop-filter: blur(16px);
+      border: 1px solid var(--border-glass);
+      box-shadow: var(--shadow-card);
+      padding: 15px 20px 16px;
+      /* 左上小锐角锚定头像，右侧与右下大流线圆角舒展 */
+      border-radius: 6px 26px 26px 20px;
+      overflow: hidden;
+      transition: transform 0.18s ease, box-shadow 0.18s ease;
+    }
+
+    .msg-bubble:hover {
+      box-shadow: var(--shadow-island);
+    }
+
+    /* 主持人卡片反向不对称对齐，视觉节奏立分 */
+    .msg-bubble.from-chair {
+      align-self: flex-end;
+      width: min(88%, 820px);
+      background: linear-gradient(135deg, var(--chair-soft), var(--bg-island-strong) 68%);
+      border-radius: 26px 24px 6px 26px;
+      border-color: rgba(124, 58, 237, 0.18);
+    }
+
+    /* 斜切流线色翼（替代传统呆板的竖直左边框） */
+    .msg-wing {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 6px;
+      height: 54px;
+      border-radius: 0 0 12px 0;
+    }
+
+    .wing-carbon { background: linear-gradient(180deg, var(--carbon-c), transparent); }
+    .wing-grok { background: linear-gradient(180deg, var(--grok-c), transparent); }
+    .wing-astra { background: linear-gradient(180deg, var(--astra-c), transparent); }
+
+    .msg-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 8px;
+      flex-wrap: wrap;
+    }
+
+    .msg-who {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .who-name {
+      font-size: var(--fs-card-head);
+      font-weight: 750;
+    }
+
+    .c-carbon { color: var(--carbon-c); }
+    .c-grok { color: var(--grok-c); }
+    .c-astra { color: var(--astra-c); }
+    .c-chair { color: var(--chair-c); }
+
+    .role-pill {
+      font-size: var(--fs-meta);
+      padding: 1.5px 9px;
+      border-radius: 999px;
+      background: var(--bg-subtle);
+      color: var(--text-sub);
+      font-weight: 600;
+    }
+
+    .target-pill {
+      font-size: var(--fs-meta);
+      padding: 1.5px 9px;
+      border-radius: 999px;
+      background: var(--chair-soft);
+      color: var(--chair-c);
+      font-weight: 600;
+    }
+
+    .msg-meta-info {
+      font-size: var(--fs-meta);
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .summary-chip {
+      padding: 2px 10px;
+      border-radius: 999px;
+      background: var(--bg-subtle);
+      color: var(--text-sub);
+      font-weight: 600;
+    }
+
+    .msg-content {
+      font-size: var(--fs-body);
+      color: var(--text-main);
+      line-height: 1.74;
+    }
+
+    .msg-content p + p {
+      margin-top: 8px;
+    }
+
+    .msg-content ul {
+      margin-top: 6px;
+      padding-left: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .mention-inline {
+      display: inline-block;
+      padding: 0 6px;
+      border-radius: 6px;
+      background: var(--carbon-soft);
+      color: var(--carbon-c);
+      font-weight: 650;
+    }
+
+    /* ==================== 8. 底部悬浮流线输入舱 ==================== */
+    .composer-capsule {
+      background: var(--bg-island-strong);
+      backdrop-filter: blur(22px);
+      border: 1px solid var(--border-glass);
+      box-shadow: var(--shadow-island);
+      border-radius: 20px 28px 22px 26px;
+      padding: 9px 14px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+    }
+
+    .composer-bar-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .quick-cues {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .soft-chip-btn {
+      background: var(--bg-subtle);
+      border: 1px solid var(--border-hairline);
+      color: var(--text-sub);
+      padding: 3.5px 11px;
+      border-radius: 999px;
+      font-size: var(--fs-meta);
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .soft-chip-btn:hover {
+      background: var(--bg-hover);
+      color: var(--text-main);
+    }
+
+    .soft-chip-btn.gold {
+      background: var(--grok-soft);
+      color: var(--grok-c);
+      border-color: transparent;
+    }
+
+    .soft-chip-btn.emerald {
+      background: var(--astra-soft);
+      color: var(--astra-c);
+      border-color: transparent;
+    }
+
+    .composer-input-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .composer-input {
+      flex: 1;
+      border: none;
+      background: transparent;
+      color: var(--text-main);
+      font-size: var(--fs-body);
+      outline: none;
+      font-family: inherit;
+    }
+
+    .send-pill-btn {
+      background: linear-gradient(135deg, var(--accent), var(--carbon-c));
+      color: #fff;
+      border: none;
+      padding: 8px 18px;
+      border-radius: 999px;
+      font-size: var(--fs-meta);
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: 0 4px 14px rgba(59, 99, 246, 0.25);
+    }
+
+    /* ==================== 9. 右侧不对称磨砂抽屉岛 ==================== */
+    .workbench-island {
+      background: var(--bg-island);
+      backdrop-filter: blur(24px);
+      -webkit-backdrop-filter: blur(24px);
+      border: 1px solid var(--border-glass);
+      box-shadow: var(--shadow-island);
+      border-radius: 28px 16px 18px 28px;
+      padding: 13px 15px;
+      display: flex;
+      flex-direction: column;
+      gap: 11px;
+      overflow: hidden;
+    }
+
+    .wb-segmented {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      background: var(--bg-subtle);
+      padding: 3.5px;
+      border-radius: 999px;
+      gap: 3px;
+    }
+
+    .wb-seg-btn {
+      border: none;
+      background: transparent;
+      color: var(--text-sub);
+      padding: 6px 6px;
+      border-radius: 999px;
+      font-size: var(--fs-meta);
+      font-weight: 650;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .wb-seg-btn.active {
+      background: var(--bg-island-strong);
+      color: var(--text-main);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+    }
+
+    .wb-scroll {
+      flex: 1;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding-right: 2px;
+    }
+
+    .wb-section-card {
+      background: var(--bg-island-strong);
+      border: 1px solid var(--border-hairline);
+      border-radius: 18px 12px 18px 14px;
+      padding: 11px 13px;
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+    }
+
+    .wb-sec-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: var(--fs-wb);
+      font-weight: 750;
+    }
+
+    .wb-clean-list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      font-size: var(--fs-wb);
+      color: var(--text-main);
+      line-height: 1.55;
+    }
+
+    .wb-clean-list li {
+      position: relative;
+      padding-left: 14px;
+    }
+
+    .wb-clean-list li::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 8px;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--accent);
+    }
+
+    /* 浅色柔和终端与代码 Diff（告别刺眼黑块！） */
+    .light-term-card {
+      background: var(--bg-code);
+      border: 1px solid var(--border-hairline);
+      border-radius: 16px;
+      padding: 11px 13px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12.5px;
+      color: var(--text-main);
+      line-height: 1.6;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .term-head-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 11.5px;
+      color: var(--text-muted);
+      padding-bottom: 5px;
+      border-bottom: 1px solid var(--border-hairline);
+    }
+
+    .diff-line-add {
+      background: rgba(16, 185, 129, 0.14);
+      color: #065f46;
+      padding: 1px 6px;
+      border-radius: 4px;
+      display: block;
+    }
+
+    .diff-line-del {
+      background: rgba(239, 68, 68, 0.12);
+      color: #991b1b;
+      padding: 1px 6px;
+      border-radius: 4px;
+      display: block;
+    }
+
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <!-- 流线型不对称动态背景 -->
+  <div class="ambient-stage-bg" aria-hidden="true">
+    <div class="ambient-orb orb-1" id="orb1"></div>
+    <div class="ambient-orb orb-2" id="orb2"></div>
+    <div class="ambient-orb orb-3"></div>
+    <svg class="flow-svg" viewBox="0 0 1600 1000" preserveAspectRatio="none">
+      <defs>
+        <linearGradient id="ribbonGrad1" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="var(--carbon-c)" stop-opacity="0.14" />
+          <stop offset="52%" stop-color="var(--accent)" stop-opacity="0.08" />
+          <stop offset="100%" stop-color="var(--astra-c)" stop-opacity="0.15" />
+        </linearGradient>
+        <linearGradient id="ribbonGrad2" x1="100%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stop-color="var(--grok-c)" stop-opacity="0.11" />
+          <stop offset="100%" stop-color="var(--chair-c)" stop-opacity="0.06" />
+        </linearGradient>
+      </defs>
+      <!-- 不对称斜向流体丝带 -->
+      <path class="ribbon-stroke" d="M -140,120 C 310,-60 540,470 1020,260 C 1340,120 1510,490 1760,360" fill="none" stroke="url(#ribbonGrad1)" stroke-width="58" stroke-linecap="round" />
+      <path class="ribbon-stroke" d="M -90,780 C 380,610 690,980 1160,720 C 1410,580 1560,740 1720,680" fill="none" stroke="url(#ribbonGrad2)" stroke-width="42" stroke-linecap="round" />
+    </svg>
+  </div>
+
+  <!-- 主工作台三悬浮岛布局 -->
+  <div class="studio-shell">
+    <!-- 左侧悬浮胶囊导航轨（会议进行中默认收窄释放横向屏占比） -->
+    <aside class="nav-island">
+      <div class="brand-row" id="toggleExpandRail" title="点击切换左侧栏展开/紧凑态">
+        <div class="brand-gem">
+          <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="2.2">
+            <circle cx="12" cy="7" r="3"></circle>
+            <circle cx="6.5" cy="16.5" r="3"></circle>
+            <circle cx="17.5" cy="16.5" r="3"></circle>
+            <path d="M9.8 9.2L8 13.8M14.2 9.2L16 13.8M9.5 16.5h5"></path>
+          </svg>
+        </div>
+        <div class="brand-meta">
+          <div class="brand-name">AI圆桌</div>
+          <div class="brand-tag">Fluid Light Studio</div>
+        </div>
+      </div>
+
+      <div class="rail-stack">
+        <button class="rail-item active" title="当前圆桌讨论">
+          <span class="rail-icon">💬</span>
+          <span class="rail-text">小红书 ToC 调研</span>
+        </button>
+        <button class="rail-item" title="切换本地项目工作区（支持自动注入目录快照）">
+          <span class="rail-icon">📂</span>
+          <span class="rail-text">绑定本地项目</span>
+        </button>
+        <button class="rail-item" title="开启新圆桌会议">
+          <span class="rail-icon">＋</span>
+          <span class="rail-text">新建圆桌议题</span>
+        </button>
+        <button class="rail-item" title="模型与单 CLI 多席位驱动配置">
+          <span class="rail-icon">⚙️</span>
+          <span class="rail-text">驱动与档位配置</span>
+        </button>
+      </div>
+
+      <div class="rail-cli-dots" title="已连接引擎状态">
+        <div class="mini-cli-pill">
+          <span class="status-dot" style="background: var(--carbon-c)"></span>
+          <span class="rail-text">Carbon · agy (high)</span>
+        </div>
+        <div class="mini-cli-pill">
+          <span class="status-dot" style="background: var(--grok-c)"></span>
+          <span class="rail-text">Grok · 同源/独立驱动</span>
+        </div>
+        <div class="mini-cli-pill">
+          <span class="status-dot" style="background: var(--astra-c)"></span>
+          <span class="rail-text">Astra · 本地项目写权限</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- 中央通透高屏占比主舞台 -->
+    <main class="main-stage">
+      <header class="stage-ribbon-bar">
+        <div class="ribbon-top-line">
+          <div class="topic-cluster">
+            <span class="ws-chip" title="已注入本地项目目录快照">📁 AI圆桌 · 已挂载快照</span>
+            <h1 class="topic-title">小红书 To C 定制化软件/小程序可行性与需求热点调研</h1>
+          </div>
+          <div class="inline-stepper">
+            <span class="st-pill done">✓ 并发初评</span>
+            <span class="st-pill active">② 交叉收敛</span>
+            <span class="st-pill">③ 形成决议</span>
+            <span class="st-pill">④ 交付落地</span>
+          </div>
+        </div>
+
+        <!-- 流线型单行席位跑道（点击席位可体验背景流体随发言人变色！） -->
+        <div class="seats-track">
+          <div class="seat-pill speaking-carbon" data-seat-focus="carbon">
+            <span class="seat-badge-avatar av-carbon">C</span>
+            <div>
+              <span class="seat-pill-name">Carbon 规划</span>
+              <span class="seat-pill-state">· 收敛垂直模板策略</span>
+              <div class="seat-extra-tele">gemini-4-carbon · 首字 6.2s</div>
+            </div>
+          </div>
+
+          <div class="seat-pill" data-seat-focus="grok">
+            <span class="seat-badge-avatar av-grok">G</span>
+            <div>
+              <span class="seat-pill-name">Grok 补充</span>
+              <span class="seat-pill-state">· 定制模型存疑</span>
+              <div class="seat-extra-tele">红队挑刺视角 · 首字 7.8s</div>
+            </div>
+          </div>
+
+          <div class="seat-pill" data-seat-focus="astra">
+            <span class="seat-badge-avatar av-astra">A</span>
+            <div>
+              <span class="seat-pill-name">Astra 执行</span>
+              <span class="seat-pill-state">· 小步验证 H5 样品</span>
+              <div class="seat-extra-tele">工程评估视角 · 首字 5.9s</div>
+            </div>
+          </div>
+
+          <div class="seat-pill" data-seat-focus="chair">
+            <span class="seat-badge-avatar av-chair">主</span>
+            <div>
+              <span class="seat-pill-name">主持人 (你)</span>
+              <span class="seat-pill-state">· 随时插话 / @点名</span>
+              <div class="seat-extra-tele">主导收敛方向</div>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <!-- 核心发言阅读区（放大字号 + 充足呼吸留白 + 异形不对称卡片） -->
+      <section class="stream-viewport">
+        <article class="msg-bubble from-chair">
+          <div class="msg-top">
+            <div class="msg-who">
+              <span class="seat-badge-avatar av-chair" style="width:22px;height:22px;font-size:11px;">主</span>
+              <span class="who-name c-chair">主持人</span>
+              <span class="role-pill">发起议题</span>
+            </div>
+            <div class="msg-meta-info">
+              <span class="summary-chip">产研调研模式</span>
+              <span>12:28</span>
+            </div>
+          </div>
+          <div class="msg-content">
+            <p>我现在想要通过在小红书上做 To C 的定制化软件或者小程序，我需要你帮我调研一下可行性和现在的需求热点，并给我详细的建议。</p>
+          </div>
+        </article>
+
+        <article class="msg-bubble">
+          <div class="msg-wing wing-grok"></div>
+          <div class="msg-top">
+            <div class="msg-who">
+              <span class="seat-badge-avatar av-grok" style="width:22px;height:22px;font-size:11px;">G</span>
+              <span class="who-name c-grok">Grok</span>
+              <span class="role-pill">风险与挑刺</span>
+              <span class="target-pill">→ 点名 @Carbon</span>
+            </div>
+            <div class="msg-meta-info">
+              <span class="summary-chip">定制模型存疑</span>
+              <span>首字 7.8s</span>
+            </div>
+          </div>
+          <div class="msg-content">
+            <p><strong>核心判断：小红书非常适合种草获客，但面向个人的“从零纯定制开发”极难规模化盈利。</strong>C 端用户决策快但客单价预期普遍在百元至千元级，需求改动频繁，售后人力会迅速吞噬利润。</p>
+            <p>建议改为<strong>“高颜值垂直模板 + 轻量参数配置”</strong>产品形态：优先切入婚礼互动请柬、情侣纪念册、个人作品集名片、宠物成长档案四个高晒单率场景，用低边际成本承接自然流量。</p>
+          </div>
+        </article>
+
+        <article class="msg-bubble">
+          <div class="msg-wing wing-astra"></div>
+          <div class="msg-top">
+            <div class="msg-who">
+              <span class="seat-badge-avatar av-astra" style="width:22px;height:22px;font-size:11px;">A</span>
+              <span class="who-name c-astra">Astra</span>
+              <span class="role-pill">工程可行性</span>
+              <span class="target-pill">→ 点名 @Grok</span>
+            </div>
+            <div class="msg-meta-info">
+              <span class="summary-chip">小步验证需求</span>
+              <span>首字 5.9s</span>
+            </div>
+          </div>
+          <div class="msg-content">
+            <p>工程侧完全赞同避开重定制。个人主体注册微信小程序无法开通微信支付且部分互动类目受限，<strong>MVP 阶段直接做移动端自适应 H5 生成器（Next.js + 云存储 JSON 模板渲染）上线最快</strong>，2 天即可跑通首套样品。</p>
+            <p>执行路径建议：先用静态高颜值 Demo 录屏发 5 篇对比笔记测自然询盘，拿到前 3 单付费意愿后再补自助换图后台，严格约定免费微调不超过 2 次。</p>
+          </div>
+        </article>
+
+        <article class="msg-bubble">
+          <div class="msg-wing wing-carbon"></div>
+          <div class="msg-top">
+            <div class="msg-who">
+              <span class="seat-badge-avatar av-carbon" style="width:22px;height:22px;font-size:11px;">C</span>
+              <span class="who-name c-carbon">Carbon</span>
+              <span class="role-pill">主规划收敛</span>
+            </div>
+            <div class="msg-meta-info">
+              <span class="summary-chip">三阶段落地方案</span>
+              <span>首字 6.2s</span>
+            </div>
+          </div>
+          <div class="msg-content">
+            <p>综合 <span class="mention-inline">@Grok</span> 的商业账本与 <span class="mention-inline">@Astra</span> 的资质边界，我们将方案收敛为<strong>「C 端视觉微定制 SaaS 模板」</strong>三步走：</p>
+            <ul>
+              <li><strong>第 1 周（测品排雷）</strong>：聚焦「备婚电子请柬 / 恋爱时间轴」双赛道，制作 2 套高审美可交互 H5 样板，零后端重投入测试小红书评论区询单率。</li>
+              <li><strong>第 2 周（半自动交付）</strong>：定价分为 <code>¥69 自助模板版</code> 与 <code>¥299 代排版精修版</code>，验证真实付费转化并沉淀高频配置字段。</li>
+              <li><strong>第 3–4 周（工具化提效）</strong>：将高频修改项（配乐、相册、倒计时、地图）封装为可视化表单链接，把单客交付耗时压缩到 5 分钟以内。</li>
+            </ul>
+          </div>
+        </article>
+      </section>
+
+      <!-- 底部流线输入舱 -->
+      <footer class="composer-capsule">
+        <div class="composer-bar-top">
+          <div class="quick-cues">
+            <button class="soft-chip-btn">请 Grok 挑刺引流风险</button>
+            <button class="soft-chip-btn">请 Carbon 收敛定价</button>
+            <button class="soft-chip-btn">请 Astra 拆解 H5 架构</button>
+          </div>
+          <div class="quick-cues">
+            <button class="soft-chip-btn gold">形成最终决议</button>
+            <button class="soft-chip-btn emerald">落地本地项目 →</button>
+          </div>
+        </div>
+        <div class="composer-input-row">
+          <input class="composer-input" type="text" placeholder="随时插话补充约束，支持 @Carbon @Grok @Astra 或 @文件名 挂载本地代码…" />
+          <button class="send-pill-btn">发送追问</button>
+        </div>
+      </footer>
+    </main>
+
+    <!-- 右侧不对称磨砂白板与双模态交付抽屉 -->
+    <aside class="workbench-island">
+      <div class="wb-segmented" id="wbTabs">
+        <button class="wb-seg-btn active" data-wbtab="board">结构化白板</button>
+        <button class="wb-seg-btn" data-wbtab="report">调研交付物</button>
+        <button class="wb-seg-btn" data-wbtab="term">浅色终端</button>
+      </div>
+
+      <!-- 视图 1：结构化干净白板（无废话截断） -->
+      <div class="wb-scroll" id="wbPane-board">
+        <div class="wb-section-card">
+          <div class="wb-sec-head c-carbon">
+            <span>Carbon · 阶段规划共识</span>
+            <span style="font-size:11.5px;opacity:0.75;">已去重归并</span>
+          </div>
+          <ul class="wb-clean-list">
+            <li>放弃从零纯定制，转向「高审美 H5 垂直模板 + 轻量配置」</li>
+            <li>首期聚焦备婚请柬与纪念日数字礼物，双档定价 ¥69 / ¥299</li>
+            <li>先发 5 篇实录笔记验证 10 单真实付费，再开发自助后台</li>
+          </ul>
+        </div>
+
+        <div class="wb-section-card">
+          <div class="wb-sec-head c-grok">
+            <span>Grok · 风险防线与合规</span>
+          </div>
+          <ul class="wb-clean-list">
+            <li>严控私域导流话术，采用个人主页置顶群/店铺承接防限流</li>
+            <li>书面约定精修版最多含 2 次调整，杜绝无限售后泥潭</li>
+          </ul>
+        </div>
+
+        <div class="wb-section-card">
+          <div class="wb-sec-head c-astra">
+            <span>Astra · 工程落地清单</span>
+          </div>
+          <ul class="wb-clean-list">
+            <li>采用移动端 H5 绕开个人小程序支付与类目准入卡点</li>
+            <li>基于 JSON 配置驱动模板渲染，单客生成耗时控制在 5 分钟内</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- 视图 2：产研调研文档视图 -->
+      <div class="wb-scroll hidden" id="wbPane-report">
+        <div class="wb-section-card">
+          <div class="wb-sec-head" style="color: var(--accent);">
+            <span>📄 可行性调研决议书 (.md)</span>
+          </div>
+          <p style="font-size: var(--fs-wb); color: var(--text-sub);">
+            针对非写代码类的商业/产品调研议题，直接生成可一键导出的结构化方案书，无需强跳转代码 Diff：
+          </p>
+          <ul class="wb-clean-list">
+            <li><strong>赛道评级</strong>：纯定制 ★☆☆☆☆ ｜ 垂直微定制模板 ★★★★☆</li>
+            <li><strong>获客漏斗</strong>：小红书视觉对比视频 → 置顶店铺自动发卡 → 表单自助生成 H5</li>
+            <li><strong>回本测算</strong>：首套模板研发约 16 小时，售出 15 份 ¥69 自助版即覆盖冷启动成本</li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- 视图 3：浅色磨砂终端与代码 Diff（不再是突兀黑块） -->
+      <div class="wb-scroll hidden" id="wbPane-term">
+        <div class="light-term-card">
+          <div class="term-head-row">
+            <span>● ● ●  astra · worktree 安全沙箱</span>
+            <span>本地项目直连</span>
+          </div>
+          <div>$ agy --model gemini-4-carbon --effort high</div>
+          <div style="color: var(--astra-c);">✔ 已读取本地项目目录树快照 (28 files)</div>
+          <div>▶ 正在生成模板配置 Schema 与预览路由...</div>
+        </div>
+
+        <div class="light-term-card">
+          <div class="term-head-row">
+            <span>Git Diff 预览</span>
+            <span>+18 / -3</span>
+          </div>
+          <span class="diff-line-del">- const discussCwd = "~/.ai-roundtable/discuss_sandbox";</span>
+          <span class="diff-line-add">+ const projectSnapshot = buildWorkspaceSummary(session.workspaceDir);</span>
+          <span class="diff-line-add">+ const seatKey = `${session.id}:${seat.roleId}`;</span>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- 底部悬浮交互对比控制台 -->
+  <div class="preview-dock" id="previewDock">
+    <div class="dock-group">
+      <span class="dock-label">🎨 淡色系对比：</span>
+      <button class="dock-pill active" data-set-palette="pearl">珍珠极昼</button>
+      <button class="dock-pill" data-set-palette="alabaster">暖砂羊皮纸</button>
+      <button class="dock-pill" data-set-palette="glacier">晨雾冰川</button>
+      <button class="dock-pill" data-set-palette="sage">鼠尾草微风</button>
+    </div>
+    <span class="dock-sep"></span>
+    <div class="dock-group">
+      <span class="dock-label">🔠 字号：</span>
+      <button class="dock-pill" data-set-fs="standard">14px 标准</button>
+      <button class="dock-pill active" data-set-fs="comfort">15.5px 舒适</button>
+      <button class="dock-pill" data-set-fs="large">17px 大字</button>
+    </div>
+    <span class="dock-sep"></span>
+    <div class="dock-group">
+      <span class="dock-label">📐 屏占比：</span>
+      <button class="dock-pill active" data-set-density="compact">紧凑高屏占比 (83%)</button>
+      <button class="dock-pill" data-set-density="expanded">展开侧栏对比</button>
+    </div>
+    <span class="dock-sep"></span>
+    <div class="dock-group">
+      <span class="dock-label">〰️ 背景流线：</span>
+      <button class="dock-pill active" data-set-bg="ribbon">斜向丝带</button>
+      <button class="dock-pill" data-set-bg="wave">宽幅柔波</button>
+      <button class="dock-pill" data-set-bg="minimal">极简雾光</button>
+    </div>
+  </div>
+
+  <script>
+    const root = document.documentElement;
+
+    function bindGroup(attrName, htmlAttr) {
+      document.querySelectorAll(`[${attrName}]`).forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const val = btn.getAttribute(attrName);
+          root.setAttribute(htmlAttr, val);
+          document.querySelectorAll(`[${attrName}]`).forEach((b) => b.classList.toggle("active", b === btn));
+        });
+      });
+    }
+
+    bindGroup("data-set-palette", "data-palette");
+    bindGroup("data-set-fs", "data-fontsize");
+    bindGroup("data-set-density", "data-density");
+    bindGroup("data-set-bg", "data-bgstyle");
+
+    document.getElementById("toggleExpandRail").addEventListener("click", () => {
+      const next = root.getAttribute("data-density") === "compact" ? "expanded" : "compact";
+      root.setAttribute("data-density", next);
+      document.querySelectorAll("[data-set-density]").forEach((b) => {
+        b.classList.toggle("active", b.getAttribute("data-set-density") === next);
+      });
+    });
+
+    // 点击不同席位胶囊，体验流线型背景光斑随发言角色平滑呼吸变色
+    const seatGlowMap = {
+      carbon: ["rgba(96, 165, 250, 0.42)", "rgba(165, 243, 252, 0.4)"],
+      grok: ["rgba(253, 186, 116, 0.45)", "rgba(253, 230, 138, 0.4)"],
+      astra: ["rgba(110, 231, 183, 0.45)", "rgba(153, 246, 228, 0.4)"],
+      chair: ["rgba(196, 181, 253, 0.45)", "rgba(251, 207, 232, 0.38)"],
+    };
+
+    document.querySelectorAll("[data-seat-focus]").forEach((pill) => {
+      pill.addEventListener("click", () => {
+        const who = pill.getAttribute("data-seat-focus");
+        document.querySelectorAll("[data-seat-focus]").forEach((p) => {
+          p.className = "seat-pill";
+        });
+        if (who !== "chair") {
+          pill.classList.add(`speaking-${who}`);
+        }
+        const colors = seatGlowMap[who];
+        if (colors) {
+          document.getElementById("orb1").style.background = colors[0];
+          document.getElementById("orb2").style.background = colors[1];
+        }
+      });
+    });
+
+    // 右侧抽屉三页签切换
+    document.querySelectorAll("[data-wbtab]").forEach((tab) => {
+      tab.addEventListener("click", () => {
+        const target = tab.getAttribute("data-wbtab");
+        document.querySelectorAll("[data-wbtab]").forEach((t) => t.classList.toggle("active", t === tab));
+        ["board", "report", "term"].forEach((k) => {
+          document.getElementById(`wbPane-${k}`).classList.toggle("hidden", k !== target);
+        });
+      });
+    });
+  </script>
+</body>
+</html>

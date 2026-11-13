@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-palette="pearl" data-fontsize="comfort">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI圆桌 — 多 CLI 实时协作工作台</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <!-- 流线型不对称斜向丝带与呼吸光晕背景 -->
+  <div class="ambient-stage-bg" aria-hidden="true">
+    <div class="ambient-orb orb-1" id="ambientOrb1"></div>
+    <div class="ambient-orb orb-2" id="ambientOrb2"></div>
+    <div class="ambient-orb orb-3"></div>
+    <svg class="flow-svg" viewBox="0 0 1600 1000" preserveAspectRatio="none">
+      <defs>
+        <linearGradient id="ribbonGrad1" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="var(--carbon-color)" stop-opacity="0.14" />
+          <stop offset="52%" stop-color="var(--accent-primary)" stop-opacity="0.08" />
+          <stop offset="100%" stop-color="var(--astra-color)" stop-opacity="0.15" />
+        </linearGradient>
+        <linearGradient id="ribbonGrad2" x1="100%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stop-color="var(--grok-color)" stop-opacity="0.11" />
+          <stop offset="100%" stop-color="var(--chair-color)" stop-opacity="0.07" />
+        </linearGradient>
+      </defs>
+      <path d="M -140,120 C 310,-60 540,470 1020,260 C 1340,120 1510,490 1760,360" fill="none" stroke="url(#ribbonGrad1)" stroke-width="58" stroke-linecap="round" />
+      <path d="M -90,780 C 380,610 690,980 1160,720 C 1410,580 1560,740 1720,680" fill="none" stroke="url(#ribbonGrad2)" stroke-width="42" stroke-linecap="round" />
+    </svg>
+  </div>
+
+  <!-- 默认启用 left-collapsed 76px 悬浮胶囊图标轨（点左上图标或按 ⌘B 可随时展开完整会话与引擎列表） -->
+  <div class="app-shell left-collapsed" id="appShell">
+    <!-- 左侧悬浮胶囊岛 -->
+    <aside class="left-sidebar" id="leftSidebar">
+      <div class="brand-bar">
+        <div class="brand-logo" id="brandToggleRailBtn" title="点击展开左侧完整面板 (⌘B)">
+          <div class="logo-orb" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2">
+              <circle cx="12" cy="7" r="3"></circle>
+              <circle cx="6.5" cy="16.5" r="3"></circle>
+              <circle cx="17.5" cy="16.5" r="3"></circle>
+              <path d="M9.8 9.2L8 13.8M14.2 9.2L16 13.8M9.5 16.5h5" opacity="0.8"></path>
+            </svg>
+          </div>
+          <span class="brand-rail-hint">展开</span>
+          <div class="brand-text-wrap">
+            <div class="brand-title">AI圆桌</div>
+            <div class="brand-sub">满档上下文 · 多视角与独奏</div>
+          </div>
+        </div>
+        <div class="brand-actions">
+          <button id="collapseLeftBtn" class="icon-btn" title="收起为紧凑图标栏 (⌘B)" aria-label="收起左侧栏">⇤</button>
+        </div>
+      </div>
+
+      <!-- 紧凑 76px 图标+两字中文微标签轨视图（高屏占比默认态） -->
+      <div class="compact-rail-only">
+        <button id="railNewSessionBtn" class="rail-icon-btn" title="新建圆桌会议 (⌘N)">
+          <span class="rail-glyph rail-glyph-plus" aria-hidden="true">＋</span>
+          <span class="rail-btn-label">新建</span>
+        </button>
+        <button id="railSessionsBtn" class="rail-icon-btn" title="展开查看历史会议列表 (⌘B)">
+          <span class="rail-glyph" aria-hidden="true">🕘</span>
+          <span class="rail-btn-label">历史</span>
+          <span id="railSessionCount" class="rail-count-badge">0</span>
+        </button>
+        <button id="railPickFolderBtn" class="rail-icon-btn" title="绑定 / 切换本地项目目录">
+          <span class="rail-glyph" aria-hidden="true">📂</span>
+          <span class="rail-btn-label">项目</span>
+        </button>
+
+        <button id="railSettingsBtn" class="rail-icon-btn rail-bottom-btn" title="CLI 驱动、身份与模型档位配置 (⌘,)">
+          <span class="rail-glyph" aria-hidden="true">⚙️</span>
+          <span class="rail-btn-label">设置</span>
+        </button>
+      </div>
+
+      <!-- 展开态详细侧栏面板 -->
+      <div class="workspace-card expanded-sidebar-only" id="workspaceCard">
+        <div class="ws-top">
+          <span class="ws-label">📂 当前绑定项目</span>
+          <button id="pickFolderQuickBtn" class="text-action-btn" title="打开系统目录选择器绑定本地项目目录">选择目录</button>
+        </div>
+        <div id="workspaceName" class="ws-name">选择本地项目</div>
+        <div id="workspaceBadge" class="ws-path" title="">尚未绑定本地项目目录</div>
+      </div>
+
+      <div class="sidebar-section expanded-sidebar-only">
+        <div class="section-header">
+          <span>本地 CLI 引擎</span>
+          <div class="header-inline-btns">
+            <button id="testCliBtn" class="mini-ghost-btn" title="真实发送极简指令检验各 CLI 响应延迟">实测连通</button>
+            <button id="openSettingsBtn" class="mini-ghost-btn" title="配置 CLI 驱动、预设身份与模型参数 (⌘,)">配置</button>
+          </div>
+        </div>
+        <div id="cliEngineCards" class="cli-cards"></div>
+      </div>
+
+      <div class="sidebar-section expanded-sidebar-only">
+        <div class="section-header">
+          <span>讨论流程模式</span>
+        </div>
+        <select id="collabModeSelect" class="select-input">
+          <option value="standard_roundtable">标准讨论（初评 + 2轮交叉）</option>
+          <option value="fast_align">快速决议（初评 + 1轮对齐）</option>
+          <option value="red_blue_debate">方案质询（深度挑刺与风险审视）</option>
+          <option value="arch_to_exec">讨论并执行（收敛后自动预演）</option>
+        </select>
+        <div id="collabModeHint" class="mode-hint">并发初评 → 并发质询+主控收敛</div>
+      </div>
+
+      <div class="sidebar-section sessions-box expanded-sidebar-only">
+        <div class="section-header">
+          <span>会议记录 <em id="sessionCountTag" class="count-pill">0</em></span>
+          <button id="newSessionBtn" class="mini-primary-btn" title="开启一场全新的圆桌会议 (⌘N)">+ 新建</button>
+        </div>
+        <div class="session-search-wrap" id="sessionSearchWrap">
+          <input type="text" id="sessionSearchInput" class="session-search-input" placeholder="搜索历史议题…" />
+        </div>
+        <div id="sessionList" class="session-list"></div>
+      </div>
+    </aside>
+
+    <!-- 中间通透高屏占比主舞台 -->
+    <main class="center-stage">
+      <header class="stage-header">
+        <div class="stage-top-row">
+          <div class="topic-banner">
+            <button id="expandLeftBtn" class="icon-btn hidden" title="展开左侧栏 (⌘B)">☰</button>
+            <button id="headerWsChip" class="ws-header-chip ws-unbound" title="尚未绑定本地项目，点击选择本地项目目录">
+              📁 <span id="headerWsName">选择本地项目</span>
+            </button>
+            <span class="stage-pill hidden" id="stageStatusPill"></span>
+            <h1 id="currentTopicTitle" class="topic-heading" title="">新圆桌会议</h1>
+          </div>
+
+          <div class="stage-actions">
+            <!-- 内嵌式四阶段胶囊进度条 -->
+            <div class="stage-stepper" id="stageStepper">
+              <div class="step-item" data-step="opening" title="① 方案初评">
+                <span class="step-num">①</span>
+                <span class="step-label">方案初评</span>
+              </div>
+              <div class="step-line"></div>
+              <div class="step-item" data-step="discussion" title="② 交叉收敛">
+                <span class="step-num">②</span>
+                <span class="step-label">交叉收敛</span>
+              </div>
+              <div class="step-line"></div>
+              <div class="step-item" data-step="consensus" title="③ 形成决议">
+                <span class="step-num">③</span>
+                <span class="step-label">形成决议</span>
+              </div>
+              <div class="step-line"></div>
+              <div class="step-item" data-step="execution" title="④ 交付落地">
+                <span class="step-num">④</span>
+                <span class="step-label">交付落地</span>
+              </div>
+            </div>
+
+            <!-- 合并后的单个「外观」下拉菜单（主题 + 浅色色系 + 字号） -->
+            <div class="appearance-menu-wrap" id="appearanceMenuWrap">
+              <button type="button" id="appearanceBtn" class="icon-btn" title="切换主题、浅色色系与阅读字号" aria-expanded="false">
+                <span>🎨 外观</span>
+                <span class="caret-mini" aria-hidden="true">▾</span>
+              </button>
+              <div id="appearancePopover" class="appearance-popover hidden" role="menu">
+                <div class="app-pop-section">
+                  <div class="app-pop-label">主题切换</div>
+                  <div class="app-pop-seg" id="themeModeGroup">
+                    <button type="button" class="app-seg-btn active" data-theme-opt="light">☀ 浅色</button>
+                    <button type="button" class="app-seg-btn" data-theme-opt="dark">☾ 深色</button>
+                  </div>
+                </div>
+                <div class="app-pop-section" id="paletteSection">
+                  <div class="app-pop-label">浅色色系</div>
+                  <div class="app-palette-list" id="paletteOptionList">
+                    <button type="button" class="app-palette-item active" data-palette-opt="pearl">
+                      <span class="palette-swatch swatch-pearl"></span>
+                      <span>珍珠极昼</span>
+                    </button>
+                    <button type="button" class="app-palette-item" data-palette-opt="alabaster">
+                      <span class="palette-swatch swatch-alabaster"></span>
+                      <span>暖砂羊皮纸</span>
+                    </button>
+                    <button type="button" class="app-palette-item" data-palette-opt="glacier">
+                      <span class="palette-swatch swatch-glacier"></span>
+                      <span>晨雾冰川</span>
+                    </button>
+                    <button type="button" class="app-palette-item" data-palette-opt="sage">
+                      <span class="palette-swatch swatch-sage"></span>
+                      <span>鼠尾草微风</span>
+                    </button>
+                  </div>
+                </div>
+                <div class="app-pop-section">
+                  <div class="app-pop-label">阅读字号</div>
+                  <div class="app-pop-seg" id="fontScaleGroup">
+                    <button type="button" class="app-seg-btn" data-font-opt="standard">标准</button>
+                    <button type="button" class="app-seg-btn active" data-font-opt="comfort">舒适</button>
+                    <button type="button" class="app-seg-btn" data-font-opt="large">大字</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <span id="sseConnDot" class="conn-indicator online" title="本地实时服务已连接"></span>
+            <button id="toggleRightBtn" class="icon-btn active-pane" title="显示 / 隐藏右侧白板与执行面板 (⌘J)">白板 / 执行</button>
+          </div>
+        </div>
+
+        <!-- 单行流线胶囊圆桌席位跑道（支持点头衔切身份 + 一键独奏 + 参会开关） -->
+        <div class="roundtable-ring" id="roundtableRing">
+          <div class="seat-card seat-carbon" id="seat-carbon" data-agent-seat="carbon" title="点击向 @Carbon 提问">
+            <div class="seat-avatar-wrap">
+              <div class="seat-avatar">C</div>
+              <div class="voice-bars"><span></span><span></span><span></span></div>
+            </div>
+            <div class="seat-meta">
+              <div class="seat-name-row">
+                <span class="seat-name">Carbon</span>
+                <button type="button" class="seat-role-tag seat-role-btn" id="seat-role-carbon" data-persona-trigger="carbon" title="点击切换 Carbon 的预设身份视角">
+                  <span class="seat-role-text" id="seat-role-text-carbon">规划</span>
+                  <span class="caret-mini" aria-hidden="true">▾</span>
+                </button>
+              </div>
+              <div class="seat-badge" id="seat-badge-carbon">检测中</div>
+              <div class="seat-telemetry" id="seat-tele-carbon">Antigravity CLI</div>
+              <div class="seat-ctrl-group">
+                <button type="button" class="seat-solo-btn" id="seat-solo-carbon" data-seat-solo="carbon" title="独奏模式：仅由 Carbon 单人包揽方案设计与落地执行">独奏</button>
+                <span class="seat-ctrl-sep" aria-hidden="true"></span>
+                <button type="button" class="seat-switch on" data-seat-toggle="carbon" title="参会启用开关：已开启（点击暂停 Carbon 参会）" aria-label="切换 Carbon 参会启用状态"></button>
+              </div>
+            </div>
+          </div>
+
+          <div class="seat-card seat-grok" id="seat-grok" data-agent-seat="grok" title="点击向 @Grok 提问">
+            <div class="seat-avatar-wrap">
+              <div class="seat-avatar">G</div>
+              <div class="voice-bars"><span></span><span></span><span></span></div>
+            </div>
+            <div class="seat-meta">
+              <div class="seat-name-row">
+                <span class="seat-name">Grok</span>
+                <button type="button" class="seat-role-tag seat-role-btn" id="seat-role-grok" data-persona-trigger="grok" title="点击切换 Grok 的预设身份视角">
+                  <span class="seat-role-text" id="seat-role-text-grok">挑刺</span>
+                  <span class="caret-mini" aria-hidden="true">▾</span>
+                </button>
+              </div>
+              <div class="seat-badge" id="seat-badge-grok">检测中</div>
+              <div class="seat-telemetry" id="seat-tele-grok">Grok CLI</div>
+              <div class="seat-ctrl-group">
+                <button type="button" class="seat-solo-btn" id="seat-solo-grok" data-seat-solo="grok" title="独奏模式：仅由 Grok 单人包揽方案设计与落地执行">独奏</button>
+                <span class="seat-ctrl-sep" aria-hidden="true"></span>
+                <button type="button" class="seat-switch on" data-seat-toggle="grok" title="参会启用开关：已开启（点击暂停 Grok 参会）" aria-label="切换 Grok 参会启用状态"></button>
+              </div>
+            </div>
+          </div>
+
+          <div class="seat-card seat-astra" id="seat-astra" data-agent-seat="astra" title="点击向 @Astra 提问">
+            <div class="seat-avatar-wrap">
+              <div class="seat-avatar">A</div>
+              <div class="voice-bars"><span></span><span></span><span></span></div>
+            </div>
+            <div class="seat-meta">
+              <div class="seat-name-row">
+                <span class="seat-name">Astra</span>
+                <button type="button" class="seat-role-tag seat-role-btn" id="seat-role-astra" data-persona-trigger="astra" title="点击切换 Astra 的预设身份视角">
+                  <span class="seat-role-text" id="seat-role-text-astra">落地</span>
+                  <span class="caret-mini" aria-hidden="true">▾</span>
+                </button>
+              </div>
+              <div class="seat-badge" id="seat-badge-astra">检测中</div>
+              <div class="seat-telemetry" id="seat-tele-astra">Codex CLI</div>
+              <div class="seat-ctrl-group">
+                <button type="button" class="seat-solo-btn" id="seat-solo-astra" data-seat-solo="astra" title="独奏模式：仅由 Astra 单人包揽方案设计与落地执行">独奏</button>
+                <span class="seat-ctrl-sep" aria-hidden="true"></span>
+                <button type="button" class="seat-switch on" data-seat-toggle="astra" title="参会启用开关：已开启（点击暂停 Astra 参会）" aria-label="切换 Astra 参会启用状态"></button>
+              </div>
+            </div>
+          </div>
+
+          <div class="seat-card seat-chair">
+            <div class="seat-avatar-wrap">
+              <div class="seat-avatar">主</div>
+            </div>
+            <div class="seat-meta">
+              <div class="seat-name-row">
+                <span class="seat-name">主持人 (你)</span>
+                <span class="seat-role-tag">控场</span>
+              </div>
+              <div class="seat-badge" id="chairActionHint">随时插话 / @点名</div>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <!-- 实时会议发言阅读流 -->
+      <div class="chat-stream-wrap">
+        <section class="chat-stream" id="chatStream">
+          <div class="empty-guide" id="emptyGuide">
+            <div class="empty-hero-badge" id="readySummaryBar">正在检测本地 CLI 环境…</div>
+            <h2>发起满档上下文多视角圆桌或单席位独奏</h2>
+            <p>
+              点击席位头衔（如 <strong>规划 ▾</strong>）可在 <strong>7 种预设身份</strong> 间自由切换；点击任意席位的 <strong>「独奏」</strong> 即可单人包揽方案设计与执行。绑定本地项目后敲 <code>@</code> 可实时联想并注入完整源码（支持 <code>@路径:起始行-结束行</code>）。
+            </p>
+            <div class="starter-grid">
+              <button class="starter-card" data-starter-topic="请评审当前工作区项目的整体架构与模块边界，指出耦合痛点并给出低风险演进路线。">
+                <span class="starter-tag">架构评审</span>
+                <span class="starter-title">评估模块边界与低风险重构路线</span>
+              </button>
+              <button class="starter-card" data-starter-topic="请排查当前项目中潜在的异常处理盲区、并发竞态与超时边界问题，并给出加固方案。">
+                <span class="starter-tag">边界与稳定性</span>
+                <span class="starter-title">排查并发竞态、超时与异常恢复盲区</span>
+              </button>
+              <button class="starter-card" data-starter-topic="我们要在现有基础上新增一个核心特性，请拆解 MVP 最小闭环范围、接口契约与分步验证计划。">
+                <span class="starter-tag">功能规划</span>
+                <span class="starter-title">拆解新特性 MVP 范围与实施排期</span>
+              </button>
+              <button class="starter-card" data-starter-topic="请从交互体验、响应速度与代码可维护性三个维度提出高性价比的优化清单。">
+                <span class="starter-tag">体验与性能</span>
+                <span class="starter-title">制定体验升级与性能优化优先级清单</span>
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <button id="scrollBottomBtn" class="scroll-bottom-pill hidden">
+          ↓ 查看最新发言
+        </button>
+      </div>
+
+      <!-- 底部流线型按阶段精简输入舱 -->
+      <footer class="chair-console" id="chairConsole">
+        <div class="quick-cue-bar hidden" id="quickCueBar">
+          <div class="cue-group-left" id="cueGroupLeft"></div>
+          <div class="cue-busy-banner hidden" id="cueBusyBanner">
+            <span class="busy-live-dot" aria-hidden="true"></span>
+            <span id="cueBusyText">讨论进行中，可直接输入插话或点击右侧停止</span>
+          </div>
+          <div class="cue-group-right" id="cueDecisionGroup">
+            <button type="button" id="restartTopicBtn" class="cue-btn" title="清空当前旧发言，按当前模式与参会席位重新发起本议题讨论">↻ 重开本议题</button>
+            <button type="button" id="concludeBtn" class="cue-btn accent-gold" title="不限字数汇总完整《会议最终决议》实施方案">形成决议</button>
+            <button type="button" id="executeBtn" class="cue-btn accent-emerald" title="依据会议白板决议调用主刀席位执行落地">交由 Astra 执行 →</button>
+          </div>
+          <button type="button" id="stopFlowBtn" class="stop-prominent-btn hidden" title="立即中止当前正在生成的 CLI 发言或执行任务">■ 停止发言</button>
+        </div>
+
+        <div class="composer-box" id="composerBox">
+          <div class="composer-toolbar" id="composerToolbar">
+            <!-- 未发起议题阶段：直接展示讨论模式选择器 -->
+            <div class="pre-meeting-mode-bar" id="preMeetingModeBar">
+              <span class="cue-bar-label">讨论模式：</span>
+              <div class="composer-mode-seg" id="inlineModeSelect">
+                <button type="button" class="mode-seg-pill active" data-collab-opt="standard_roundtable">标准讨论</button>
+                <button type="button" class="mode-seg-pill" data-collab-opt="fast_align">快速决议</button>
+                <button type="button" class="mode-seg-pill" data-collab-opt="red_blue_debate">方案质询</button>
+                <button type="button" class="mode-seg-pill" data-collab-opt="arch_to_exec">讨论并执行</button>
+              </div>
+              <span id="composerModeDesc" class="composer-mode-desc">并发初评 → 2轮交叉收敛</span>
+            </div>
+
+            <!-- 待主持人指令阶段：展示快捷点名芯片（单人独奏时展示独奏状态提示） -->
+            <div class="composer-left-tags hidden" id="activeMentionBar">
+              <span class="cue-bar-label" id="mentionBarLabel">点名回应：</span>
+              <div class="mention-chips" id="mentionChipsWrap">
+                <button type="button" class="mention-btn" data-mention-seat="carbon" data-mention="@Carbon " title="点名 Carbon 回应">@Carbon</button>
+                <button type="button" class="mention-btn" data-mention-seat="grok" data-mention="@Grok " title="点名 Grok 回应">@Grok</button>
+                <button type="button" class="mention-btn" data-mention-seat="astra" data-mention="@Astra " title="点名 Astra 回应">@Astra</button>
+              </div>
+            </div>
+
+            <button type="button" id="insertFileRefBtn" class="mention-btn file-ref-trigger" title="检索并引用当前绑定项目的源码文件（支持 @文件:起始行-结束行）">+ @引用源码</button>
+          </div>
+
+          <div id="attachedFilesBar" class="attached-files-bar hidden"></div>
+
+          <div class="composer-row">
+            <div class="composer-input-frame">
+              <div id="atSuggestMenu" class="at-suggest-menu hidden" role="listbox" aria-label="源码文件与席位补全"></div>
+              <textarea
+                id="topicInput"
+                rows="1"
+                placeholder="输入议题开启圆桌讨论（敲 @ 自动检索引用项目源码，Shift+Enter 换行 · Enter 发送）"
+              ></textarea>
+            </div>
+            <div class="composer-btns">
+              <span class="composer-key-hint" id="composerKeyHint">Shift+Enter 换行 · Enter 发送</span>
+              <button type="button" id="primaryActionBtn" class="primary-send-btn">开始讨论</button>
+            </div>
+          </div>
+        </div>
+      </footer>
+    </main>
+
+    <!-- 右侧不对称磨砂白板与柔和终端抽屉岛 -->
+    <aside class="right-workbench" id="rightWorkbench">
+      <div class="workbench-tabs">
+        <button class="wb-tab active" data-tab="whiteboard">
+          <span>结构化白板</span>
+          <span id="wbCountBadge" class="tab-count">0</span>
+        </button>
+        <button class="wb-tab" data-tab="terminal">
+          <span>执行与终端</span>
+          <span id="execDot" class="tab-dot hidden"></span>
+        </button>
+      </div>
+
+      <!-- 白板面板 -->
+      <div class="wb-pane active" id="pane-whiteboard">
+        <div class="wb-toolbar">
+          <span id="wbConsensusTag" class="wb-status-tag">待输入议题</span>
+          <div class="wb-toolbar-btns">
+            <button id="copyMdBtn" class="mini-ghost-btn" title="复制完整 Markdown 会议纪要到剪贴板">复制纪要</button>
+            <button id="exportMdBtn" class="mini-outline-btn" title="保存 Markdown 纪要到下载目录">导出 .md</button>
+          </div>
+        </div>
+
+        <div class="wb-card wb-chair" data-wb-bucket="chair_constraints">
+          <div class="wb-card-header">
+            <span class="wb-card-title">议题与主持约束</span>
+            <button class="wb-add-btn" data-wb-add="chair_constraints">+ 添加约束</button>
+          </div>
+          <div id="wbTopicText" class="wb-topic-text">未设置议题</div>
+          <div class="wb-inline-editor hidden" id="wb-editor-chair_constraints">
+            <input type="text" class="wb-add-input" placeholder="输入补充约束，回车保存…" />
+          </div>
+          <ul id="wbChairList" class="wb-list"></ul>
+        </div>
+
+        <div class="wb-card wb-carbon" id="wbCardCarbon" data-wb-bucket="carbon_plan">
+          <div class="wb-card-header">
+            <span class="wb-card-title" id="wbTitleCarbon">Carbon · 阶段规划共识</span>
+            <button class="wb-add-btn" data-wb-add="carbon_plan">+ 添加</button>
+          </div>
+          <div class="wb-inline-editor hidden" id="wb-editor-carbon_plan">
+            <input type="text" class="wb-add-input" placeholder="手动添加要点，回车保存…" />
+          </div>
+          <ul id="wbCarbonList" class="wb-list empty-hint">
+            <li>待讨论生成</li>
+          </ul>
+        </div>
+
+        <div class="wb-card wb-grok" id="wbCardGrok" data-wb-bucket="grok_risks">
+          <div class="wb-card-header">
+            <span class="wb-card-title" id="wbTitleGrok">Grok · 风险防线与补充</span>
+            <button class="wb-add-btn" data-wb-add="grok_risks">+ 添加</button>
+          </div>
+          <div class="wb-inline-editor hidden" id="wb-editor-grok_risks">
+            <input type="text" class="wb-add-input" placeholder="手动添加要点，回车保存…" />
+          </div>
+          <ul id="wbGrokList" class="wb-list empty-hint">
+            <li>待讨论生成</li>
+          </ul>
+        </div>
+
+        <div class="wb-card wb-astra" id="wbCardAstra" data-wb-bucket="astra_actions">
+          <div class="wb-card-header">
+            <span class="wb-card-title" id="wbTitleAstra">Astra · 工程落地清单</span>
+            <button class="wb-add-btn" data-wb-add="astra_actions">+ 添加</button>
+          </div>
+          <div class="wb-inline-editor hidden" id="wb-editor-astra_actions">
+            <input type="text" class="wb-add-input" placeholder="手动添加要点，回车保存…" />
+          </div>
+          <ul id="wbAstraList" class="wb-list empty-hint">
+            <li>待讨论生成</li>
+          </ul>
+        </div>
+
+        <div class="wb-bottom-cta">
+          <button id="wbToExecBtn" class="wb-exec-jump-btn">前往执行终端落地决议 →</button>
+        </div>
+      </div>
+
+      <!-- 柔和浅色终端与 Diff 面板 -->
+      <div class="wb-pane" id="pane-terminal">
+        <div class="exec-mode-box">
+          <div class="exec-mode-header">
+            <span class="exec-mode-label">主刀执行席位</span>
+            <div class="segmented-control" id="executorSegmented">
+              <button type="button" class="seg-btn" data-exec-agent="carbon" title="由 Carbon 承接落地执行">Carbon</button>
+              <button type="button" class="seg-btn" data-exec-agent="grok" title="由 Grok 承接落地执行">Grok</button>
+              <button type="button" class="seg-btn active" data-exec-agent="astra" title="由 Astra 承接落地执行">Astra</button>
+            </div>
+          </div>
+          <div class="exec-mode-header">
+            <span class="exec-mode-label">执行沙箱权限</span>
+            <input type="checkbox" id="allowWriteCheckbox" class="hidden" />
+            <div class="segmented-control" id="sandboxSegmented">
+              <button type="button" class="seg-btn active" data-write-mode="readonly">只读预演</button>
+              <button type="button" class="seg-btn" data-write-mode="write">写入工作区</button>
+            </div>
+          </div>
+          <div id="execModeDesc" class="exec-mode-desc">
+            当前未绑定本地项目：点击执行将输出完整的《工程落地方案与代码实施报告》（绑定本地项目后可开启源码级 Diff 预演）。
+          </div>
+          <div class="exec-action-row">
+            <button id="runExecFromTabBtn" class="primary-exec-btn">启动 Astra 执行</button>
+            <button id="stopExecFromTabBtn" class="stop-exec-btn hidden" title="立即中止当前执行进程">■ 停止执行</button>
+          </div>
+        </div>
+
+        <div class="terminal-window">
+          <div class="terminal-bar">
+            <div class="term-left">
+              <span class="term-dots"><i></i><i></i><i></i></span>
+              <span id="termTargetTitle" class="term-title">astra · 方案交付终端</span>
+              <span id="execLiveTimer" class="exec-live-timer hidden">0s</span>
+            </div>
+            <div class="term-actions">
+              <button id="copyTermBtn" class="term-mini-btn">复制日志</button>
+              <button id="clearTermBtn" class="term-mini-btn">清空</button>
+            </div>
+          </div>
+          <pre id="astraTermLogs" class="terminal-body">尚未触发执行任务</pre>
+        </div>
+
+        <div class="diff-window">
+          <div class="diff-header">
+            <span>变更预览 (Diff) <em id="diffStatBadge" class="diff-stat"></em></span>
+            <div class="term-actions">
+              <button id="rollbackExecBtn" class="term-mini-btn rollback-warn-btn hidden" title="一键恢复执行前的 Git 工作区状态">↺ 回滚写入</button>
+              <button id="copyDiffBtn" class="term-mini-btn">复制补丁</button>
+            </div>
+          </div>
+          <div id="astraDiffView" class="diff-body">暂无变更输出</div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- 顶栏席位预设身份快速切换浮层 -->
+  <div id="personaPopover" class="persona-popover hidden" role="menu">
+    <div class="persona-pop-head" id="personaPopoverTitle">切换预设身份侧重</div>
+    <div class="persona-pop-list" id="personaOptionList"></div>
+  </div>
+
+  <!-- 本地 CLI 参数配置弹窗 -->
+  <div class="modal-backdrop hidden" id="settingsModal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div>
+          <h3>本地 CLI、预设身份与满档推理配置</h3>
+          <div class="modal-sub">支持任选席位独奏、7 种预设身份自由切换及单 CLI 多席位复用</div>
+        </div>
+        <button id="closeSettingsBtn" class="icon-btn" aria-label="关闭">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-tip">
+          绑定本地项目目录后，讨论阶段自动注入 3 层目录树与关键工程配置（敲 <code>@文件路径</code> 支持注入最高 2500 行源码，支持 <code>:起始行-结束行</code>）。只安装 1 种 CLI 时，既可点击席位上的「独奏」单人包揽设计与执行，也可开启下方复用分饰多角。
+        </p>
+
+        <div class="form-group">
+          <label>当前绑定本地项目工作区 (<code>cwd</code>)</label>
+          <div class="input-with-btn">
+            <input type="text" id="cfgWorkspaceDir" class="text-input" placeholder="/Users/yourname/project" />
+            <button type="button" id="browseWorkspaceBtn" class="mini-outline-btn">选择文件夹…</button>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-weight:650;">
+            <input type="checkbox" id="cfgSingleCliFallback" checked />
+            <span>启用单 CLI 多席位复用（当某席位 CLI 未安装时，自动调用已就绪 CLI 独立进程分饰该席位）</span>
+          </label>
+          <div class="single-cli-triad-bar">
+            <div class="triad-bar-info">
+              <strong>单 CLI 分饰三席圆桌：</strong>
+              <span>仅安装 1 个 CLI 时，可将三席绑定同一驱动并按「规划 + 挑刺 + 落地」无状态串行发言（自动留 0.4s 缓冲防冲突）</span>
+            </div>
+            <div class="triad-bar-actions">
+              <select id="singleCliTriadDriver" class="select-input triad-driver-select" title="选择用于分饰三席的底层 CLI 驱动">
+                <option value="auto" selected>自动选用已就绪 CLI</option>
+                <option value="agy">Antigravity CLI (agy)</option>
+                <option value="codex">Codex CLI (codex)</option>
+                <option value="grok">Grok CLI (grok)</option>
+              </select>
+              <button type="button" id="quickSingleCliTriadBtn" class="mini-primary-btn triad-apply-btn">⚡ 一键配成「单 CLI 分饰三席」</button>
+            </div>
+          </div>
+        </div>
+
+        <datalist id="agyModelPresets">
+          <option value="gemini-4-carbon">Carbon · 支持 low / medium / high（默认 high）</option>
+          <option value="gemini-4-argon">Argon · 支持 low / medium / high（默认 high）</option>
+          <option value="gemini-4-hydrogen">Hydrogen · 支持至 xhigh</option>
+          <option value="Orchestrator (Carbon)">Orchestrator (Carbon) · 自动省略 --effort</option>
+          <option value="Orchestrator (Argon)">Orchestrator (Argon) · 自动省略 --effort</option>
+        </datalist>
+        <datalist id="grokModelPresets">
+          <option value="grok-4.7">Grok 4.7 · 支持至 xhigh</option>
+        </datalist>
+        <datalist id="codexModelPresets">
+          <option value="gpt-6-astra">GPT-6 Astra · 支持至 max</option>
+          <option value="gpt-6.1-sol">GPT-6.1 Sol · 支持至 xhigh</option>
+        </datalist>
+
+        <div class="agent-cfg-grid">
+          <div class="agent-cfg-box cfg-carbon">
+            <div class="cfg-box-head">
+              <h4>Carbon 席位</h4>
+              <span id="cfgStatusCarbon" class="driver-pill">检测中</span>
+            </div>
+            <div class="cfg-row-2">
+              <div>
+                <label>底层 CLI 驱动</label>
+                <select id="cfgCarbonDriver" class="select-input">
+                  <option value="agy" selected>Antigravity CLI (agy)</option>
+                  <option value="codex">Codex CLI (codex)</option>
+                  <option value="grok">Grok CLI (grok)</option>
+                  <option value="auto">自动匹配已安装 CLI</option>
+                </select>
+              </div>
+              <div>
+                <label>预设身份侧重</label>
+                <select id="cfgCarbonPersona" class="select-input">
+                  <option value="planner" selected>架构规划（拆解与收敛）</option>
+                  <option value="fullstack_solo">全栈主程（设计+落地一体）</option>
+                  <option value="red_team">红队挑刺（风险与反例）</option>
+                  <option value="implementer">工程落地（实施与做减法）</option>
+                  <option value="product_ux">产品交互（体验与路径降噪）</option>
+                  <option value="perf_sre">性能稳定（延迟与容错护栏）</option>
+                  <option value="qa_audit">测试验收（边界用例矩阵）</option>
+                </select>
+              </div>
+            </div>
+            <div class="cfg-row-2">
+              <div>
+                <label>自定义可执行文件路径</label>
+                <input type="text" id="cfgCarbonBin" class="text-input" placeholder="留空自动检测（支持填 aty 等自定义名）" />
+              </div>
+              <div>
+                <label>指定模型（留空走驱动默认）</label>
+                <input type="text" id="cfgCarbonModel" list="agyModelPresets" class="text-input" placeholder="如 gemini-4-carbon" />
+              </div>
+            </div>
+            <div class="cfg-row-2">
+              <div>
+                <label>讨论推理档位 <span id="cfgCarbonEffortHint" class="cfg-effort-hint"></span></label>
+                <select id="cfgCarbonEffort" class="select-input">
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high" selected>high（推荐）</option>
+                </select>
+              </div>
+              <div>
+                <label>执行落地档位（独奏或主刀时生效）</label>
+                <select id="cfgCarbonExecEffort" class="select-input">
+                  <option value="medium">medium</option>
+                  <option value="high" selected>high（推荐）</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div class="agent-cfg-box cfg-grok">
+            <div class="cfg-box-head">
+              <h4>Grok 席位</h4>
+              <span id="cfgStatusGrok" class="driver-pill">检测中</span>
+            </div>
+            <div class="cfg-row-2">
+              <div>
+                <label>底层 CLI 驱动</label>
+                <select id="cfgGrokDriver" class="select-input">
+                  <option value="grok" selected>Grok CLI (grok)</option>
+                  <option value="agy">Antigravity CLI (agy)</option>
+                  <option value="codex">Codex CLI (codex)</option>
+                  <option value="auto">自动匹配已安装 CLI</option>
+                </select>
+              </div>
+              <div>
+                <label>预设身份侧重</label>
+                <select id="cfgGrokPersona" class="select-input">
+                  <option value="red_team" selected>红队挑刺（风险与反例）</option>
+                  <option value="planner">架构规划（拆解与收敛）</option>
+                  <option value="fullstack_solo">全栈主程（设计+落地一体）</option>
+                  <option value="implementer">工程落地（实施与做减法）</option>
+                  <option value="product_ux">产品交互（体验与路径降噪）</option>
+                  <option value="perf_sre">性能稳定（延迟与容错护栏）</option>
+                  <option value="qa_audit">测试验收（边界用例矩阵）</option>
+                </select>
+              </div>
+            </div>
+            <div class="cfg-row-2">
+              <div>
+                <label>自定义可执行文件路径</label>
+                <input type="text" id="cfgGrokBin" class="text-input" placeholder="留空自动检测" />
+              </div>
+              <div>
+                <label>指定模型（留空走驱动默认）</label>
+                <input type="text" id="cfgGrokModel" list="grokModelPresets" class="text-input" placeholder="如 grok-4.7" />
+              </div>
+            </div>
+            <div class="cfg-row-2">
+              <div>
+                <label>讨论推理档位 <span id="cfgGrokEffortHint" class="cfg-effort-hint"></span></label>
+                <select id="cfgGrokEffort" class="select-input">
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                  <option value="xhigh" selected>xhigh（最高）</option>
+                </select>
+              </div>
+              <div>
+                <label>执行落地档位（独奏或主刀时生效）</label>
+                <select id="cfgGrokExecEffort" class="select-input">
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                  <option value="xhigh" selected>xhigh（最高）</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div class="agent-cfg-box cfg-astra">
+            <div class="cfg-box-head">
+              <h4>Astra 席位</h4>
+              <span id="cfgStatusAstra" class="driver-pill">检测中</span>
+            </div>
+            <div class="cfg-row-2">
+              <div>
+                <label>底层 CLI 驱动</label>
+                <select id="cfgAstraDriver" class="select-input">
+                  <option value="codex" selected>Codex CLI (codex)</option>
+                  <option value="agy">Antigravity CLI (agy)</option>
+                  <option value="grok">Grok CLI (grok)</option>
+                  <option value="auto">自动匹配已安装 CLI</option>
+                </select>
+              </div>
+              <div>
+                <label>预设身份侧重</label>
+                <select id="cfgAstraPersona" class="select-input">
+                  <option value="implementer" selected>工程落地（实施与做减法）</option>
+                  <option value="fullstack_solo">全栈主程（设计+落地一体）</option>
+                  <option value="planner">架构规划（拆解与收敛）</option>
+                  <option value="red_team">红队挑刺（风险与反例）</option>
+                  <option value="product_ux">产品交互（体验与路径降噪）</option>
+                  <option value="perf_sre">性能稳定（延迟与容错护栏）</option>
+                  <option value="qa_audit">测试验收（边界用例矩阵）</option>
+                </select>
+              </div>
+            </div>
+            <div class="cfg-row-2">
+              <div>
+                <label>自定义可执行文件路径</label>
+                <input type="text" id="cfgAstraBin" class="text-input" placeholder="留空自动检测，支持 .app 路径" />
+              </div>
+              <div>
+                <label>指定模型（留空走驱动默认）</label>
+                <input type="text" id="cfgAstraModel" list="codexModelPresets" class="text-input" placeholder="如 gpt-6-astra" />
+              </div>
+            </div>
+            <div class="cfg-row-2">
+              <div>
+                <label>讨论推理档位 <span id="cfgAstraEffortHint" class="cfg-effort-hint"></span></label>
+                <select id="cfgAstraEffort" class="select-input" title="会议讨论阶段推理档位">
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                  <option value="xhigh">xhigh</option>
+                  <option value="max" selected>max（满档）</option>
+                </select>
+              </div>
+              <div>
+                <label>执行落地档位（独奏或主刀时生效）</label>
+                <select id="cfgAstraExecEffort" class="select-input" title="执行落地阶段推理档位">
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                  <option value="xhigh">xhigh</option>
+                  <option value="max" selected>max（满档）</option>
+                </select>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" id="modalTestCliBtn" class="mini-outline-btn" title="携带当前所填模型与推理档位实测连通状态">实测当前模型连通</button>
+        <button id="cancelSettingsBtn" class="mini-outline-btn">取消</button>
+        <button id="saveSettingsBtn" class="primary-send-btn">保存并重新探测</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 全局轻提示容器 -->
+  <div id="toastContainer" class="toast-container"></div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

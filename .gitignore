@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+
+# Build artifacts (rebuild with scripts/build_macos_app.sh)
+AI圆桌.app/
+*.app/
+build/
+dist/
+
+# Python
+__pycache__/
+*.pyc
+
+# Logs / local runtime data
+*.log
+.env
+.env.*
