@@ -4947,3 +4947,649 @@ body {
   cursor: pointer;
   white-space: nowrap;
 }
+
+
+/* ==========================================================================
+   AI_ROUNDTABLE_V3_UPGRADE_20261114
+   1. 语义化灵动过程动效系统（轨道三核推理 / 谐波光谱扫描 / 汇聚脉冲 / 极光流式顶边 / 胶囊呼吸光标）
+   2. 1–6 席弹性圆桌视觉色板（Carbon / Grok / Astra / Vega / Titan / Prism）
+   3. 左侧五分导航设置中心（阵容与称呼 / 席位与模型 / 并发与时限 / 安全与工作区 / 驱动与诊断）
+   4. CAS 快照确认、冲突拒绝与崩溃哈希恢复横幅
+   ========================================================================== */
+
+:root,
+[data-theme="light"] {
+  --vega-color: #7c3aed;
+  --vega-bg: rgba(124, 58, 237, 0.1);
+  --vega-border: rgba(124, 58, 237, 0.28);
+
+  --titan-color: #0284c7;
+  --titan-bg: rgba(2, 132, 199, 0.1);
+  --titan-border: rgba(2, 132, 199, 0.28);
+
+  --prism-color: #db2777;
+  --prism-bg: rgba(219, 39, 119, 0.1);
+  --prism-border: rgba(219, 39, 119, 0.28);
+}
+
+[data-theme="dark"] {
+  --vega-color: #c084fc;
+  --vega-bg: rgba(192, 132, 252, 0.14);
+  --vega-border: rgba(192, 132, 252, 0.34);
+
+  --titan-color: #38bdf8;
+  --titan-bg: rgba(56, 189, 248, 0.14);
+  --titan-border: rgba(56, 189, 248, 0.34);
+
+  --prism-color: #f472b6;
+  --prism-bg: rgba(244, 114, 182, 0.14);
+  --prism-border: rgba(244, 114, 182, 0.34);
+}
+
+/* ==================== 1. 语义化灵动过程动效系统（纯 transform / opacity 60fps） ==================== */
+
+/* 四阶段进度连接流光线 */
+.step-line {
+  display: inline-block;
+  position: relative;
+  width: 16px;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--border-subtle);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.step-line.is-done {
+  background: var(--accent-primary);
+  opacity: 0.55;
+}
+
+.step-line.is-flowing::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, var(--accent-primary), transparent);
+  transform: translateX(-100%);
+  will-change: transform;
+  animation: stepLineFlow 1.35s var(--ease-smooth) infinite;
+}
+
+@keyframes stepLineFlow {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(110%); }
+}
+
+@media (max-width: 1280px) {
+  .step-line {
+    width: 8px;
+  }
+}
+
+/* 发言卡角色主题强调色映射 */
+.msg-card {
+  --seat-accent: var(--accent-primary);
+  position: relative;
+  overflow: hidden;
+}
+.msg-card.speaker-carbon { --seat-accent: var(--carbon-color); }
+.msg-card.speaker-grok { --seat-accent: var(--grok-color); }
+.msg-card.speaker-astra { --seat-accent: var(--astra-color); }
+.msg-card.speaker-vega {
+  --seat-accent: var(--vega-color);
+  background: radial-gradient(420px 140px at 0% 0%, var(--vega-bg), transparent 72%), var(--msg-surface-grad);
+}
+.msg-card.speaker-titan {
+  --seat-accent: var(--titan-color);
+  background: radial-gradient(420px 140px at 0% 0%, var(--titan-bg), transparent 72%), var(--msg-surface-grad);
+}
+.msg-card.speaker-prism {
+  --seat-accent: var(--prism-color);
+  background: radial-gradient(420px 140px at 0% 0%, var(--prism-bg), transparent 72%), var(--msg-surface-grad);
+}
+
+/* 流式生成中卡片顶部极光扫掠细轨 */
+.msg-card.is-streaming::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2.5px;
+  background: linear-gradient(90deg, transparent 0%, var(--seat-accent) 48%, var(--accent-primary) 65%, transparent 100%);
+  transform: translateX(-100%);
+  will-change: transform, opacity;
+  animation: msgAuroraRail 1.9s var(--ease-smooth) infinite;
+  pointer-events: none;
+  z-index: 3;
+}
+
+@keyframes msgAuroraRail {
+  0% { transform: translateX(-95%); opacity: 0.55; }
+  50% { opacity: 1; }
+  100% { transform: translateX(95%); opacity: 0.55; }
+}
+
+/* 流式输出尾端柔和呼吸胶囊光标 */
+.msg-body.streaming > :last-child::after {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 14px;
+  margin-left: 4px;
+  vertical-align: -2px;
+  border-radius: 999px;
+  background: var(--seat-accent);
+  will-change: transform, opacity;
+  animation: fluidCaretBreathe 0.92s ease-in-out infinite alternate;
+}
+
+@keyframes fluidCaretBreathe {
+  from { opacity: 0.25; transform: scaleY(0.76); }
+  to { opacity: 0.95; transform: scaleY(1.04); }
+}
+
+/* 灵动多模态思考指示舞台（彻底取代单调旋转圆环 .thinking-spinner） */
+.kinetic-stage {
+  position: relative;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  z-index: 1;
+}
+
+/* 形态 A：三核星轨推演（thinking） */
+.k-orbit-ring {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  will-change: transform;
+  animation: kOrbitSpin 2.6s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite;
+}
+
+.k-orbit-node {
+  position: absolute;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--seat-accent);
+  will-change: transform, opacity;
+}
+
+.k-orbit-node.n1 {
+  top: 0;
+  left: 6.5px;
+  animation: kNodePulse 1.3s ease-in-out infinite alternate;
+}
+.k-orbit-node.n2 {
+  bottom: 1.5px;
+  left: 1px;
+  opacity: 0.72;
+  animation: kNodePulse 1.3s ease-in-out 0.35s infinite alternate;
+}
+.k-orbit-node.n3 {
+  bottom: 1.5px;
+  right: 1px;
+  opacity: 0.48;
+  animation: kNodePulse 1.3s ease-in-out 0.7s infinite alternate;
+}
+
+.k-orbit-core {
+  position: absolute;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--accent-primary);
+  opacity: 0.45;
+  animation: kCoreBreathe 1.5s ease-in-out infinite alternate;
+}
+
+@keyframes kOrbitSpin {
+  0% { transform: rotate(0deg) scale(0.96); }
+  50% { transform: rotate(180deg) scale(1.05); }
+  100% { transform: rotate(360deg) scale(0.96); }
+}
+
+@keyframes kNodePulse {
+  from { transform: scale(0.75); opacity: 0.42; }
+  to { transform: scale(1.18); opacity: 1; }
+}
+
+@keyframes kCoreBreathe {
+  from { transform: scale(0.7); opacity: 0.25; }
+  to { transform: scale(1.3); opacity: 0.75; }
+}
+
+/* 形态 B：四柱谐波光谱扫描（scanning · 读取源码 / 检索上下文） */
+.k-scan-bars {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  height: 15px;
+}
+
+.k-scan-bars i {
+  display: block;
+  width: 2.5px;
+  height: 13px;
+  border-radius: 999px;
+  background: var(--seat-accent);
+  transform-origin: center;
+  will-change: transform, opacity;
+  animation: kHarmonicWave 0.78s ease-in-out infinite alternate;
+}
+.k-scan-bars i:nth-child(2) { animation-delay: 0.14s; }
+.k-scan-bars i:nth-child(3) { animation-delay: 0.28s; }
+.k-scan-bars i:nth-child(4) { animation-delay: 0.42s; }
+
+@keyframes kHarmonicWave {
+  from { transform: scaleY(0.28); opacity: 0.4; }
+  to { transform: scaleY(1); opacity: 1; }
+}
+
+/* 形态 C：双环同心共振汇聚（synthesizing · 汇总决议 / 收敛共识） */
+.k-synth-wrap {
+  position: relative;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.k-synth-halo {
+  position: absolute;
+  inset: 1px;
+  border-radius: 50%;
+  border: 1.6px solid var(--seat-accent);
+  will-change: transform, opacity;
+  animation: kSynthRipple 1.6s var(--ease-out-expo) infinite;
+}
+
+.k-synth-diamond {
+  width: 6.5px;
+  height: 6.5px;
+  border-radius: 2px;
+  background: var(--seat-accent);
+  transform: rotate(45deg);
+  will-change: transform, opacity;
+  animation: kSynthCore 1.6s ease-in-out infinite alternate;
+}
+
+@keyframes kSynthRipple {
+  0% { transform: scale(0.55); opacity: 0.9; }
+  100% { transform: scale(1.32); opacity: 0; }
+}
+
+@keyframes kSynthCore {
+  from { transform: rotate(45deg) scale(0.84); opacity: 0.72; }
+  to { transform: rotate(135deg) scale(1.12); opacity: 1; }
+}
+
+/* 思考阶段标签胶囊微层次增强 */
+.thinking-phase-pill {
+  font-size: 10.6px;
+  font-weight: 720;
+  padding: 1px 6.5px;
+  border-radius: 999px;
+  color: var(--seat-accent);
+  background: var(--bg-panel-solid);
+  border: 1px solid var(--border-subtle);
+}
+
+/* ==================== 2. 1–6 席弹性圆桌色标与快速阵容胶囊 ==================== */
+
+.seat-card.seat-unmounted {
+  display: none !important;
+}
+
+.seat-vega .seat-avatar, .msg-card.speaker-vega .msg-avatar-mini, .cli-role-dot.dot-vega { background: var(--vega-color); }
+.seat-titan .seat-avatar, .msg-card.speaker-titan .msg-avatar-mini, .cli-role-dot.dot-titan { background: var(--titan-color); }
+.seat-prism .seat-avatar, .msg-card.speaker-prism .msg-avatar-mini, .cli-role-dot.dot-prism { background: var(--prism-color); }
+
+.seat-vega::before { border-color: var(--vega-color); }
+.seat-titan::before { border-color: var(--titan-color); }
+.seat-prism::before { border-color: var(--prism-color); }
+
+.seat-vega.status-speaking, .seat-vega.status-executing { border-color: var(--vega-color); background: var(--vega-bg); }
+.seat-titan.status-speaking, .seat-titan.status-executing { border-color: var(--titan-color); background: var(--titan-bg); }
+.seat-prism.status-speaking, .seat-prism.status-executing { border-color: var(--prism-color); background: var(--prism-bg); }
+
+.badge-seat-vega .mini-seat-dot { background: var(--vega-color); color: #fff; }
+.badge-seat-titan .mini-seat-dot { background: var(--titan-color); color: #fff; }
+.badge-seat-prism .mini-seat-dot { background: var(--prism-color); color: #fff; }
+
+.ring-lineup-btn {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  border: 1px dashed var(--border-strong);
+  color: var(--accent-primary);
+  font-size: 11.8px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: transform 0.15s var(--ease-smooth), background 0.15s ease, border-color 0.15s ease;
+}
+
+.ring-lineup-btn:hover {
+  background: var(--bg-hover);
+  border-style: solid;
+  transform: translateY(-1px);
+}
+
+.scenario-preset-grid.scenario-grid-6 {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 9px;
+}
+
+@media (max-width: 1080px) {
+  .scenario-preset-grid.scenario-grid-6 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.exec-seat-seg {
+  flex-wrap: wrap;
+  max-width: 248px;
+}
+
+/* ==================== 3. 分导航「系统运行策略与多席位配置中心」 ==================== */
+
+.modal-card.modal-settings-center {
+  width: 896px;
+  max-width: 95vw;
+  height: min(670px, 89vh);
+  max-height: 89vh;
+}
+
+.settings-shell {
+  display: grid;
+  grid-template-columns: 204px minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.settings-nav {
+  padding: 14px 11px;
+  border-right: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+}
+
+.settings-nav-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 11px;
+  border-radius: 11px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease, transform 0.15s var(--ease-smooth);
+}
+
+.settings-nav-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.settings-nav-btn.active {
+  background: var(--bg-panel-solid);
+  color: var(--accent-primary);
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-card);
+}
+
+.nav-btn-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.nav-btn-text span {
+  font-size: 12.8px;
+  font-weight: 740;
+  line-height: 1.25;
+}
+
+.nav-btn-text em {
+  font-style: normal;
+  font-size: 10.8px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.settings-content-area {
+  padding: 16px 20px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.settings-pane {
+  display: none;
+  flex-direction: column;
+  gap: 12px;
+  animation: wbPaneIn 150ms var(--ease-out-expo) both;
+}
+
+.settings-pane.active {
+  display: flex;
+}
+
+@media (max-width: 760px) {
+  .settings-shell {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  .settings-nav {
+    flex-direction: row;
+    overflow-x: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--border-subtle);
+    padding: 8px 10px;
+  }
+  .settings-nav-btn {
+    width: auto;
+    flex-shrink: 0;
+    padding: 7px 10px;
+  }
+  .nav-btn-text em {
+    display: none;
+  }
+}
+
+.modal-lineup-quick-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.lineup-quick-chip {
+  padding: 7px 10px;
+  border-radius: 9px;
+  background: var(--bg-panel-solid);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: 11.8px;
+  font-weight: 680;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.lineup-quick-chip:hover,
+.lineup-quick-chip.active {
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+  background: var(--bg-subtle);
+}
+
+.seat-enable-matrix {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.seat-matrix-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 10px;
+  border-radius: 9px;
+  background: var(--bg-panel-solid);
+  border: 1px solid var(--border-subtle);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.seat-matrix-toggle input[type="checkbox"] {
+  accent-color: var(--accent-primary);
+}
+
+.roster-preset-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.roster-preset-row label,
+.field-block-label {
+  font-size: 11.4px;
+  font-weight: 660;
+  color: var(--text-secondary);
+  display: block;
+  margin-bottom: 4px;
+}
+
+.roster-cfg-grid.roster-cfg-grid-6 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.seats-filter-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.cfg-switch-label.compact {
+  font-size: 11.8px;
+}
+
+.modal-footer {
+  justify-content: space-between;
+}
+
+.modal-footer-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.security-contract-list {
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 11.8px;
+  color: var(--text-secondary);
+}
+
+.diag-kv-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 11.8px;
+  color: var(--text-secondary);
+}
+
+.diag-kv-grid code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--bg-panel-solid);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+/* ==================== 4. 执行终端安全护栏与崩溃哈希恢复横幅 ==================== */
+
+.exec-guard-banner {
+  border-radius: 11px;
+  padding: 10px 12px;
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  color: var(--text-primary);
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.exec-guard-banner.is-warn {
+  background: var(--grok-bg);
+  border-color: var(--grok-border);
+}
+
+.exec-guard-title {
+  font-weight: 760;
+  color: var(--danger-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.exec-guard-banner.is-warn .exec-guard-title {
+  color: var(--grok-color);
+}
+
+.exec-guard-files {
+  max-height: 112px;
+  overflow-y: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--bg-panel-solid);
+  border: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.exec-guard-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.rollback-warn-btn.highlight-urgent {
+  background: var(--danger-color) !important;
+  color: #fff !important;
+  border-color: var(--danger-color) !important;
+}

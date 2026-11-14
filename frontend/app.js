@@ -15,13 +15,31 @@ const STORAGE_KEYS = {
   rightHidden: "ai_rt_right_hidden",
 };
 
-const AGENT_ORDER = ["carbon", "grok", "astra"];
+const AGENT_ORDER = ["carbon", "grok", "astra", "vega", "titan", "prism"];
+const CORE_TRIAD_SEATS = ["carbon", "grok", "astra"];
+const SEAT_CAP_PAIRS = [
+  ["carbon", "Carbon", "席位一"],
+  ["grok", "Grok", "席位二"],
+  ["astra", "Astra", "席位三"],
+  ["vega", "Vega", "席位四"],
+  ["titan", "Titan", "席位五"],
+  ["prism", "Prism", "席位六"],
+];
 
-// AI_ROUNDTABLE_V2_UPGRADE_20261114
+// AI_ROUNDTABLE_V3_UPGRADE_20261114 — 内存态控制面鉴权凭据（严禁落 localStorage / Cookie / URL Query）
+const authState = {
+  token: "",
+  bootId: "",
+  ready: false,
+};
+
 const AGENT_NAMES = {
   carbon: "架构师",
   grok: "审计官",
   astra: "工程师",
+  vega: "交互设计",
+  titan: "性能专家",
+  prism: "质量验证",
   chair: "主持人",
   system: "系统",
 };
@@ -31,15 +49,30 @@ const AUTHOR_BADGE_META = {
   carbon: { short: "架", name: "架构师", cls: "badge-seat-carbon" },
   grok: { short: "审", name: "审计官", cls: "badge-seat-grok" },
   astra: { short: "工", name: "工程师", cls: "badge-seat-astra" },
+  vega: { short: "交", name: "交互设计", cls: "badge-seat-vega" },
+  titan: { short: "性", name: "性能专家", cls: "badge-seat-titan" },
+  prism: { short: "验", name: "质量验证", cls: "badge-seat-prism" },
   system: { short: "系", name: "决议归档", cls: "badge-seat-system" },
 };
 
 const ROSTER_NAME_PRESETS = {
-  role_experts: { label: "专业职能称呼", names: { carbon: "架构师", grok: "审计官", astra: "工程师" } },
-  council_alpha: { label: "中立席位代号", names: { carbon: "Alpha", grok: "Beta", astra: "Gamma" } },
-  product_studio: { label: "产品研发委员会", names: { carbon: "产品总监", grok: "红队审计", astra: "研发主程" } },
+  role_experts: {
+    label: "专业职能称呼",
+    names: { carbon: "架构师", grok: "审计官", astra: "工程师", vega: "交互设计", titan: "性能专家", prism: "质量验证" },
+  },
+  council_alpha: {
+    label: "中立席位代号",
+    names: { carbon: "Alpha", grok: "Beta", astra: "Gamma", vega: "Delta", titan: "Epsilon", prism: "Zeta" },
+  },
+  product_studio: {
+    label: "产品研发委员会",
+    names: { carbon: "产品总监", grok: "红队审计", astra: "研发主程", vega: "体验设计", titan: "稳定性架构", prism: "测试主管" },
+  },
   auto_driver: { label: "跟随底层引擎", names: {} },
-  classic: { label: "经典默认代号", names: { carbon: "Carbon", grok: "Grok", astra: "Astra" } },
+  classic: {
+    label: "经典工程代号",
+    names: { carbon: "Carbon", grok: "Grok", astra: "Astra", vega: "Vega", titan: "Titan", prism: "Prism" },
+  },
 };
 const DEFAULT_ROSTER_PRESETS = ROSTER_NAME_PRESETS;
 
@@ -138,6 +171,9 @@ const DEFAULT_SEAT_PERSONAS = {
   carbon: "planner",
   grok: "red_team",
   astra: "implementer",
+  vega: "product_ux",
+  titan: "perf_sre",
+  prism: "qa_audit",
 };
 
 // 模块一：5 项正式讨论策略 + 历史旧 key 映射
@@ -170,11 +206,33 @@ const LEGACY_COLLAB_MODE_MAP = {
   fast_align: "rapid_consensus",
 };
 
-// 模块五：5 大开局引导舱场景预设
+// 模块五：1–6 席全场景阵容预设
 const SCENARIO_PRESETS = {
+  solo_focus: {
+    key: "solo_focus",
+    label: "单席专注（1席）",
+    collab_mode: "rapid_consensus",
+    solo: true,
+  },
+  duel_review: {
+    key: "duel_review",
+    label: "双席辩证（2席）",
+    collab_mode: "adversarial_review",
+    enabled_agents: ["carbon", "grok"],
+    seat_personas: { carbon: "fullstack_solo", grok: "red_team" },
+    executor_agent: "carbon",
+  },
   arch_review: {
     key: "arch_review",
-    label: "架构评审",
+    label: "标准三席评审（3席）",
+    collab_mode: "deep_deliberation",
+    enabled_agents: ["carbon", "grok", "astra"],
+    seat_personas: { carbon: "planner", grok: "red_team", astra: "implementer" },
+    executor_agent: "astra",
+  },
+  classic_triad: {
+    key: "classic_triad",
+    label: "标准三席合议（3席）",
     collab_mode: "deep_deliberation",
     enabled_agents: ["carbon", "grok", "astra"],
     seat_personas: { carbon: "planner", grok: "red_team", astra: "implementer" },
@@ -182,7 +240,7 @@ const SCENARIO_PRESETS = {
   },
   proposal_debate: {
     key: "proposal_debate",
-    label: "方案论证",
+    label: "方案论证（3席）",
     collab_mode: "adversarial_review",
     enabled_agents: ["carbon", "grok", "astra"],
     seat_personas: { carbon: "planner", grok: "red_team", astra: "implementer" },
@@ -190,7 +248,7 @@ const SCENARIO_PRESETS = {
   },
   product_design: {
     key: "product_design",
-    label: "产品设计",
+    label: "产品设计（3席）",
     collab_mode: "divergent_convergent",
     enabled_agents: ["carbon", "grok", "astra"],
     seat_personas: { carbon: "product_ux", grok: "red_team", astra: "fullstack_solo" },
@@ -198,32 +256,58 @@ const SCENARIO_PRESETS = {
   },
   code_diagnosis: {
     key: "code_diagnosis",
-    label: "源码诊断",
+    label: "源码诊断（3席）",
     collab_mode: "code_review",
     enabled_agents: ["carbon", "grok", "astra"],
     seat_personas: { carbon: "perf_sre", grok: "qa_audit", astra: "implementer" },
     executor_agent: "astra",
   },
-  solo_focus: {
-    key: "solo_focus",
-    label: "单席专注",
-    collab_mode: "rapid_consensus",
-    solo: true,
+  product_quad: {
+    key: "product_quad",
+    label: "四席产品全栈（4席）",
+    collab_mode: "divergent_convergent",
+    enabled_agents: ["carbon", "vega", "grok", "astra"],
+    seat_personas: { carbon: "planner", vega: "product_ux", grok: "red_team", astra: "implementer" },
+    executor_agent: "astra",
+  },
+  sre_council_5: {
+    key: "sre_council_5",
+    label: "五席高可靠委员会（5席）",
+    collab_mode: "deep_deliberation",
+    enabled_agents: ["carbon", "vega", "grok", "titan", "astra"],
+    seat_personas: { carbon: "planner", vega: "product_ux", grok: "red_team", titan: "perf_sre", astra: "implementer" },
+    executor_agent: "astra",
+  },
+  full_jury_6: {
+    key: "full_jury_6",
+    label: "六席全景评审（6席）",
+    collab_mode: "deep_deliberation",
+    enabled_agents: ["carbon", "vega", "grok", "titan", "astra", "prism"],
+    seat_personas: {
+      carbon: "planner",
+      vega: "product_ux",
+      grok: "red_team",
+      titan: "perf_sre",
+      astra: "implementer",
+      prism: "qa_audit",
+    },
+    executor_agent: "astra",
   },
 };
 
+// P0.3 强制有限默认时限（废除 turn_timeout_sec=0 无限挂死分支）
 const PACING_PRESETS = {
-  unrestricted: {
-    idle_timeout_sec: 900,
-    turn_timeout_sec: 0,
-    max_ref_chars: 120000,
-    desc: "空闲等待 900s · 单轮不限总时长 · 源码预算 120,000 字符",
-  },
   standard: {
     idle_timeout_sec: 300,
     turn_timeout_sec: 600,
     max_ref_chars: 120000,
-    desc: "空闲等待 300s · 单轮上限 600s · 源码预算 120,000 字符",
+    desc: "空闲等待 300s · 单轮上限 600s · 源码预算 120,000 字符（推荐默认）",
+  },
+  unrestricted: {
+    idle_timeout_sec: 600,
+    turn_timeout_sec: 1800,
+    max_ref_chars: 120000,
+    desc: "空闲等待 600s · 单轮长考上限 1800s · 源码预算 120,000 字符",
   },
 };
 
@@ -282,20 +366,31 @@ const state = {
   whiteboard: null,
   wbKnownItemIds: new Set(),
   lastWbTotalCount: 0,
-  sse: null,
+  sseAbortController: null,
   sseReconnectTimer: null,
+  sseConnectedSessionId: "",
+  sseLastRev: 0,
+  seatConfigRev: 0,
   userScrolledUp: false,
   activeTab: "whiteboard",
+  activeSettingsTab: "lineup",
+  showAllSeatsInRing: false,
   cliTestResults: {},
   pingLatencyBySeat: {},
   expandedCliCard: null,
   personaPopoverSeat: null,
   execStartTs: 0,
+  execState: "idle",
+  recoveryRequired: false,
+  recoveryPlan: null,
+  rollbackConflicts: [],
+  postExecVerifyFailed: false,
+  postExecVerifyCmd: "",
   rosterPreset: "role_experts",
   singleCliConcurrency: 3,
-  pacingMode: "unrestricted",
-  idleTimeoutSec: 900,
-  turnTimeoutSec: 0,
+  pacingMode: "standard",
+  idleTimeoutSec: 300,
+  turnTimeoutSec: 600,
   maxRefChars: 120000,
   atMenu: {
     open: false,
@@ -342,15 +437,71 @@ function showToast(message, kind = "info", durationMs = 3000) {
   }, durationMs);
 }
 
+async function initControlPlaneAuth() {
+  // 1. 先检查 URL Fragment (#bootstrap=...)，第一时间抹除浏览器地址栏，杜绝泄露
+  const rawHash = window.location.hash || "";
+  let bootstrapCode = "";
+  if (rawHash.startsWith("#")) {
+    const hashParams = new URLSearchParams(rawHash.slice(1));
+    bootstrapCode = (hashParams.get("bootstrap") || "").trim();
+    if (bootstrapCode) {
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    }
+  }
+
+  // 2. macOS 原生 WKWebView 主框架受信任源凭据桥
+  const nativeBridge = window.webkit?.messageHandlers?.roundtableNative;
+  if (nativeBridge && typeof nativeBridge.postMessage === "function") {
+    try {
+      const nativeAuth = await nativeBridge.postMessage({ action: "getBootAuth" });
+      if (nativeAuth && nativeAuth.token) {
+        authState.token = String(nativeAuth.token);
+        authState.bootId = String(nativeAuth.bootId || "");
+        authState.ready = true;
+        return;
+      }
+    } catch {
+      // 回退至 Web 引导码核销流程
+    }
+  }
+
+  // 3. 纯浏览器开发模式：单次核销 #bootstrap 兑换码换取内存态 X-Roundtable-Token
+  if (bootstrapCode) {
+    const res = await fetch("/api/auth/bootstrap", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: bootstrapCode }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.token) {
+      throw new Error(data.error || "引导兑换码已失效，请从终端输出重新打开一次性引导链接");
+    }
+    authState.token = String(data.token);
+    authState.bootId = String(data.boot_id || "");
+    authState.ready = true;
+  }
+}
+
 async function apiFetch(path, options = {}) {
+  const mergedHeaders = {
+    "Content-Type": "application/json",
+    ...(authState.token ? { "X-Roundtable-Token": authState.token } : {}),
+    ...(options.headers || {}),
+  };
   const opts = {
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
     ...options,
+    headers: mergedHeaders,
   };
   const res = await fetch(path, opts);
   const data = await res.json().catch(() => ({}));
+  if (data && typeof data.boot_id === "string" && data.boot_id) {
+    authState.bootId = data.boot_id;
+  }
   if (!res.ok) {
-    throw new Error(data.error || `请求失败 (${res.status})`);
+    const err = new Error(data.error || `请求失败 (${res.status})`);
+    err.status = res.status;
+    err.payload = data;
+    throw err;
   }
   return data;
 }
@@ -531,18 +682,18 @@ function syncAutoPreviewUI(on) {
 function detectActiveScenarioKey() {
   if (state.enabledAgents.length === 1) {
     const only = state.enabledAgents[0];
-    if (state.collabMode === "rapid_consensus" && state.seatPersonas[only] === "fullstack_solo") {
+    if (state.seatPersonas[only] === "fullstack_solo") {
       return "solo_focus";
     }
     return "";
   }
-  if (state.enabledAgents.length === 3) {
-    for (const [key, sp] of Object.entries(SCENARIO_PRESETS)) {
-      if (sp.solo) continue;
-      if (sp.collab_mode !== state.collabMode) continue;
-      const matchPersonas = AGENT_ORDER.every((aid) => state.seatPersonas[aid] === sp.seat_personas[aid]);
-      if (matchPersonas) return key;
-    }
+  const curSet = state.enabledAgents.join(",");
+  for (const [key, sp] of Object.entries(SCENARIO_PRESETS)) {
+    if (sp.solo || key === "classic_triad") continue;
+    if (!Array.isArray(sp.enabled_agents) || sp.enabled_agents.join(",") !== curSet) continue;
+    if (sp.collab_mode !== state.collabMode) continue;
+    const matchPersonas = sp.enabled_agents.every((aid) => state.seatPersonas[aid] === sp.seat_personas[aid]);
+    if (matchPersonas) return key;
   }
   return "";
 }
@@ -572,13 +723,17 @@ function syncDynamicRosterNames() {
     ROSTER_NAME_PRESETS[state.rosterPreset] ||
     ROSTER_NAME_PRESETS.role_experts;
 
-  for (const aid of AGENT_ORDER) {
+  for (const [aid, cap, slotLabel] of SEAT_CAP_PAIRS) {
     const stName = state.seatStates?.[aid]?.name;
     const sysName = sysAgents?.[aid]?.name;
     const resolved = String(sysName || stName || presetObj.names?.[aid] || AGENT_NAMES[aid] || aid).trim();
     AGENT_NAMES[aid] = resolved;
-    AUTHOR_BADGE_META[aid].name = resolved;
-    AUTHOR_BADGE_META[aid].short = computeAvatarShortChar(resolved, aid);
+    if (!AUTHOR_BADGE_META[aid]) {
+      AUTHOR_BADGE_META[aid] = { short: computeAvatarShortChar(resolved, aid), name: resolved, cls: `badge-seat-${aid}` };
+    } else {
+      AUTHOR_BADGE_META[aid].name = resolved;
+      AUTHOR_BADGE_META[aid].short = computeAvatarShortChar(resolved, aid);
+    }
 
     const seatCard = el(`seat-${aid}`);
     if (seatCard) {
@@ -591,37 +746,31 @@ function syncDynamicRosterNames() {
       if (roleBtn) roleBtn.title = `配置 ${resolved} 角色职责、显示名称、推理档位与参会状态`;
     }
 
-    const execSegBtn = document.querySelector(`#executorSegmented [data-exec-agent="${aid}"]`);
-    if (execSegBtn) {
-      execSegBtn.textContent = resolved;
-      execSegBtn.title = `由 ${resolved} 承接执行交付`;
-    }
+    const h4 = el(`cfgHead${cap}`);
+    if (h4) h4.textContent = `${resolved}（${slotLabel}）`;
+
+    document.querySelectorAll(`[data-seat-slot-name="${aid}"]`).forEach((b) => {
+      b.textContent = resolved;
+    });
 
     document.querySelectorAll(`.msg-card.speaker-${aid} [data-msg-act="mention"]`).forEach((btn) => {
       btn.textContent = `@${resolved}`;
     });
   }
 
-  const slotLabels = { carbon: "席位一", grok: "席位二", astra: "席位三" };
-  for (const [aid, cap] of [
-    ["carbon", "Carbon"],
-    ["grok", "Grok"],
-    ["astra", "Astra"],
-  ]) {
-    const h4 = el(`cfgHead${cap}`);
-    if (h4) h4.textContent = `${AGENT_NAMES[aid]}（${slotLabels[aid]}）`;
-  }
-
-  // 动态刷新开局引导舱与侧栏的 5 大场景预设描述文案
   const cN = AGENT_NAMES.carbon;
   const gN = AGENT_NAMES.grok;
   const aN = AGENT_NAMES.astra;
+  const vN = AGENT_NAMES.vega;
+  const tN = AGENT_NAMES.titan;
+  const pN = AGENT_NAMES.prism;
   const scenarioDescMap = {
-    arch_review: `${cN} 架构规划 · ${gN} 风险审计 · ${aN} 工程实现`,
-    proposal_debate: `${aN} 立论 · ${gN} 压力审计 · ${cN} 架构裁定`,
-    product_design: `${cN} 产品交互 · ${gN} 风险审计 · ${aN} 全栈架构`,
-    code_diagnosis: `${cN} 性能与稳定性 · ${gN} 测试与验证 · ${aN} 工程实现`,
-    solo_focus: `启用单席「全栈架构」独立完成方案设计与自检交付`,
+    solo_focus: `1席 · 启用首席「全栈架构」独立完成推演与交付`,
+    duel_review: `2席 · ${cN} 全栈立论 + ${gN} 反向压力质询`,
+    arch_review: `3席 · ${cN} 架构规划 · ${gN} 风险审计 · ${aN} 工程实现`,
+    product_quad: `4席 · ${cN} / ${vN} / ${gN} / ${aN} 产品与全栈合议`,
+    sre_council_5: `5席 · 增设 ${tN} 专项评审并发锁、存储事务与低延迟`,
+    full_jury_6: `6席 · ${cN}·${vN}·${gN}·${tN}·${aN}·${pN} 全景评审`,
   };
   document.querySelectorAll("[data-scenario-preset]").forEach((node) => {
     const pk = node.dataset.scenarioPreset;
@@ -643,11 +792,14 @@ function syncScenarioPresetHighlight() {
 }
 
 async function persistSessionSeatsPatch(patch) {
-  if (!state.currentSessionId) return null;
-  const res = await apiFetch(`/api/sessions/${state.currentSessionId}/seats`, {
+  const sessionId = state.currentSessionId;
+  if (!sessionId) return null;
+  const res = await apiFetch(`/api/sessions/${sessionId}/seats`, {
     method: "POST",
     body: JSON.stringify(patch),
   });
+  if (sessionId !== state.currentSessionId || (res.rev && res.rev < state.seatConfigRev)) return res;
+  state.seatConfigRev = Math.max(state.seatConfigRev, res.rev || 0);
   if (Array.isArray(res.enabled_agents)) state.enabledAgents = res.enabled_agents;
   if (res.seat_personas) state.seatPersonas = { ...state.seatPersonas, ...res.seat_personas };
   if (res.seat_efforts) state.seatEfforts = { ...res.seatEfforts };
@@ -814,7 +966,7 @@ function refreshSeatEffortSelectInModal(seatCap, autoResetModelOnDriverChange = 
 }
 
 function syncPacingControlsInModal(mode, idleSec, turnSec, refChars) {
-  const nextMode = ["unrestricted", "standard", "custom"].includes(mode) ? mode : "unrestricted";
+  const nextMode = ["standard", "unrestricted", "custom"].includes(mode) ? mode : "standard";
   state.pacingMode = nextMode;
 
   document.querySelectorAll("#cfgPacingGroup [data-pacing-mode]").forEach((btn) => {
@@ -827,9 +979,9 @@ function syncPacingControlsInModal(mode, idleSec, turnSec, refChars) {
   }
 
   const preset = PACING_PRESETS[nextMode];
-  const effIdle = preset ? preset.idle_timeout_sec : Number(idleSec ?? state.idleTimeoutSec ?? 900);
-  const effTurn = preset ? preset.turn_timeout_sec : Number(turnSec ?? state.turnTimeoutSec ?? 0);
-  const effRef = preset ? preset.max_ref_chars : Number(refChars ?? state.maxRefChars ?? 120000);
+  const effIdle = Math.max(15, preset ? preset.idle_timeout_sec : Number(idleSec || state.idleTimeoutSec || 300));
+  const effTurn = Math.max(30, preset ? preset.turn_timeout_sec : Number(turnSec || state.turnTimeoutSec || 600));
+  const effRef = Math.max(10000, preset ? preset.max_ref_chars : Number(refChars || state.maxRefChars || 120000));
 
   if (el("cfgIdleTimeout")) el("cfgIdleTimeout").value = String(effIdle);
   if (el("cfgTurnTimeout")) el("cfgTurnTimeout").value = String(effTurn);
@@ -837,13 +989,9 @@ function syncPacingControlsInModal(mode, idleSec, turnSec, refChars) {
 
   const descEl = el("cfgPacingDesc");
   if (descEl) {
-    if (preset) {
-      descEl.textContent = preset.desc;
-    } else {
-      const idleLabel = effIdle <= 0 ? "子进程存活不限空闲" : `空闲等待 ${effIdle}s`;
-      const turnLabel = effTurn <= 0 ? "单轮不限总时长" : `单轮上限 ${effTurn}s`;
-      descEl.textContent = `${idleLabel} · ${turnLabel} · 源码预算 ${effRef.toLocaleString()} 字符`;
-    }
+    descEl.textContent = preset
+      ? preset.desc
+      : `空闲上限 ${effIdle}s · 单轮上限 ${effTurn}s · 源码预算 ${effRef.toLocaleString()} 字符`;
   }
 }
 
@@ -862,7 +1010,18 @@ function formatInlineMarkdown(escapedLine) {
   s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   s = s.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
   const mentionNames = Array.from(
-    new Set(["Carbon", "Grok", "Astra", "主持人", AGENT_NAMES.carbon, AGENT_NAMES.grok, AGENT_NAMES.astra].filter(Boolean))
+    new Set(
+      [
+        "Carbon",
+        "Grok",
+        "Astra",
+        "Vega",
+        "Titan",
+        "Prism",
+        "主持人",
+        ...AGENT_ORDER.map((aid) => AGENT_NAMES[aid]),
+      ].filter(Boolean)
+    )
   ).map(escapeRegExp);
   if (mentionNames.length) {
     const mRe = new RegExp(`@(${mentionNames.join("|")})(?![A-Za-z0-9_])`, "gi");
@@ -1109,19 +1268,48 @@ function formatThinkingModelTag(msg) {
   return AGENT_NAMES[msg.speaker] || "CLI";
 }
 
+function resolveKineticVisualSpec(activityRaw, phaseRaw) {
+  const txt = `${activityRaw || ""} ${phaseRaw || ""}`;
+  if (/源码|检索|扫描|读取|索引|上下文|注入/.test(txt)) {
+    return {
+      mode: "scanning",
+      phaseTag: "上下文扫描",
+      html: `<span class="kinetic-stage" data-kinetic-mode="scanning" aria-hidden="true"><span class="k-scan-bars"><i></i><i></i><i></i><i></i></span></span>`,
+    };
+  }
+  if (/决议|收敛|汇总|归档|快照|回滚|验证/.test(txt)) {
+    return {
+      mode: "synthesizing",
+      phaseTag: "共识汇聚",
+      html: `<span class="kinetic-stage" data-kinetic-mode="synthesizing" aria-hidden="true"><span class="k-synth-wrap"><span class="k-synth-halo"></span><span class="k-synth-diamond"></span></span></span>`,
+    };
+  }
+  return {
+    mode: "thinking",
+    phaseTag: /质询|答辩|辩证/.test(txt) ? "交叉思辨" : "星轨推演",
+    html:
+      `<span class="kinetic-stage" data-kinetic-mode="thinking" aria-hidden="true">` +
+      `<span class="k-orbit-core"></span>` +
+      `<span class="k-orbit-ring"><i class="k-orbit-node n1"></i><i class="k-orbit-node n2"></i><i class="k-orbit-node n3"></i></span>` +
+      `</span>`,
+  };
+}
+
 function buildThinkingPlaceholderHtml(msg) {
   const startTs = Number(msg.started_ts || Date.now());
   const elapsedSec = Math.max(0, Math.floor((Date.now() - startTs) / 1000));
   const modelTag = escapeHtml(formatThinkingModelTag(msg));
-  const activity = escapeHtml(msg.activity || "正在深度推演…");
+  const rawAct = msg.activity || "正在组织核心论据与代码锚点…";
+  const activity = escapeHtml(rawAct);
+  const kSpec = resolveKineticVisualSpec(rawAct, msg.phase_label);
   const canSkip = AGENT_ORDER.includes(msg.speaker);
   const skipVisible = elapsedSec >= 15 ? " is-visible" : "";
   return (
-    `<div class="thinking-placeholder" data-thinking-for="${escapeHtml(msg.id)}">` +
-      `<span class="thinking-spinner" aria-hidden="true"></span>` +
+    `<div class="thinking-placeholder" data-thinking-for="${escapeHtml(msg.id)}" data-kinetic-state="${kSpec.mode}">` +
+      kSpec.html +
       `<span class="thinking-status-wrap">` +
         `<span class="thinking-model-tag">${modelTag}</span>` +
-        `<span class="thinking-sep">·</span>` +
+        `<span class="thinking-phase-pill">${escapeHtml(kSpec.phaseTag)}</span>` +
         `<span class="thinking-activity-text">${activity}</span>` +
         `<span class="thinking-sep">·</span>` +
         `<span class="thinking-timer">${elapsedSec}s</span>` +
@@ -1191,6 +1379,7 @@ function createOrUpdateMessageCard(msgInput, options = {}) {
   card.className = [
     "msg-card",
     `speaker-${speakerKey}`,
+    msg.streaming ? "is-streaming" : "",
     isResolution ? "msg-resolution-card" : "",
     isSkipped ? "msg-skipped" : "",
     isError ? "msg-error" : "",
@@ -1349,6 +1538,16 @@ function updateMessageStreamingStatus(pkt) {
   if (!ph) return;
   const tagEl = ph.querySelector(".thinking-model-tag");
   const actEl = ph.querySelector(".thinking-activity-text");
+  const phaseEl = ph.querySelector(".thinking-phase-pill");
+  const kSpec = resolveKineticVisualSpec(msg.activity, msg.phase_label);
+  if (ph.dataset.kineticState !== kSpec.mode) {
+    ph.dataset.kineticState = kSpec.mode;
+    const oldStage = ph.querySelector(".kinetic-stage");
+    if (oldStage) {
+      oldStage.outerHTML = kSpec.html;
+    }
+  }
+  if (phaseEl) phaseEl.textContent = kSpec.phaseTag;
   if (tagEl) tagEl.textContent = formatThinkingModelTag(msg);
   if (actEl && msg.activity) actEl.textContent = msg.activity;
 }
@@ -1954,7 +2153,18 @@ function renderWhiteboard(rawWb, forceRender = false, isInitialSnapshot = false)
   if (el("astraDiffView")) {
     el("astraDiffView").innerHTML = renderDiffHtml(wb.exec_diff || "");
   }
-  el("rollbackExecBtn")?.classList.toggle("hidden", !wb.can_rollback);
+  state.recoveryRequired = Boolean(wb.recovery_required || state.recoveryRequired);
+  const verifyFailed = Boolean(
+    wb.exec_summary && (String(wb.exec_summary).includes("验证未通过") || String(wb.exec_summary).includes("验证失败"))
+  );
+  state.postExecVerifyFailed = verifyFailed;
+  const rbBtn = el("rollbackExecBtn");
+  if (rbBtn) {
+    rbBtn.classList.toggle("hidden", !wb.can_rollback);
+    rbBtn.classList.toggle("highlight-urgent", Boolean(wb.can_rollback && (verifyFailed || state.rollbackConflicts.length)));
+  }
+  el("ackSnapshotBtn")?.classList.toggle("hidden", !wb.can_rollback);
+  renderExecGuardBanner();
 
   // 当存在聚焦中的 .wb-edit-input 时，豁免后台 SSE 全量重绘覆盖用户正在输入的草稿
   const activeEl = document.activeElement;
@@ -2121,32 +2331,35 @@ async function copyTextToClipboard(text, okMsg = "已复制到剪贴板") {
 }
 
 async function exportMinutesMarkdownFile() {
-  const md = buildMinutesMarkdown();
-  if (window.webkit?.messageHandlers?.roundtableNative) {
-    try {
-      const result = await apiFetch(`/api/sessions/${state.currentSessionId}/export`, {
-        method: "POST",
-        body: JSON.stringify({ markdown: md }),
-      });
-      showToast(`会议纪要已保存到 ${result.saved_path}`, "ok", 4000);
-    } catch (err) {
-      showToast(err.message || "导出会议纪要失败", "err");
+  if (!state.currentSessionId) return;
+  try {
+    const res = await fetch(`/api/sessions/${state.currentSessionId}/export`, {
+      method: "GET",
+      headers: authState.token ? { "X-Roundtable-Token": authState.token } : {},
+    });
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.error || `导出失败 (${res.status})`);
     }
-    return;
+    const blob = await res.blob();
+    const encodedFn = res.headers.get("X-Roundtable-Filename") || "";
+    const decodedFn = encodedFn ? decodeURIComponent(encodedFn) : "";
+    const fallbackName =
+      (state.whiteboard?.topic_title || state.topic || "AI圆桌纪要")
+        .replace(/[\\/:*?"<>|\s]+/g, "_")
+        .slice(0, 36) + ".md";
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = decodedFn || fallbackName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1200);
+    showToast("已从服务端内存生成并下载 .md 会议纪要", "ok", 2400);
+  } catch (err) {
+    showToast(err.message || "导出会议纪要失败", "err");
   }
-  const safeName = (state.whiteboard?.topic_title || state.topic || "AI圆桌纪要")
-    .replace(/[\\/:*?"<>|\s]+/g, "_")
-    .slice(0, 36);
-  const blob = new Blob([md], { type: "text/markdown;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `${safeName || "AI圆桌纪要"}.md`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-  showToast("已导出规范四节排版的 .md 会议纪要", "ok", 2200);
 }
 
 /* ==================== 顶栏四阶段进度、精简席位条与一体化席位配置浮层 ==================== */
@@ -2186,6 +2399,12 @@ function renderStageAndHeader() {
     const idx = stepOrder.indexOf(key);
     node.classList.toggle("active", idx === activeStepIdx && (hasTopic || state.isBusy));
     node.classList.toggle("done", activeStepIdx > idx);
+  });
+  document.querySelectorAll("#stageStepper .step-line").forEach((line) => {
+    const beforeKey = line.dataset.lineBefore;
+    const targetIdx = stepOrder.indexOf(beforeKey);
+    line.classList.toggle("is-done", activeStepIdx >= targetIdx && targetIdx > 0);
+    line.classList.toggle("is-flowing", state.isBusy && activeStepIdx >= 0 && targetIdx === activeStepIdx);
   });
 
   // 底部控场栏与输入框模式联动
@@ -2276,12 +2495,14 @@ function renderSeatCard(agentId) {
   if (!seatEl) return;
 
   const st = state.seatStates[agentId] || {};
+  const status = st.status || "idle";
   const sysInfo = state.system?.agents?.[agentId] || {};
   const enabled = state.enabledAgents.includes(agentId);
   const isSolo = state.enabledAgents.length === 1 && state.enabledAgents[0] === agentId;
+  const isExtraSeat = !CORE_TRIAD_SEATS.includes(agentId);
+  const unmounted = isExtraSeat && !enabled && !state.showAllSeatsInRing && status === "idle";
   const personaKey = state.seatPersonas[agentId] || DEFAULT_SEAT_PERSONAS[agentId];
   const pSpec = getPersonaSpec(personaKey, agentId);
-  const status = st.status || "idle";
 
   seatEl.className = [
     "seat-card",
@@ -2289,6 +2510,7 @@ function renderSeatCard(agentId) {
     `status-${status}`,
     !enabled ? "seat-disabled" : "",
     isSolo ? "seat-is-solo" : "",
+    unmounted ? "seat-unmounted" : "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -2347,7 +2569,11 @@ function syncMentionChipActiveStates() {
 function renderAllSeats() {
   syncDynamicRosterNames();
   AGENT_ORDER.forEach((aid) => renderSeatCard(aid));
-  // 同步底部 @点名胶囊可见状态
+  const countLbl = el("ringSeatCountLabel");
+  if (countLbl) {
+    countLbl.textContent = `${state.enabledAgents.length} 席参会`;
+  }
+  // 同步底部 @点名胶囊（仅展示已启用席位，界面清爽不拥挤）
   const isSolo = state.enabledAgents.length === 1;
   const wrap = el("mentionChipsWrap");
   const label = el("mentionBarLabel");
@@ -2360,11 +2586,14 @@ function renderAllSeats() {
         pSpec.label
       )}（单席专注）</span>`;
     } else {
+      const mentionTargets = state.enabledAgents.length ? state.enabledAgents : CORE_TRIAD_SEATS;
       label.textContent = "定向点名：";
-      wrap.innerHTML = AGENT_ORDER.map(
-        (aid) =>
-          `<button type="button" class="mention-btn" data-mention-seat="${aid}" data-mention="@${AGENT_NAMES[aid]} " title="点名 ${AGENT_NAMES[aid]} 回应">@${AGENT_NAMES[aid]}</button>`
-      ).join("");
+      wrap.innerHTML = mentionTargets
+        .map(
+          (aid) =>
+            `<button type="button" class="mention-btn" data-mention-seat="${aid}" data-mention="@${AGENT_NAMES[aid]} " title="点名 ${AGENT_NAMES[aid]} 回应">@${AGENT_NAMES[aid]}</button>`
+        )
+        .join("");
       wrap.querySelectorAll("[data-mention]").forEach((btn) => {
         btn.onclick = () => insertMentionIntoComposer(btn.dataset.mention);
       });
@@ -2629,9 +2858,30 @@ function renderExecutorControls() {
   const allowWrite = Boolean(el("allowWriteCheckbox")?.checked);
   const ws = effectiveWorkspacePath();
 
-  document.querySelectorAll("#executorSegmented [data-exec-agent]").forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.execAgent === execAid);
-  });
+  const segWrap = el("executorSegmented");
+  if (segWrap) {
+    const segSeats = Array.from(new Set([...(state.enabledAgents.length ? state.enabledAgents : CORE_TRIAD_SEATS), execAid]));
+    segWrap.innerHTML = segSeats
+      .map(
+        (aid) =>
+          `<button type="button" class="seg-btn${aid === execAid ? " active" : ""}" data-exec-agent="${aid}" title="由 ${escapeHtml(
+            AGENT_NAMES[aid] || aid
+          )} 承接执行交付">${escapeHtml(AGENT_NAMES[aid] || aid)}</button>`
+      )
+      .join("");
+    segWrap.querySelectorAll("[data-exec-agent]").forEach((btn) => {
+      btn.onclick = async () => {
+        const aid = btn.dataset.execAgent;
+        if (!AGENT_ORDER.includes(aid)) return;
+        state.executorAgent = aid;
+        renderExecutorControls();
+        renderWhiteboard(state.whiteboard || {}, true, true);
+        if (state.currentSessionId) {
+          await persistSessionSeatsPatch({ executor_agent: aid });
+        }
+      };
+    });
+  }
 
   document.querySelectorAll("#sandboxSegmented [data-write-mode]").forEach((btn) => {
     const isWriteBtn = btn.dataset.writeMode === "write";
@@ -2643,7 +2893,7 @@ function renderExecutorControls() {
   }
   if (el("runExecFromTabBtn")) {
     el("runExecFromTabBtn").textContent = state.stage === "executing" ? `${execName} 执行中…` : `启动 ${execName} 执行`;
-    el("runExecFromTabBtn").disabled = state.stage === "executing";
+    el("runExecFromTabBtn").disabled = state.stage === "executing" || state.recoveryRequired;
   }
   el("stopExecFromTabBtn")?.classList.toggle("hidden", state.stage !== "executing");
   if (el("termTargetTitle")) {
@@ -2657,9 +2907,8 @@ function renderExecutorControls() {
       descEl.textContent = "当前未绑定本地项目：点击执行将依据白板已确认共识与已勾选任务输出《工程实施方案报告》。";
     } else if (allowWrite) {
       descEl.classList.add("warn");
-      descEl.textContent = state.workspaceIsGit
-        ? `将直接写入本地仓库（${ws}），仅实施白板已勾选任务；执行前自动创建 Git 快照支持一键回滚。`
-        : `注意：当前目录（${ws}）非 Git 仓库，写入将直接作用于磁盘文件，请谨慎确认已勾选任务范围。`;
+      descEl.textContent =
+        `写入模式（${ws}）：写前自动生成无 Git 依赖的纯标准库 CAS 字节清单（含忽略文件，上限 128 MiB）并加排他 flock 锁，支持原子回滚。`;
     } else {
       descEl.classList.remove("warn");
       descEl.textContent = `只读预演模式（${ws}）：依据白板已锁定共识与已勾选任务生成代码补丁预览，不修改本地文件。`;
@@ -2672,10 +2921,12 @@ function renderExecutorControls() {
 function renderSystemStatus(sys) {
   if (!sys) return;
   state.system = sys;
-  state.pacingMode = sys.pacing_mode || "unrestricted";
-  state.idleTimeoutSec = Number(sys.idle_timeout_sec ?? 900);
-  state.turnTimeoutSec = Number(sys.turn_timeout_sec ?? 0);
+  state.pacingMode = sys.pacing_mode || "standard";
+  state.idleTimeoutSec = Number(sys.idle_timeout_sec ?? 300);
+  state.turnTimeoutSec = Number(sys.turn_timeout_sec ?? 600);
   state.maxRefChars = Number(sys.max_ref_chars ?? 120000);
+  state.postExecVerifyCmd = String(sys.post_exec_verify_cmd || "");
+  if (sys.boot_id) authState.bootId = sys.boot_id;
   if (sys.roster_preset) {
     state.rosterPreset = sys.roster_preset;
   }
@@ -2687,34 +2938,45 @@ function renderSystemStatus(sys) {
   }
   syncDynamicRosterNames();
 
+  if (el("diagRuntimeCodeRoot")) {
+    el("diagRuntimeCodeRoot").textContent = sys.runtime_code_root || "未知";
+  }
+  if (el("diagBootId")) {
+    el("diagBootId").textContent = authState.bootId || sys.boot_id || "未知";
+  }
+  if (el("diagSqliteBadge")) {
+    const jMode = String(sys.sqlite_journal_mode || "wal").toUpperCase();
+    el("diagSqliteBadge").textContent = `SQLite ${jMode}`;
+  }
+
   const agents = sys.agents || {};
+  const activeSeatScope = state.enabledAgents.length ? state.enabledAgents : CORE_TRIAD_SEATS;
   let readyCount = 0;
   let sharedCount = 0;
-  AGENT_ORDER.forEach((aid) => {
+  activeSeatScope.forEach((aid) => {
     if (agents[aid]?.binary_detected) readyCount += 1;
-    if (agents[aid]?.shared_fallback) sharedCount += 1;
+    if (agents[aid]?.shared_fallback || agents[aid]?.shared_cli_group) sharedCount += 1;
   });
 
   const summaryBar = el("readySummaryBar");
   if (summaryBar) {
     summaryBar.classList.remove("all-ready", "warn-ready");
-    if (readyCount === 3 && sharedCount === 0) {
+    if (readyCount === activeSeatScope.length && sharedCount === 0) {
       summaryBar.classList.add("all-ready");
-      summaryBar.textContent = "3 席本地 CLI 引擎全部就绪 · 支持多模型并行深度交锋";
+      summaryBar.textContent = `${readyCount} 席异构 CLI 引擎全部就绪 · 支持多模型真并行交锋`;
     } else if (readyCount >= 1) {
       summaryBar.classList.add("all-ready");
-      const concModeLabel = (state.singleCliConcurrency || 3) > 1 ? `${state.singleCliConcurrency || 3} 席并发` : "串行";
+      const concModeLabel = (state.singleCliConcurrency || 3) > 1 ? `${state.singleCliConcurrency || 3} 路真并行` : "串行防限流";
       summaryBar.textContent =
         sharedCount > 0
-          ? `已启用单引擎多角色无状态模式（${concModeLabel}） · ${readyCount} 席全部就绪`
-          : `${readyCount} 席本地 CLI 引擎已就绪 · 支持弹性研讨与交付`;
+          ? `单 CLI 多角色引擎池已就绪（${concModeLabel} · 独立 TMPDIR 隔离） · 当前启用 ${activeSeatScope.length} 席`
+          : `${readyCount}/${activeSeatScope.length} 席本地 CLI 引擎就绪 · 支持 1–6 席弹性研讨`;
     } else {
       summaryBar.classList.add("warn-ready");
-      summaryBar.textContent = "未检测到可用本地 CLI · 请在左下角设置中指定路径";
+      summaryBar.textContent = "未检测到可用本地 CLI · 请打开左下角「设置中心」配置驱动路径";
     }
   }
 
-  // 渲染侧栏折叠区 CLI 引擎卡片与设置弹窗状态胶囊
   const cardsBox = el("cliEngineCards");
   if (cardsBox) {
     cardsBox.innerHTML = "";
@@ -2724,9 +2986,10 @@ function renderSystemStatus(sys) {
       const pingRes = state.cliTestResults[aid];
       const latMs = state.pingLatencyBySeat[aid];
       const isExpanded = state.expandedCliCard === aid;
+      const isSeatEnabled = state.enabledAgents.includes(aid);
 
       let pillCls = ready ? "driver-pill live" : "driver-pill missing";
-      let pillTxt = ready ? (info.shared_fallback ? "串行复用" : "已就绪") : "未安装";
+      let pillTxt = ready ? (info.shared_fallback ? "并行池复用" : "已就绪") : "未安装";
       if (latMs > 0 && pingRes?.ok) {
         pillCls =
           latMs < 2800
@@ -2737,37 +3000,38 @@ function renderSystemStatus(sys) {
         pillTxt = `${(latMs / 1000).toFixed(1)}s`;
       }
 
-      const card = document.createElement("div");
-      card.className = `cli-card${isExpanded ? " expanded" : ""}`;
-      const drvText = `${DRIVER_LABELS[info.effective_driver] || info.effective_driver || "CLI"} · ${
-        info.effective_model || "默认模型"
-      }${info.effective_discussion_effort ? ` (${info.effective_discussion_effort})` : ""}`;
+      if (isSeatEnabled || CORE_TRIAD_SEATS.includes(aid)) {
+        const card = document.createElement("div");
+        card.className = `cli-card${isExpanded ? " expanded" : ""}`;
+        const drvText = `${DRIVER_LABELS[info.effective_driver] || info.effective_driver || "CLI"} · ${
+          info.effective_model || "默认模型"
+        }${info.effective_discussion_effort ? ` (${info.effective_discussion_effort})` : ""}`;
 
-      card.innerHTML =
-        `<div class="cli-card-top">` +
-          `<div class="cli-name-wrap">` +
-            `<span class="cli-role-dot dot-${aid}"></span>` +
-            `<span class="cli-card-name">${escapeHtml(AGENT_NAMES[aid])}</span>` +
+        card.innerHTML =
+          `<div class="cli-card-top">` +
+            `<div class="cli-name-wrap">` +
+              `<span class="cli-role-dot dot-${aid}"></span>` +
+              `<span class="cli-card-name">${escapeHtml(AGENT_NAMES[aid])}</span>` +
+            `</div>` +
+            `<span class="${pillCls}">${escapeHtml(pillTxt)}</span>` +
           `</div>` +
-          `<span class="${pillCls}">${escapeHtml(pillTxt)}</span>` +
-        `</div>` +
-        `<div class="cli-card-cli">${escapeHtml(drvText)}</div>` +
-        (pingRes
-          ? `<div class="cli-test-note${pingRes.ok ? "" : " err"}">${escapeHtml(
-              pingRes.ok ? `连通正常 · ${pingRes.reply || "OK"}` : pingRes.error || "探活失败"
-            )}</div>`
-          : "") +
-        `<div class="cli-card-details">路径：${escapeHtml(info.binary_path || "未探测到可执行文件")}<br/>版本：${escapeHtml(
-          info.version || "未知"
-        )}</div>`;
+          `<div class="cli-card-cli">${escapeHtml(drvText)}</div>` +
+          (pingRes
+            ? `<div class="cli-test-note${pingRes.ok ? "" : " err"}">${escapeHtml(
+                pingRes.ok ? `连通正常 · ${pingRes.reply || "OK"}` : pingRes.error || "探活失败"
+              )}</div>`
+            : "") +
+          `<div class="cli-card-details">路径：${escapeHtml(info.binary_path || "未探测到可执行文件")}<br/>版本：${escapeHtml(
+            info.version || "未知"
+          )}</div>`;
 
-      card.onclick = () => {
-        state.expandedCliCard = state.expandedCliCard === aid ? null : aid;
-        renderSystemStatus(state.system);
-      };
-      cardsBox.appendChild(card);
+        card.onclick = () => {
+          state.expandedCliCard = state.expandedCliCard === aid ? null : aid;
+          renderSystemStatus(state.system);
+        };
+        cardsBox.appendChild(card);
+      }
 
-      // 同步设置弹窗头部状态胶丸
       const cap = aid.charAt(0).toUpperCase() + aid.slice(1);
       const modalPill = el(`cfgStatus${cap}`);
       if (modalPill) {
@@ -2781,27 +3045,53 @@ function renderSystemStatus(sys) {
   renderAllSeats();
 }
 
+async function switchCurrentSessionWorkspace(targetPath) {
+  const clean = String(targetPath || "").trim();
+  if (!clean) return false;
+  if (state.currentSessionId) {
+    const wsRes = await apiFetch(`/api/sessions/${state.currentSessionId}/workspace`, {
+      method: "POST",
+      body: JSON.stringify({ workspace_dir: clean }),
+    });
+    state.sessionWorkspaceDir = wsRes.workspace_dir || clean;
+    state.workspaceBound = wsRes.workspace_bound ?? true;
+    state.workspaceIsGit = Boolean(wsRes.workspace_is_git);
+  }
+  const cfgRes = await apiFetch("/api/config", {
+    method: "POST",
+    body: JSON.stringify({ workspace_dir: clean }),
+  });
+  if (cfgRes.system) renderSystemStatus(cfgRes.system);
+  if (el("cfgWorkspaceDir")) el("cfgWorkspaceDir").value = clean;
+  state.attachedFilesCache.clear();
+  refreshAttachedFilesBar();
+  renderStageAndHeader();
+  return true;
+}
+
 async function pickWorkspaceFolder() {
   const sessionId = state.currentSessionId;
   try {
     const native = window.webkit?.messageHandlers?.roundtableNative;
-    const path = native ? await native.postMessage({ action: "pickFolder" }) : "";
-    if (native && !path) return;
+    if (native) {
+      const chosenPath = await native.postMessage({ action: "pickFolder" });
+      if (!chosenPath || sessionId !== state.currentSessionId) return;
+      await switchCurrentSessionWorkspace(chosenPath);
+      showToast(`已绑定本地工作区：${chosenPath}`, "ok", 2200);
+      return;
+    }
+
+    // 浏览器开发模式：调用系统目录弹窗（严禁传 direct_path），随后绑定至当前空闲会话
     const res = await apiFetch("/api/system/pick-folder", {
       method: "POST",
-      body: JSON.stringify({ active_session_id: sessionId || "", direct_path: path }),
+      body: JSON.stringify({}),
     });
-    if (res.cancelled || sessionId !== state.currentSessionId) return;
-    if (res.ok && res.path) {
-      state.sessionWorkspaceDir = res.path;
-      state.workspaceBound = res.system?.workspace_bound ?? true;
-      if (res.system) renderSystemStatus(res.system);
-      if (el("cfgWorkspaceDir")) el("cfgWorkspaceDir").value = res.path;
-      state.attachedFilesCache.clear();
-      refreshAttachedFilesBar();
-      renderStageAndHeader();
-      showToast(`已绑定工作区：${res.path}`, "ok", 2200);
+    if (res.cancelled || !res.ok || !res.path || sessionId !== state.currentSessionId) return;
+    if (res.system) renderSystemStatus(res.system);
+    if (state.currentSessionId && !state.isBusy && state.stage !== "executing") {
+      await switchCurrentSessionWorkspace(res.path);
     }
+    showToast(`已绑定本地工作区：${res.path}`, "ok", 2200);
   } catch (err) {
     showToast(err.message || "选择目录失败", "err");
   }
@@ -3110,104 +3400,271 @@ async function refreshSessionsListOnly() {
   }
 }
 
-function applySessionSnapshot(snap) {
+async function fetchRecoveryPlanIfNeeded() {
+  if (!state.currentSessionId || !state.recoveryRequired) {
+    state.recoveryPlan = null;
+    renderExecGuardBanner();
+    return;
+  }
+  try {
+    const res = await apiFetch(`/api/sessions/${state.currentSessionId}/recovery`);
+    state.recoveryPlan = res.recovery || null;
+  } catch {
+    state.recoveryPlan = null;
+  }
+  renderExecGuardBanner();
+}
+
+function renderExecGuardBanner() {
+  const banner = el("execGuardBanner");
+  if (!banner) return;
+
+  if (state.recoveryRequired) {
+    const plan = state.recoveryPlan || {};
+    const modList = Array.isArray(plan.modified_or_deleted) ? plan.modified_or_deleted : [];
+    const newFiles = Array.isArray(plan.untracked_new_files) ? plan.untracked_new_files : [];
+    const lines = [
+      ...modList.map((it) => `[待还原修改] ${escapeHtml(it.path)}  (现态: ${escapeHtml(String(it.current_sha256 || "").slice(0, 12))}…)`),
+      ...newFiles.map((it) => `[待确认清理新增] ${escapeHtml(it.path)}  (sha256: ${escapeHtml(String(it.current_sha256 || "").slice(0, 12))}…)`),
+    ];
+    banner.className = "exec-guard-banner";
+    banner.innerHTML =
+      `<div class="exec-guard-title"><span>检测到上次执行异常中断（需人工确认哈希后恢复）</span></div>` +
+      `<div>为防止误删您在重启前手动创建的文件，系统未静默清理工作区。请核对以下变更列表与哈希后选择恢复策略：</div>` +
+      (lines.length ? `<div class="exec-guard-files">${lines.map((l) => `<div>${l}</div>`).join("")}</div>` : "") +
+      `<div class="exec-guard-actions">` +
+        `<button type="button" class="mini-primary-btn" id="confirmRecoverDeleteBtn">确认哈希并完整恢复写前状态</button>` +
+        `<button type="button" class="mini-outline-btn" id="confirmRecoverKeepNewBtn">仅还原已跟踪文件（保留新增文件）</button>` +
+      `</div>`;
+    banner.querySelector("#confirmRecoverDeleteBtn")?.addEventListener("click", () => executeCrashRecovery(true));
+    banner.querySelector("#confirmRecoverKeepNewBtn")?.addEventListener("click", () => executeCrashRecovery(false));
+    return;
+  }
+
+  if (state.rollbackConflicts && state.rollbackConflicts.length > 0) {
+    banner.className = "exec-guard-banner";
+    banner.innerHTML =
+      `<div class="exec-guard-title"><span>原子回滚已拦截：检测到事后手动修改冲突 (${state.rollbackConflicts.length} 个文件)</span></div>` +
+      `<div>为杜绝半旧半新破坏代码树，系统已整批拒绝回滚并保留快照。请先备份或还原以下冲突文件后再点击「↺ 回滚写入」，或点击「✓ 确认保留上次改动」归档快照：</div>` +
+      `<div class="exec-guard-files">${state.rollbackConflicts.map((p) => `<div>• ${escapeHtml(p)}</div>`).join("")}</div>`;
+    return;
+  }
+
+  if (state.postExecVerifyFailed && state.whiteboard?.can_rollback) {
+    banner.className = "exec-guard-banner is-warn";
+    banner.innerHTML =
+      `<div class="exec-guard-title"><span>执行后自动验证命令未通过</span></div>` +
+      `<div>工作区写入已完成，但验证钩子返回非零退出码。建议检查终端日志或立即点击下方「↺ 回滚写入」一键还原至写前字节状态。</div>`;
+    return;
+  }
+
+  banner.className = "exec-guard-banner hidden";
+  banner.innerHTML = "";
+}
+
+async function executeCrashRecovery(deleteConfirmedNew) {
+  if (!state.currentSessionId) return;
+  const expectedHashes = state.recoveryPlan?.expected_hashes || {};
+  try {
+    const res = await apiFetch(`/api/sessions/${state.currentSessionId}/recover`, {
+      method: "POST",
+      body: JSON.stringify({
+        expected_hashes: expectedHashes,
+        delete_confirmed_new_files: Boolean(deleteConfirmedNew),
+      }),
+    });
+    state.recoveryRequired = false;
+    state.recoveryPlan = null;
+    state.rollbackConflicts = [];
+    renderExecGuardBanner();
+    renderExecutorControls();
+    showToast(res.message || "已完成中断恢复", "ok", 2800);
+  } catch (err) {
+    showToast(err.message || "中断恢复失败，请刷新哈希列表后重试", "err", 3600);
+    await fetchRecoveryPlanIfNeeded();
+  }
+}
+
+async function acknowledgeCurrentSnapshot() {
+  if (!state.currentSessionId) return;
+  try {
+    const res = await apiFetch(`/api/sessions/${state.currentSessionId}/snapshot/ack`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    state.rollbackConflicts = [];
+    state.postExecVerifyFailed = false;
+    if (state.whiteboard) {
+      state.whiteboard.can_rollback = false;
+      renderWhiteboard(state.whiteboard, true, false);
+    }
+    renderExecGuardBanner();
+    showToast(res.message || "已确认保留上一轮工作区改动", "ok", 2200);
+  } catch (err) {
+    showToast(err.message || "确认快照失败", "err");
+  }
+}
+
+function applySessionSnapshot(snap, options = {}) {
   if (!snap) return;
+  const preserveNewerSeats = snap.session_id === state.currentSessionId &&
+    snap.boot_id === authState.bootId && Number(snap.rev || 0) < state.seatConfigRev;
+  const isSameSessionReconnect = Boolean(options.isReconnect && snap.session_id === state.currentSessionId);
+  const streamEl = el("chatStream");
+  const prevScrollTop = streamEl ? streamEl.scrollTop : 0;
+  const prevScrolledUp = state.userScrolledUp;
+
   state.currentSessionId = snap.session_id;
   state.stage = snap.stage || "idle";
+  state.execState = snap.exec_state || "idle";
   state.isBusy = Boolean(snap.is_busy);
   state.topic = snap.topic || "";
   state.sessionWorkspaceDir = snap.workspace_dir || "";
   state.workspaceBound = snap.workspace_bound ?? null;
   state.workspaceIsGit = Boolean(snap.workspace_is_git);
+  state.recoveryRequired = Boolean(snap.recovery_required || snap.whiteboard?.recovery_required);
+  if (typeof snap.rev === "number" && snap.rev > state.sseLastRev) {
+    state.sseLastRev = snap.rev;
+  }
 
-  const norm = normalizeCollabModeAndAutoExec(snap.collab_mode, snap.auto_preview_exec);
-  state.collabMode = norm.mode;
-  state.autoPreviewExec = norm.autoPreviewExec;
+  if (!preserveNewerSeats) {
+    state.seatConfigRev = Number(snap.rev) || 0;
+    const norm = normalizeCollabModeAndAutoExec(snap.collab_mode, snap.auto_preview_exec);
+    state.collabMode = norm.mode;
+    state.autoPreviewExec = norm.autoPreviewExec;
+    state.enabledAgents = Array.isArray(snap.enabled_agents) && snap.enabled_agents.length
+      ? snap.enabled_agents
+      : CORE_TRIAD_SEATS.slice();
+    state.seatPersonas = { ...DEFAULT_SEAT_PERSONAS, ...(snap.seat_personas || {}) };
+    state.seatEfforts = { ...(snap.seat_efforts || {}) };
+    state.executorAgent = snap.executor_agent || "astra";
+    state.seatStates = snap.seat_states || {};
+  }
 
-  state.enabledAgents = Array.isArray(snap.enabled_agents) && snap.enabled_agents.length
-    ? snap.enabled_agents
-    : ["carbon", "grok", "astra"];
-  state.seatPersonas = { ...DEFAULT_SEAT_PERSONAS, ...(snap.seat_personas || {}) };
-  state.seatEfforts = { ...(snap.seat_efforts || {}) };
-  state.executorAgent = snap.executor_agent || "astra";
-  state.seatStates = snap.seat_states || {};
-  state.execStartTs = state.stage === "executing" ? Date.now() : 0;
+  if (state.stage === "executing") {
+    const serverStartSec = Number(snap.execution_started_at || 0);
+    state.execStartTs = serverStartSec > 0 ? Math.floor(serverStartSec * 1000) : (state.execStartTs || Date.now());
+  } else {
+    state.execStartTs = 0;
+  }
 
   syncCollabModeUI(state.collabMode, state.autoPreviewExec);
-  clearChatMessages();
+
   const msgs = Array.isArray(snap.messages) ? snap.messages : [];
-  for (const m of msgs) {
-    createOrUpdateMessageCard(m, { skipEnterAnim: true });
+  if (isSameSessionReconnect) {
+    // P0.3 原地对账（In-place Reconcile）：不销毁已有 DOM 树，保留阅读滚动锚点与行内草稿
+    const incomingIds = new Set(msgs.map((m) => m.id));
+    for (const oldId of Array.from(state.messages.keys())) {
+      if (!incomingIds.has(oldId)) {
+        document.getElementById(`msg-${oldId}`)?.remove();
+        state.messages.delete(oldId);
+      }
+    }
+    for (const m of msgs) {
+      createOrUpdateMessageCard(m, { skipEnterAnim: true });
+    }
+    updateEmptyGuideVisibility();
+    renderAllSeats();
+    renderWhiteboard(snap.whiteboard || {}, false, false);
+    renderStageAndHeader();
+    if (streamEl && prevScrolledUp) {
+      streamEl.scrollTop = prevScrollTop;
+      state.userScrolledUp = true;
+    }
+  } else {
+    state.rollbackConflicts = [];
+    state.postExecVerifyFailed = false;
+    clearChatMessages();
+    for (const m of msgs) {
+      createOrUpdateMessageCard(m, { skipEnterAnim: true });
+    }
+    updateEmptyGuideVisibility();
+    renderAllSeats();
+    renderWhiteboard(snap.whiteboard || {}, true, true);
+    renderStageAndHeader();
+    scrollToBottom(false);
   }
-  updateEmptyGuideVisibility();
-  renderAllSeats();
-  renderWhiteboard(snap.whiteboard || {}, true, true);
-  renderStageAndHeader();
-  scrollToBottom(false);
+
+  if (state.recoveryRequired) {
+    fetchRecoveryPlanIfNeeded();
+  } else {
+    state.recoveryPlan = null;
+    renderExecGuardBanner();
+  }
 }
 
-function connectSessionStream(sessionId) {
-  if (state.sse) {
-    state.sse.close();
-    state.sse = null;
+function dispatchSseEventFrame(eventName, rawData, rawId, sessionId) {
+  if (sessionId !== state.currentSessionId) return;
+  const numericId = Number(rawId || 0);
+  if (numericId > 0) {
+    if (eventName !== "snapshot" && numericId <= state.sseLastRev) {
+      return;
+    }
+    state.sseLastRev = Math.max(state.sseLastRev, numericId);
   }
-  if (state.sseReconnectTimer) {
-    clearTimeout(state.sseReconnectTimer);
-    state.sseReconnectTimer = null;
+  if (!rawData) return;
+  let pkt;
+  try {
+    pkt = JSON.parse(rawData);
+  } catch {
+    return;
   }
-  if (!sessionId) return;
 
-  const es = new EventSource(`/api/sessions/${sessionId}/stream`);
-  state.sse = es;
+  if (eventName === "snapshot") {
+    const isReconnect = state.sseConnectedSessionId === sessionId && state.messages.size > 0;
+    state.sseConnectedSessionId = sessionId;
+    if (numericId > 0) state.sseLastRev = numericId;
+    applySessionSnapshot(pkt, { isReconnect });
+    return;
+  }
 
-  const setConnOnline = (online) => {
-    const dot = el("sseConnDot");
-    if (!dot) return;
-    dot.classList.toggle("online", online);
-    dot.textContent = online ? "" : "重连中";
-    dot.title = online ? "本地实时服务已连接" : "SSE 实时连接中断，正在自动重连…";
-  };
-
-  es.onopen = () => setConnOnline(true);
-
-  es.addEventListener("snapshot", (ev) => {
-    setConnOnline(true);
-    const snap = JSON.parse(ev.data);
-    applySessionSnapshot(snap);
-  });
-
-  es.addEventListener("session_cleared", () => {
+  if (eventName === "session_cleared") {
     clearChatMessages();
     updateEmptyGuideVisibility();
-  });
+    return;
+  }
 
-  es.addEventListener("session_meta", (ev) => {
-    const meta = JSON.parse(ev.data);
+  if (eventName === "session_meta") {
     const prevStage = state.stage;
-    state.stage = meta.stage || state.stage;
-    state.isBusy = Boolean(meta.is_busy);
-    if (typeof meta.topic === "string") state.topic = meta.topic;
-    if (typeof meta.workspace_dir === "string") state.sessionWorkspaceDir = meta.workspace_dir;
-    if (typeof meta.workspace_bound === "boolean") state.workspaceBound = meta.workspace_bound;
-    if (typeof meta.workspace_is_git === "boolean") state.workspaceIsGit = meta.workspace_is_git;
-    if (Array.isArray(meta.enabled_agents)) state.enabledAgents = meta.enabled_agents;
-    if (meta.seat_personas) state.seatPersonas = { ...state.seatPersonas, ...meta.seat_personas };
-    if (meta.seat_efforts) state.seatEfforts = { ...meta.seat_efforts };
-    if (meta.executor_agent) state.executorAgent = meta.executor_agent;
-
-    if (meta.collab_mode || typeof meta.auto_preview_exec === "boolean") {
-      syncCollabModeUI(meta.collab_mode || state.collabMode, meta.auto_preview_exec);
+    state.stage = pkt.stage || state.stage;
+    state.execState = pkt.exec_state || state.execState;
+    state.isBusy = Boolean(pkt.is_busy);
+    if (typeof pkt.topic === "string") state.topic = pkt.topic;
+    if (typeof pkt.workspace_dir === "string") state.sessionWorkspaceDir = pkt.workspace_dir;
+    if (typeof pkt.workspace_bound === "boolean") state.workspaceBound = pkt.workspace_bound;
+    if (typeof pkt.workspace_is_git === "boolean") state.workspaceIsGit = pkt.workspace_is_git;
+    if (typeof pkt.recovery_required === "boolean") {
+      state.recoveryRequired = pkt.recovery_required;
+      if (state.recoveryRequired) fetchRecoveryPlanIfNeeded();
+      else renderExecGuardBanner();
     }
-    if (meta.consensus_status && el("wbConsensusTag")) {
-      el("wbConsensusTag").textContent = meta.consensus_status;
+    // A settings response may arrive before earlier events on the same stream.
+    // Apply the rest of each event while keeping the latest confirmed roster.
+    if (numericId >= state.seatConfigRev) {
+      state.seatConfigRev = numericId;
+      if (Array.isArray(pkt.enabled_agents)) state.enabledAgents = pkt.enabled_agents;
+      if (pkt.seat_personas) state.seatPersonas = { ...state.seatPersonas, ...pkt.seat_personas };
+      if (pkt.seat_efforts) state.seatEfforts = { ...pkt.seat_efforts };
+      if (pkt.executor_agent) state.executorAgent = pkt.executor_agent;
+      if (pkt.collab_mode || typeof pkt.auto_preview_exec === "boolean") {
+        syncCollabModeUI(pkt.collab_mode || state.collabMode, pkt.auto_preview_exec);
+      }
+    }
+    if (pkt.consensus_status && el("wbConsensusTag")) {
+      el("wbConsensusTag").textContent = pkt.consensus_status;
     }
 
-    if (state.stage === "executing" && prevStage !== "executing") {
-      state.execStartTs = Date.now();
-      if (state.activeTab !== "terminal") {
+    if (state.stage === "executing") {
+      const srvStart = Number(pkt.execution_started_at || 0);
+      if (srvStart > 0) {
+        state.execStartTs = Math.floor(srvStart * 1000);
+      } else if (prevStage !== "executing") {
+        state.execStartTs = Date.now();
+      }
+      if (prevStage !== "executing" && state.activeTab !== "terminal") {
         el("execDot")?.classList.remove("hidden");
       }
-    } else if (state.stage !== "executing") {
+    } else {
       state.execStartTs = 0;
     }
 
@@ -3215,87 +3672,185 @@ function connectSessionStream(sessionId) {
     renderAllSeats();
     renderStageAndHeader();
     refreshSessionsListOnly();
-  });
+    return;
+  }
 
-  es.addEventListener("seat_update", (ev) => {
-    const st = JSON.parse(ev.data);
-    if (st?.agent_id) {
-      state.seatStates[st.agent_id] = st;
-      renderSeatCard(st.agent_id);
+  if (eventName === "seat_update") {
+    if (pkt?.agent_id) {
+      state.seatStates[pkt.agent_id] = pkt;
+      renderSeatCard(pkt.agent_id);
     }
-  });
+    return;
+  }
 
-  es.addEventListener("msg_start", (ev) => {
-    const msg = JSON.parse(ev.data);
-    createOrUpdateMessageCard(msg, { skipEnterAnim: false });
-  });
+  if (eventName === "msg_start") {
+    createOrUpdateMessageCard(pkt, { skipEnterAnim: false });
+    return;
+  }
 
-  es.addEventListener("msg_status", (ev) => {
-    updateMessageStreamingStatus(JSON.parse(ev.data));
-  });
+  if (eventName === "msg_status" || eventName === "msg_activity") {
+    updateMessageStreamingStatus(pkt);
+    return;
+  }
 
-  es.addEventListener("msg_activity", (ev) => {
-    updateMessageStreamingStatus(JSON.parse(ev.data));
-  });
-
-  es.addEventListener("msg_delta", (ev) => {
-    const pkt = JSON.parse(ev.data);
+  if (eventName === "msg_delta") {
     appendMessageDelta(pkt.id, pkt.delta);
-  });
+    return;
+  }
 
-  es.addEventListener("msg_done", (ev) => {
-    const msg = JSON.parse(ev.data);
-    createOrUpdateMessageCard(msg, { skipEnterAnim: true });
+  if (eventName === "msg_done") {
+    createOrUpdateMessageCard(pkt, { skipEnterAnim: true });
     refreshSessionsListOnly();
-  });
+    return;
+  }
 
-  es.addEventListener("whiteboard_update", (ev) => {
-    const wb = JSON.parse(ev.data);
-    renderWhiteboard(wb, false, false);
-  });
+  if (eventName === "whiteboard_update") {
+    renderWhiteboard(pkt, false, false);
+    return;
+  }
 
-  es.addEventListener("term_log", (ev) => {
-    const pkt = JSON.parse(ev.data);
+  if (eventName === "term_log") {
     const term = el("astraTermLogs");
     if (term && pkt?.line) {
       if (term.textContent === "尚未触发执行任务") term.textContent = "";
       term.textContent += (term.textContent ? "\n" : "") + pkt.line;
       term.scrollTop = term.scrollHeight;
     }
-  });
+    return;
+  }
 
-  es.addEventListener("exec_delta", (ev) => {
-    const pkt = JSON.parse(ev.data);
+  if (eventName === "exec_delta") {
     const term = el("astraTermLogs");
     if (term && pkt?.delta) {
       if (term.textContent === "尚未触发执行任务") term.textContent = "";
       term.textContent += pkt.delta;
       term.scrollTop = term.scrollHeight;
     }
-  });
+    return;
+  }
 
-  es.addEventListener("exec_artifact", (ev) => {
-    const art = JSON.parse(ev.data);
+  if (eventName === "exec_artifact") {
     if (el("astraDiffView")) {
-      el("astraDiffView").innerHTML = renderDiffHtml(art.diff || "");
+      el("astraDiffView").innerHTML = renderDiffHtml(pkt.diff || "");
     }
     if (state.activeTab !== "terminal") {
       el("execDot")?.classList.remove("hidden");
     }
-  });
+  }
+}
 
-  es.onerror = () => {
-    setConnOnline(false);
-    es.close();
-    if (state.sse === es) {
-      state.sse = null;
-      state.sseReconnectTimer = setTimeout(() => {
-        if (state.currentSessionId === sessionId) {
-          connectSessionStream(sessionId);
-        }
-      }, 1800);
-    }
+function disconnectSessionStream() {
+  if (state.sseAbortController) {
+    state.sseAbortController.abort();
+    state.sseAbortController = null;
+  }
+  if (state.sseReconnectTimer) {
+    clearTimeout(state.sseReconnectTimer);
+    state.sseReconnectTimer = null;
+  }
+}
+
+function connectSessionStream(sessionId) {
+  disconnectSessionStream();
+  if (!sessionId) return;
+
+  if (state.sseConnectedSessionId !== sessionId) {
+    state.sseLastRev = 0;
+    state.seatConfigRev = 0;
+  }
+
+  const controller = new AbortController();
+  state.sseAbortController = controller;
+
+  const setConnOnline = (online) => {
+    const dot = el("sseConnDot");
+    if (!dot) return;
+    dot.classList.toggle("online", online);
+    dot.textContent = online ? "" : "重连中";
+    dot.title = online ? "本地实时服务已连接（fetch 流式鉴权通道）" : "SSE 实时流中断，正在带 since_rev 无损重连…";
   };
+
+  (async () => {
+    const qs = new URLSearchParams({
+      since_rev: String(state.sseLastRev || 0),
+      boot_id: String(authState.bootId || ""),
+    });
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}/stream?${qs.toString()}`, {
+        method: "GET",
+        headers: {
+          Accept: "text/event-stream",
+          ...(authState.token ? { "X-Roundtable-Token": authState.token } : {}),
+        },
+        signal: controller.signal,
+        cache: "no-store",
+      });
+      if (!res.ok || !res.body) {
+        throw new Error(`SSE stream HTTP ${res.status}`);
+      }
+      setConnOnline(true);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let lineBuf = "";
+      let curEvent = "message";
+      let curId = "";
+      let curDataLines = [];
+
+      const flushFrame = () => {
+        if (curDataLines.length > 0) {
+          dispatchSseEventFrame(curEvent, curDataLines.join("\n"), curId, sessionId);
+        }
+        curEvent = "message";
+        curId = "";
+        curDataLines = [];
+      };
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        lineBuf += decoder.decode(value, { stream: true });
+        let nlIdx;
+        while ((nlIdx = lineBuf.indexOf("\n")) >= 0) {
+          let line = lineBuf.slice(0, nlIdx);
+          lineBuf = lineBuf.slice(nlIdx + 1);
+          if (line.endsWith("\r")) line = line.slice(0, -1);
+
+          if (line === "") {
+            flushFrame();
+          } else if (line.startsWith(":")) {
+            // 心跳注释帧 : ping
+          } else if (line.startsWith("event:")) {
+            curEvent = line.slice(6).trim() || "message";
+          } else if (line.startsWith("id:")) {
+            curId = line.slice(3).trim();
+          } else if (line.startsWith("data:")) {
+            const dPart = line.slice(5);
+            curDataLines.push(dPart.startsWith(" ") ? dPart.slice(1) : dPart);
+          }
+        }
+      }
+      lineBuf += decoder.decode();
+      if (lineBuf.trim()) {
+        if (lineBuf.startsWith("data:")) {
+          const dPart = lineBuf.slice(5).trim();
+          curDataLines.push(dPart);
+        }
+      }
+      flushFrame();
+      throw new Error("SSE EOF");
+    } catch (err) {
+      if (controller.signal.aborted) return;
+      setConnOnline(false);
+      if (state.sseAbortController === controller) {
+        state.sseAbortController = null;
+        state.sseReconnectTimer = setTimeout(() => {
+          if (state.currentSessionId === sessionId) {
+            connectSessionStream(sessionId);
+          }
+        }, 1200);
+      }
+    }
+  })();
 }
 
 async function switchToSession(sessionId) {
@@ -3402,16 +3957,19 @@ async function startOrInterruptWithText(overrideText = "") {
 
 async function triggerExecutionNow() {
   if (!state.currentSessionId) return;
-  if (!state.topic && !state.whiteboard?.items?.some(it => it.kind === "action" && it.checked !== false) && state.messages.size === 0) {
+  if (!state.topic && !state.whiteboard?.items?.some((it) => it.kind === "action" && it.checked !== false) && state.messages.size === 0) {
     showToast("请先输入议题完成研讨或添加白板任务", "warn", 2200);
     return;
   }
-  const allowWrite = Boolean(effectiveWorkspacePath() && el("allowWriteCheckbox")?.checked);
+  const allowWrite = Boolean(effectiveWorkspacePath() && el("allowWriteCheckbox")?.checked) === true;
   const execAid = state.executorAgent || "astra";
   setRightCollapsed(false);
   switchWorkbenchTab("terminal");
+  state.rollbackConflicts = [];
+  state.postExecVerifyFailed = false;
+  renderExecGuardBanner();
   if (el("astraTermLogs")) {
-    el("astraTermLogs").textContent = `正在启动 ${AGENT_NAMES[execAid]} 执行流水线…`;
+    el("astraTermLogs").textContent = `正在进行单飞锁预约与写前 CAS 字节证明（${AGENT_NAMES[execAid] || execAid}）…`;
   }
   try {
     await apiFetch(`/api/sessions/${state.currentSessionId}/execute`, {
@@ -3422,20 +3980,63 @@ async function triggerExecutionNow() {
       }),
     });
   } catch (err) {
-    showToast(err.message || "触发执行失败", "err");
+    if (el("astraTermLogs")) {
+      el("astraTermLogs").textContent = `准入拦截 (${err.status || 409})：${err.message}`;
+    }
+    if (err.payload?.recovery_required) {
+      state.recoveryRequired = true;
+      await fetchRecoveryPlanIfNeeded();
+    }
+    showToast(err.message || "触发执行失败", "err", 3800);
   }
 }
 
 /* ==================== 渐进披露式「系统与模型设置弹窗」与单引擎串行模式 ==================== */
 
-function openSettingsModal() {
+function switchSettingsTab(tabKey) {
+  const validTabs = ["lineup", "seats", "concurrency", "workspace", "diagnostics"];
+  const next = validTabs.includes(tabKey) ? tabKey : "lineup";
+  state.activeSettingsTab = next;
+  document.querySelectorAll("#settingsNav [data-settings-tab]").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.settingsTab === next);
+  });
+  validTabs.forEach((k) => {
+    el(`settings-pane-${k}`)?.classList.toggle("active", k === next);
+  });
+}
+
+function syncModalSeatMatrixSummary() {
+  const checked = [];
+  document.querySelectorAll("[data-cfg-seat-enable]").forEach((chk) => {
+    if (chk.checked) checked.push(chk.dataset.cfgSeatEnable);
+  });
+  const sumEl = el("cfgEnabledSeatSummary");
+  if (sumEl) {
+    sumEl.textContent = `已勾选 ${checked.length} 席：${checked.map((a) => AGENT_NAMES[a] || a).join(" · ") || "请至少保留 1 席"}`;
+  }
+  const showAll = el("cfgShowAllSixSeats") ? el("cfgShowAllSixSeats").checked : true;
+  document.querySelectorAll("[data-cfg-seat-card]").forEach((card) => {
+    const aid = card.dataset.cfgSeatCard;
+    card.classList.toggle("hidden", !showAll && !checked.includes(aid));
+  });
+}
+
+function openSettingsModal(initialTab = "") {
   const modal = el("settingsModal");
   if (!modal) return;
+  if (initialTab) {
+    switchSettingsTab(initialTab);
+  } else {
+    switchSettingsTab(state.activeSettingsTab || "lineup");
+  }
   const sys = state.system || {};
   const agents = sys.agents || {};
 
   if (el("cfgWorkspaceDir")) {
     el("cfgWorkspaceDir").value = effectiveWorkspacePath();
+  }
+  if (el("cfgPostExecVerifyCmd")) {
+    el("cfgPostExecVerifyCmd").value = sys.post_exec_verify_cmd || state.postExecVerifyCmd || "";
   }
   if (el("cfgSingleCliFallback")) {
     el("cfgSingleCliFallback").checked = sys.allow_single_cli_fallback !== false;
@@ -3447,32 +4048,27 @@ function openSettingsModal() {
     const curRp = sys.roster_preset || state.rosterPreset || "role_experts";
     el("cfgRosterPresetSelect").value = curRp;
     const preset = ROSTER_NAME_PRESETS[curRp];
-    if (preset && preset.names) {
-      for (const [aid, cap] of [
-        ["carbon", "Carbon"],
-        ["grok", "Grok"],
-        ["astra", "Astra"],
-      ]) {
-        const inp = el(`cfg${cap}Name`);
-        if (inp && preset.names[aid]) {
-          inp.placeholder = `留空默认：${preset.names[aid]}`;
-        }
+    for (const [aid, cap] of SEAT_CAP_PAIRS) {
+      const inp = el(`cfg${cap}Name`);
+      if (inp) {
+        inp.placeholder = preset?.names?.[aid] ? `留空默认：${preset.names[aid]}` : "留空跟随引擎生成";
       }
     }
   }
 
+  document.querySelectorAll("[data-cfg-seat-enable]").forEach((chk) => {
+    const aid = chk.dataset.cfgSeatEnable;
+    chk.checked = state.enabledAgents.includes(aid);
+  });
+
   syncPacingControlsInModal(
-    sys.pacing_mode || state.pacingMode || "unrestricted",
-    sys.idle_timeout_sec ?? state.idleTimeoutSec ?? 900,
-    sys.turn_timeout_sec ?? state.turnTimeoutSec ?? 0,
+    sys.pacing_mode || state.pacingMode || "standard",
+    sys.idle_timeout_sec ?? state.idleTimeoutSec ?? 300,
+    sys.turn_timeout_sec ?? state.turnTimeoutSec ?? 600,
     sys.max_ref_chars ?? state.maxRefChars ?? 120000
   );
 
-  for (const [aid, cap] of [
-    ["carbon", "Carbon"],
-    ["grok", "Grok"],
-    ["astra", "Astra"],
-  ]) {
+  for (const [aid, cap] of SEAT_CAP_PAIRS) {
     const info = agents[aid] || {};
     const drvSel = el(`cfg${cap}Driver`);
     const personaSel = el(`cfg${cap}Persona`);
@@ -3505,7 +4101,7 @@ function openSettingsModal() {
           statusPill.textContent = `已就绪 · ${latency}ms`;
           statusPill.className = `driver-pill ${latency < 2800 ? "latency-fast" : latency < 7500 ? "latency-normal" : "latency-slow"}`;
         } else {
-          statusPill.textContent = info.shared_cli_group ? "单引擎多角色" : "已就绪";
+          statusPill.textContent = info.shared_cli_group ? "并行池就绪" : "已就绪";
           statusPill.className = "driver-pill live";
         }
       } else {
@@ -3516,6 +4112,7 @@ function openSettingsModal() {
   }
 
   syncDynamicRosterNames();
+  syncModalSeatMatrixSummary();
   modal.classList.remove("hidden");
 }
 
@@ -3525,11 +4122,7 @@ function closeSettingsModal() {
 
 function collectDraftAgentConfigsFromModal() {
   const out = {};
-  for (const [aid, cap] of [
-    ["carbon", "Carbon"],
-    ["grok", "Grok"],
-    ["astra", "Astra"],
-  ]) {
+  for (const [aid, cap] of SEAT_CAP_PAIRS) {
     const discSel = el(`cfg${cap}Effort`);
     const execSel = el(`cfg${cap}ExecEffort`);
     out[aid] = {
@@ -3557,7 +4150,6 @@ function applyQuickSingleCliTriad() {
   }
 
   const dSpec = DRIVER_DEFAULTS[chosenDrv] || DRIVER_DEFAULTS.agy;
-  const triadPersonas = { carbon: "planner", grok: "red_team", astra: "implementer" };
   const singleFb = el("cfgSingleCliFallback");
   if (singleFb) singleFb.checked = true;
   const concSel = el("cfgSingleCliConcurrency");
@@ -3566,18 +4158,14 @@ function applyQuickSingleCliTriad() {
   }
   state.singleCliConcurrency = Number(concSel?.value || state.singleCliConcurrency || 3);
 
-  for (const [aid, cap] of [
-    ["carbon", "Carbon"],
-    ["grok", "Grok"],
-    ["astra", "Astra"],
-  ]) {
+  for (const [aid, cap] of SEAT_CAP_PAIRS) {
     const drvEl = el(`cfg${cap}Driver`);
     const perEl = el(`cfg${cap}Persona`);
     const modEl = el(`cfg${cap}Model`);
     const discEl = el(`cfg${cap}Effort`);
     const execEl = el(`cfg${cap}ExecEffort`);
     if (drvEl) drvEl.value = chosenDrv;
-    if (perEl) perEl.value = triadPersonas[aid];
+    if (perEl && !perEl.value) perEl.value = DEFAULT_SEAT_PERSONAS[aid];
     if (modEl) modEl.value = dSpec.model;
     if (discEl) discEl.value = dSpec.discussEffort;
     if (execEl) execEl.value = dSpec.execEffort;
@@ -3593,9 +4181,9 @@ function applyQuickSingleCliTriad() {
     );
   }
   state.seatEfforts = {};
-  const concNote = state.singleCliConcurrency > 1 ? `${state.singleCliConcurrency} 席并发` : "串行防限流";
+  const concNote = state.singleCliConcurrency > 1 ? `${state.singleCliConcurrency} 路真并行` : "串行防限流";
   showToast(
-    `已填入「${DRIVER_LABELS[chosenDrv] || chosenDrv}」单引擎三角色推荐配置（${concNote}），点击「保存配置」生效`,
+    `已将全部 6 席对齐至「${DRIVER_LABELS[chosenDrv] || chosenDrv}」无状态真并行池（${concNote}），点击「保存配置」生效`,
     "ok",
     2800
   );
@@ -3672,22 +4260,33 @@ async function saveSettingsFromModal() {
   if (btn) btn.disabled = true;
 
   try {
+    const selectedSeats = [];
+    document.querySelectorAll("[data-cfg-seat-enable]").forEach((chk) => {
+      if (chk.checked) selectedSeats.push(chk.dataset.cfgSeatEnable);
+    });
+    if (selectedSeats.length === 0) {
+      showToast("请至少启用 1 个参会席位", "warn", 2400);
+      switchSettingsTab("lineup");
+      return;
+    }
+
     const activePacingBtn = document.querySelector("#cfgPacingGroup .pacing-seg-btn.active");
-    const pacingMode = activePacingBtn?.dataset.pacingMode || state.pacingMode || "unrestricted";
+    const pacingMode = activePacingBtn?.dataset.pacingMode || state.pacingMode || "standard";
     const preset = PACING_PRESETS[pacingMode];
     const idleSec = preset
       ? preset.idle_timeout_sec
-      : Math.max(0, Number(el("cfgIdleTimeout")?.value ?? 900));
+      : Math.max(15, Number(el("cfgIdleTimeout")?.value || 300));
     const turnSec = preset
       ? preset.turn_timeout_sec
-      : Math.max(0, Number(el("cfgTurnTimeout")?.value ?? 0));
+      : Math.max(30, Number(el("cfgTurnTimeout")?.value || 600));
     const maxRef = preset
       ? preset.max_ref_chars
-      : Math.max(10000, Number(el("cfgMaxRefChars")?.value ?? 120000));
+      : Math.max(10000, Number(el("cfgMaxRefChars")?.value || 120000));
 
     const wsVal = (el("cfgWorkspaceDir")?.value || "").trim();
+    const verifyCmdVal = (el("cfgPostExecVerifyCmd")?.value || "").trim();
     const singleFallback = Boolean(el("cfgSingleCliFallback")?.checked);
-    const singleConc = Number(el("cfgSingleCliConcurrency")?.value || 3);
+    const singleConc = Math.min(6, Math.max(1, Number(el("cfgSingleCliConcurrency")?.value || 3)));
     const rosterPreset = el("cfgRosterPresetSelect")?.value || "role_experts";
 
     const draftAgents = collectDraftAgentConfigsFromModal();
@@ -3697,11 +4296,22 @@ async function saveSettingsFromModal() {
       }
     }
 
+    const prevEffectiveWs = effectiveWorkspacePath();
+    if (wsVal && wsVal !== prevEffectiveWs && state.currentSessionId && !state.isBusy) {
+      await apiFetch(`/api/sessions/${state.currentSessionId}/workspace`, {
+        method: "POST",
+        body: JSON.stringify({ workspace_dir: wsVal }),
+      });
+      state.sessionWorkspaceDir = wsVal;
+      state.workspaceBound = true;
+    }
+
     const res = await apiFetch("/api/config", {
       method: "POST",
       body: JSON.stringify({
         active_session_id: state.currentSessionId || "",
         workspace_dir: wsVal,
+        post_exec_verify_cmd: verifyCmdVal,
         allow_single_cli_fallback: singleFallback,
         roster_preset: rosterPreset,
         single_cli_concurrency: singleConc,
@@ -3713,21 +4323,22 @@ async function saveSettingsFromModal() {
       }),
     });
 
-    const nextPersonas = {
-      carbon: draftAgents.carbon.persona,
-      grok: draftAgents.grok.persona,
-      astra: draftAgents.astra.persona,
-    };
-    const resetSeatEfforts = { carbon: "", grok: "", astra: "" };
+    const nextPersonas = {};
+    const resetSeatEfforts = {};
+    for (const aid of AGENT_ORDER) {
+      nextPersonas[aid] = draftAgents[aid].persona;
+      resetSeatEfforts[aid] = "";
+    }
 
+    state.enabledAgents = selectedSeats;
+    if (!selectedSeats.includes(state.executorAgent)) {
+      state.executorAgent = selectedSeats.includes("astra") ? "astra" : selectedSeats[0];
+    }
     state.seatPersonas = { ...state.seatPersonas, ...nextPersonas };
     state.seatEfforts = {};
+    state.postExecVerifyCmd = verifyCmdVal;
     state.rosterPreset = res.system?.roster_preset || rosterPreset;
     state.singleCliConcurrency = res.system?.single_cli_concurrency || singleConc;
-    if (wsVal) {
-      state.sessionWorkspaceDir = wsVal;
-      state.workspaceBound = res.system?.workspace_bound ?? null;
-    }
 
     if (res.system) {
       renderSystemStatus(res.system);
@@ -3738,6 +4349,8 @@ async function saveSettingsFromModal() {
 
     if (state.currentSessionId) {
       await persistSessionSeatsPatch({
+        enabled_agents: selectedSeats,
+        executor_agent: state.executorAgent,
         seat_personas: nextPersonas,
         seat_efforts: resetSeatEfforts,
       });
@@ -3746,7 +4359,7 @@ async function saveSettingsFromModal() {
     renderStageAndHeader();
     if (state.whiteboard) renderWhiteboard(state.whiteboard, true, false);
     closeSettingsModal();
-    showToast("系统运行策略、成员称呼与模型配置已保存", "ok", 2200);
+    showToast("1–6 席阵容、并发通道与系统安全策略已保存", "ok", 2200);
   } catch (err) {
     showToast(err.message || "保存系统配置失败", "err", 3800);
   } finally {
@@ -4089,23 +4702,64 @@ function bindEvents() {
   el("copyDiffBtn")?.addEventListener("click", () =>
     copyTextToClipboard(state.whiteboard?.exec_diff || "", "变更补丁 Diff 已复制")
   );
+  el("ackSnapshotBtn")?.addEventListener("click", () => acknowledgeCurrentSnapshot());
+
   el("rollbackExecBtn")?.addEventListener("click", async () => {
     if (!state.currentSessionId) return;
     try {
-      const res = await apiFetch(`/api/sessions/${state.currentSessionId}/rollback`, { method: "POST" });
-      showToast(res.message || "已回滚执行前工作区快照", "ok", 2600);
+      const res = await apiFetch(`/api/sessions/${state.currentSessionId}/rollback`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      state.rollbackConflicts = [];
+      state.postExecVerifyFailed = false;
+      renderExecGuardBanner();
+      showToast(res.message || "已按写前 CAS 字节清单原子回滚工作区", "ok", 2800);
     } catch (err) {
-      showToast(err.message || "回滚失败", "err");
+      if (err.status === 409 && Array.isArray(err.payload?.conflict_paths)) {
+        state.rollbackConflicts = err.payload.conflict_paths;
+        renderExecGuardBanner();
+      }
+      showToast(err.message || "原子回滚已拦截", "err", 4200);
     }
   });
 
-  // 系统设置弹窗与连通实测
+  // 顶栏圆桌席位快速编排按钮 & 分导航系统设置中心
+  el("ringLineupQuickBtn")?.addEventListener("click", () => openSettingsModal("lineup"));
   el("railSettingsBtn")?.addEventListener("click", () => openSettingsModal());
   el("openSettingsBtn")?.addEventListener("click", () => openSettingsModal());
   el("closeSettingsBtn")?.addEventListener("click", () => closeSettingsModal());
   el("cancelSettingsBtn")?.addEventListener("click", () => closeSettingsModal());
   el("settingsModal")?.addEventListener("click", (e) => {
     if (e.target === el("settingsModal")) closeSettingsModal();
+  });
+  document.querySelectorAll("#settingsNav [data-settings-tab]").forEach((btn) => {
+    btn.addEventListener("click", () => switchSettingsTab(btn.dataset.settingsTab));
+  });
+  document.querySelectorAll("[data-cfg-seat-enable]").forEach((chk) => {
+    chk.addEventListener("change", () => syncModalSeatMatrixSummary());
+  });
+  el("cfgShowAllSixSeats")?.addEventListener("change", () => syncModalSeatMatrixSummary());
+  document.querySelectorAll("[data-modal-lineup]").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      const key = chip.dataset.modalLineup;
+      const spec = SCENARIO_PRESETS[key];
+      if (!spec) return;
+      const targetEnabled = spec.solo ? [pickPreferredSoloSeat()] : (spec.enabled_agents || CORE_TRIAD_SEATS);
+      const targetPersonas = spec.solo
+        ? { [targetEnabled[0]]: "fullstack_solo" }
+        : (spec.seat_personas || DEFAULT_SEAT_PERSONAS);
+      document.querySelectorAll("[data-cfg-seat-enable]").forEach((chk) => {
+        chk.checked = targetEnabled.includes(chk.dataset.cfgSeatEnable);
+      });
+      for (const [aid, cap] of SEAT_CAP_PAIRS) {
+        const pSel = el(`cfg${cap}Persona`);
+        if (pSel && targetPersonas[aid]) pSel.value = targetPersonas[aid];
+      }
+      syncCollabModeUI(spec.collab_mode, state.autoPreviewExec);
+      syncModalSeatMatrixSummary();
+      showToast(`已在设置中心预选「${spec.label}」，点击右下角「保存配置」生效`, "info", 2200);
+    });
   });
 
   document.querySelectorAll("#cfgPacingGroup [data-pacing-mode]").forEach((btn) => {
@@ -4135,7 +4789,7 @@ function bindEvents() {
   el("modalTestCliBtn")?.addEventListener("click", () => runCliTest(true));
   el("saveSettingsBtn")?.addEventListener("click", () => saveSettingsFromModal());
 
-  for (const cap of ["Carbon", "Grok", "Astra"]) {
+  for (const [, cap] of SEAT_CAP_PAIRS) {
     el(`cfg${cap}Driver`)?.addEventListener("change", () => refreshSeatEffortSelectInModal(cap, true));
     el(`cfg${cap}Model`)?.addEventListener("input", () => refreshSeatEffortSelectInModal(cap, false));
   }
@@ -4143,11 +4797,7 @@ function bindEvents() {
   el("cfgRosterPresetSelect")?.addEventListener("change", (e) => {
     const val = e.target.value || "role_experts";
     const preset = ROSTER_NAME_PRESETS[val];
-    for (const [aid, cap] of [
-      ["carbon", "Carbon"],
-      ["grok", "Grok"],
-      ["astra", "Astra"],
-    ]) {
+    for (const [aid, cap] of SEAT_CAP_PAIRS) {
       const inp = el(`cfg${cap}Name`);
       if (inp) {
         inp.placeholder = preset?.names?.[aid]
@@ -4223,6 +4873,7 @@ async function bootstrap() {
   setInterval(tickThinkingTimers, 1000);
 
   try {
+    await initControlPlaneAuth();
     const statusRes = await apiFetch("/api/status");
     renderSystemStatus(statusRes.system);
     state.sessions = statusRes.sessions || [];

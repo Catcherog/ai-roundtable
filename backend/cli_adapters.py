@@ -28,6 +28,20 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import AsyncGenerator, Dict, List, Optional, Set, Tuple
 
+from .context import (
+    count_file_lines_cached,
+    invalidate_workspace_index,
+    run_index_in_thread,
+    scan_workspace_index_cached,
+)
+from .domain import ALL_SEAT_IDS, IMMUTABLE_SEAT_CATALOG
+from .drivers import (
+    SupervisedProcessHandle,
+    build_driver_specs_and_capabilities,
+    load_driver_catalog,
+    spawn_supervised_cli,
+    terminate_and_reap_process_group,
+)
 from .workspace_backup import WorkspaceBackup
 
 
@@ -146,6 +160,9 @@ DEFAULT_SEAT_PERSONAS: Dict[str, str] = {
     "carbon": "planner",
     "grok": "red_team",
     "astra": "implementer",
+    "vega": "product_ux",
+    "titan": "perf_sre",
+    "prism": "qa_audit",
 }
 
 ROSTER_NAME_PRESETS: Dict[str, dict] = {
@@ -153,19 +170,40 @@ ROSTER_NAME_PRESETS: Dict[str, dict] = {
         "key": "role_experts",
         "label": "专业职能称呼（推荐默认）",
         "desc": "脱离具体模型名，按圆桌席位职责直观称呼",
-        "names": {"carbon": "架构师", "grok": "审计官", "astra": "工程师"},
+        "names": {
+            "carbon": "架构师",
+            "grok": "审计官",
+            "astra": "工程师",
+            "vega": "交互设计",
+            "titan": "性能专家",
+            "prism": "质量验证",
+        },
     },
     "council_alpha": {
         "key": "council_alpha",
-        "label": "中立席位代号（Alpha / Beta / Gamma）",
-        "desc": "适合任意异构或单引擎多角色组合的中立代号",
-        "names": {"carbon": "Alpha", "grok": "Beta", "astra": "Gamma"},
+        "label": "中立席位代号（Alpha ~ Zeta）",
+        "desc": "适合任意异构或单引擎多角色并发组合的中立代号",
+        "names": {
+            "carbon": "Alpha",
+            "grok": "Beta",
+            "astra": "Gamma",
+            "vega": "Delta",
+            "titan": "Epsilon",
+            "prism": "Zeta",
+        },
     },
     "product_studio": {
         "key": "product_studio",
-        "label": "产品研发委员会（总监 / 红队 / 主程）",
-        "desc": "适合产品方案评审、交互收敛与全栈交付",
-        "names": {"carbon": "产品总监", "grok": "红队审计", "astra": "研发主程"},
+        "label": "产品研发委员会（总监 / 交互 / 红队 / 主程 / SRE / QA）",
+        "desc": "适合产品方案评审、交互收敛与高可靠全栈交付",
+        "names": {
+            "carbon": "产品总监",
+            "grok": "红队审计",
+            "astra": "研发主程",
+            "vega": "体验设计",
+            "titan": "稳定性架构",
+            "prism": "测试主管",
+        },
     },
     "auto_driver": {
         "key": "auto_driver",
@@ -175,9 +213,16 @@ ROSTER_NAME_PRESETS: Dict[str, dict] = {
     },
     "classic": {
         "key": "classic",
-        "label": "经典默认代号（Carbon / Grok / Astra）",
-        "desc": "保留原版三席经典代号",
-        "names": {"carbon": "Carbon", "grok": "Grok", "astra": "Astra"},
+        "label": "经典默认代号（Carbon / Grok / Astra / Vega / Titan / Prism）",
+        "desc": "保留席位工程代号",
+        "names": {
+            "carbon": "Carbon",
+            "grok": "Grok",
+            "astra": "Astra",
+            "vega": "Vega",
+            "titan": "Titan",
+            "prism": "Prism",
+        },
     },
 }
 
@@ -319,13 +364,34 @@ DEFAULT_SEAT_DRIVERS: Dict[str, str] = {
     "carbon": "agy",
     "grok": "grok",
     "astra": "codex",
+    "vega": "agy",
+    "titan": "codex",
+    "prism": "grok",
 }
 
 DEFAULT_TOP_MODELS: Dict[str, Tuple[str, str]] = {
     "carbon": ("gemini-4-carbon", "high"),
     "grok": ("grok-4.7", "xhigh"),
     "astra": ("gpt-6-astra", "max"),
+    "vega": ("", "high"),
+    "titan": ("", "high"),
+    "prism": ("", "high"),
 }
+
+
+def _refresh_declarative_driver_tables() -> None:
+    """热同步外置声明式 CLI 目录（内置 driver_catalog.json + ~/.ai-roundtable/drivers.json）。"""
+    global VALID_DRIVERS
+    specs, caps, fb_paths, excl = build_driver_specs_and_capabilities()
+    DRIVER_SPECS.update(specs)
+    MODEL_EFFORT_CAPABILITIES.update(caps)
+    for dk, p_list in fb_paths.items():
+        if p_list:
+            DRIVER_FALLBACK_PATHS[dk] = p_list
+    _DRIVER_EXCLUSIVE_DEFAULT_MODELS.update(excl)
+    VALID_DRIVERS = ("auto",) + tuple(DRIVER_SPECS.keys())
+
+
 
 CODEX_MACOS_FALLBACK_PATHS: List[str] = [
     "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
@@ -354,7 +420,11 @@ DRIVER_FALLBACK_PATHS: Dict[str, List[str]] = {
     "codex": CODEX_MACOS_FALLBACK_PATHS,
 }
 
-PROBE_CACHE_FILE = os.path.expanduser("~/.ai-roundtable/probe_cache.json")
+_refresh_declarative_driver_tables()
+
+PROBE_CACHE_FILE = os.path.join(
+    os.path.expanduser(os.environ.get("AI_ROUNDTABLE_HOME") or "~/.ai-roundtable"), "probe_cache.json"
+)
 _DISK_PROBE_CACHE: Optional[Dict[str, dict]] = None
 
 _IGNORED_PROJECT_DIRS = {
@@ -461,10 +531,14 @@ def _save_disk_probe_cache() -> None:
 
 
 def build_host_env() -> Dict[str, str]:
-    """构建完整的宿主机环境变量并内存缓存；若父进程已完成登录 Shell 初始化则直接复用。"""
+    """构建宿主机环境变量（缓存登录 Shell PATH，实时感知代理变更，并剥离控制面敏感凭据防子进程泄露）。"""
     global _CACHED_LOGIN_PATH, _CACHED_HOST_ENV
     if _CACHED_HOST_ENV is not None:
-        return _CACHED_HOST_ENV.copy()
+        fresh = os.environ.copy()
+        fresh["PATH"] = _CACHED_HOST_ENV["PATH"]
+        fresh.pop("AI_ROUNDTABLE_BOOT_TOKEN", None)
+        fresh.pop("AI_ROUNDTABLE_BOOTSTRAP_CODE", None)
+        return fresh
 
     env = os.environ.copy()
     home = os.path.expanduser("~")
@@ -523,10 +597,12 @@ def build_host_env() -> Dict[str, str]:
 
     for d in candidate_dirs:
         if d not in merged and os.path.isdir(d):
-            merged.insert(0, d)
+            merged.append(d)
 
     env["PATH"] = os.pathsep.join(merged)
-    _CACHED_HOST_ENV = env
+    env.pop("AI_ROUNDTABLE_BOOT_TOKEN", None)
+    env.pop("AI_ROUNDTABLE_BOOTSTRAP_CODE", None)
+    _CACHED_HOST_ENV = {"PATH": env["PATH"]}
     return env.copy()
 
 
@@ -651,8 +727,8 @@ def is_real_bound_workspace(workspace_dir: str) -> Tuple[bool, str]:
     if not workspace_dir or not os.path.isdir(workspace_dir):
         return False, ""
     real_ws = os.path.realpath(os.path.expanduser(workspace_dir))
-    default_empty = os.path.realpath(os.path.expanduser("~/.ai-roundtable/workspace"))
-    default_root = os.path.realpath(os.path.expanduser("~/.ai-roundtable"))
+    default_empty = os.path.realpath(os.path.join(os.path.expanduser(os.environ.get("AI_ROUNDTABLE_HOME") or "~/.ai-roundtable"), "workspace"))
+    default_root = os.path.realpath(os.path.expanduser(os.environ.get("AI_ROUNDTABLE_HOME") or "~/.ai-roundtable"))
     home_real = os.path.realpath(os.path.expanduser("~"))
     if real_ws in (default_empty, default_root, home_real):
         return False, real_ws
@@ -690,46 +766,13 @@ def list_workspace_files(workspace_dir: str, query: str = "", limit: int = 200) 
 
     q_low = (query or "").strip().lower().lstrip("@")
     cap = max(1, min(int(limit or 200), 400))
-    all_items: List[dict] = []
-    max_scan = 2500
-
-    for root, dirs, files in os.walk(real_ws):
-        dirs[:] = sorted(
-            d
-            for d in dirs
-            if not d.startswith(".") and d not in _IGNORED_PROJECT_DIRS and not d.endswith(".app")
-        )
-        rel_dir = os.path.relpath(root, real_ws)
-        depth = 0 if rel_dir == "." else rel_dir.count(os.sep) + 1
-        if depth > 5:
-            dirs[:] = []
-            continue
-
-        for fname in sorted(files):
-            if fname.startswith("."):
-                continue
-            _, ext = os.path.splitext(fname)
-            if ext.lower() in _BINARY_FILE_EXTS:
-                continue
-            full_p = os.path.join(root, fname)
-            rel_p = fname if rel_dir == "." else f"{rel_dir.replace(os.sep, '/')}/{fname}"
-            line_cnt = 0
-            try:
-                sz = os.path.getsize(full_p)
-                if 0 < sz <= 524288:
-                    with open(full_p, "rb") as bf:
-                        raw_b = bf.read()
-                    line_cnt = raw_b.count(b"\n") + (1 if raw_b and not raw_b.endswith(b"\n") else 0)
-            except Exception:
-                sz = 0
-            item_entry = {"path": rel_p, "size_kb": round(max(sz, 1) / 1024.0, 1)}
-            if line_cnt > 0:
-                item_entry["lines"] = line_cnt
-            all_items.append(item_entry)
-            if len(all_items) >= max_scan:
-                break
-        if len(all_items) >= max_scan:
-            break
+    all_items = scan_workspace_index_cached(
+        real_ws,
+        _IGNORED_PROJECT_DIRS,
+        _BINARY_FILE_EXTS,
+        max_depth=5,
+        max_scan=2500,
+    )
 
     total_count = len(all_items)
     if q_low:
@@ -1296,7 +1339,13 @@ def step_down_model_effort(
     return allowed[0]
 
 
+async def list_workspace_files_async(workspace_dir: str, query: str = "", limit: int = 200) -> dict:
+    """后台线程异步检索工作区文件清单，零事件循环阻塞。"""
+    return await run_index_in_thread(list_workspace_files, workspace_dir, query, limit)
+
+
 def export_model_effort_catalog() -> dict:
+    _refresh_declarative_driver_tables()
     """导出前端可直接消费的「CLI 驱动 + 模型名」推理档位能力表与驱动默认参数。"""
     drivers_info: Dict[str, dict] = {}
     for drv, dspec in DRIVER_SPECS.items():
@@ -1669,16 +1718,21 @@ class AgentRoleConfig:
         return bpath, self._cached_meta.get("version", ""), self._cached_meta.get("help", ""), eff_drv, is_fb
 
 
+DEFAULT_IDLE_TIMEOUT_SEC = 300
+DEFAULT_TURN_TIMEOUT_SEC = 600
+
+
 @dataclass
 class RuntimeSettings:
     workspace_dir: str = field(default_factory=lambda: os.getcwd())
     allow_single_cli_fallback: bool = True
-    pacing_mode: str = "unrestricted"  # "unrestricted" | "standard" | "custom"
-    idle_timeout_sec: int = 900
-    turn_timeout_sec: int = 0
+    pacing_mode: str = "standard"  # "standard" (300s/600s) | "extended" | "custom"
+    idle_timeout_sec: int = DEFAULT_IDLE_TIMEOUT_SEC
+    turn_timeout_sec: int = DEFAULT_TURN_TIMEOUT_SEC
     max_ref_chars: int = MAX_ROUND_SOURCE_CHARS
     roster_preset: str = "role_experts"
     single_cli_concurrency: int = 3
+    post_exec_verify_cmd: str = ""
     agents: Dict[str, AgentRoleConfig] = field(default_factory=dict)
     _status_cache: Optional[Dict[str, dict]] = field(default=None, repr=False)
     _status_cache_ts: float = field(default=0.0, repr=False)
@@ -1706,19 +1760,28 @@ class RuntimeSettings:
         preset_names = ROSTER_NAME_PRESETS[preset_key].get("names") or {}
         if preset_names.get(agent_id):
             return preset_names[agent_id]
-        return {"carbon": "架构师", "grok": "审计官", "astra": "工程师"}.get(agent_id, agent_id.capitalize())
+        return {
+            "carbon": "架构师",
+            "grok": "审计官",
+            "astra": "工程师",
+            "vega": "交互设计",
+            "titan": "性能专家",
+            "prism": "质量验证",
+        }.get(agent_id, agent_id.capitalize())
 
     @classmethod
     def create_default(cls, workspace_dir: str) -> "RuntimeSettings":
+        _refresh_declarative_driver_tables()
         return cls(
             workspace_dir=workspace_dir,
             allow_single_cli_fallback=True,
-            pacing_mode="unrestricted",
-            idle_timeout_sec=900,
-            turn_timeout_sec=0,
+            pacing_mode="standard",
+            idle_timeout_sec=DEFAULT_IDLE_TIMEOUT_SEC,
+            turn_timeout_sec=DEFAULT_TURN_TIMEOUT_SEC,
             max_ref_chars=MAX_ROUND_SOURCE_CHARS,
             roster_preset="role_experts",
             single_cli_concurrency=3,
+            post_exec_verify_cmd="",
             agents={
                 "carbon": AgentRoleConfig(
                     agent_id="carbon",
@@ -1758,11 +1821,51 @@ class RuntimeSettings:
                     discussion_effort=DEFAULT_TOP_MODELS["astra"][1],
                     execution_effort=DEFAULT_TOP_MODELS["astra"][1],
                 ),
+                "vega": AgentRoleConfig(
+                    agent_id="vega",
+                    name="交互设计",
+                    title="交互",
+                    cli_name="Auto CLI",
+                    binary_candidates=["agy", "codex", "grok"],
+                    fallback_paths=list(AGY_MACOS_FALLBACK_PATHS) + list(CODEX_MACOS_FALLBACK_PATHS),
+                    driver="auto",
+                    persona="product_ux",
+                    model="",
+                    discussion_effort="high",
+                    execution_effort="high",
+                ),
+                "titan": AgentRoleConfig(
+                    agent_id="titan",
+                    name="性能专家",
+                    title="性能",
+                    cli_name="Auto CLI",
+                    binary_candidates=["agy", "codex", "grok"],
+                    fallback_paths=list(AGY_MACOS_FALLBACK_PATHS) + list(CODEX_MACOS_FALLBACK_PATHS),
+                    driver="auto",
+                    persona="perf_sre",
+                    model="",
+                    discussion_effort="high",
+                    execution_effort="high",
+                ),
+                "prism": AgentRoleConfig(
+                    agent_id="prism",
+                    name="质量验证",
+                    title="验证",
+                    cli_name="Auto CLI",
+                    binary_candidates=["agy", "codex", "grok"],
+                    fallback_paths=list(AGY_MACOS_FALLBACK_PATHS) + list(CODEX_MACOS_FALLBACK_PATHS),
+                    driver="auto",
+                    persona="qa_audit",
+                    model="",
+                    discussion_effort="high",
+                    execution_effort="high",
+                ),
             },
         )
 
     def inspect_status(self, force_refresh: bool = False) -> Dict[str, dict]:
-        """三路并发探测所有 CLI 元信息并缓存（5s TTL），实时同步预设/自定义成员名称。"""
+        """并发探测所有 CLI 元信息并缓存（5s TTL），实时热加载外置驱动目录。"""
+        _refresh_declarative_driver_tables()
         now_m = time.monotonic()
         if not force_refresh and self._status_cache is not None and (now_m - self._status_cache_ts) < 5.0:
             return {k: dict(v) for k, v in self._status_cache.items()}
@@ -1998,6 +2101,8 @@ class WarmAntigravityProcess:
         self.supports_effort = supports_effort
         self.sandbox = sandbox
         self.proc: Optional[asyncio.subprocess.Process] = None
+        self._supervised = None
+        self._call_tmp = ""
         self.turn_count: int = 0
         self._lock = asyncio.Lock()
 
@@ -2012,6 +2117,8 @@ class WarmAntigravityProcess:
     async def ensure_started(self) -> None:
         if self.proc and self.proc.returncode is None:
             return
+        if self._supervised is not None or self._call_tmp:
+            await self.close()
         self.turn_count = 0
         cmd = [
             self.binary_path,
@@ -2029,15 +2136,19 @@ class WarmAntigravityProcess:
         norm_eff = self.normalize_agy_effort(self.effort, help_text=self.help_text, model=self.model)
         if self.supports_effort and norm_eff:
             cmd.extend(["--effort", norm_eff])
-        self.proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=self.cwd if os.path.isdir(self.cwd) else None,
-            env=build_host_env(),
-            limit=4 * 1024 * 1024,
+        env, self._call_tmp = UnifiedAgentRunner._prepare_isolated_call_env(
+            self.session_id or "prewarm", self.seat_id or "carbon"
         )
+        try:
+            self._supervised = await spawn_supervised_cli(
+                cmd, cwd=self.cwd if os.path.isdir(self.cwd) else os.getcwd(), env=env,
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE, limit=4 * 1024 * 1024,
+            )
+            self.proc = self._supervised.proc
+        except BaseException:
+            await self.close()
+            raise
 
     async def stream_turn(self, prompt: str) -> AsyncGenerator[dict, None]:
         async with self._lock:
@@ -2065,8 +2176,7 @@ class WarmAntigravityProcess:
                             rc = await asyncio.wait_for(self.proc.wait(), timeout=1.0)
                         except Exception:
                             rc = self.proc.returncode
-                        self.proc = None
-                        self.turn_count = 0
+                        await self.close()
                         if not emitted:
                             raise classify_cli_error(
                                 "agy",
@@ -2143,15 +2253,14 @@ class WarmAntigravityProcess:
                     await self.close()
 
     async def close(self) -> None:
-        if self.proc and self.proc.returncode is None:
-            try:
-                if self.proc.stdin:
-                    self.proc.stdin.close()
-                self.proc.kill()
-            except Exception:
-                pass
-        self.proc = None
+        handle, temp = self._supervised, self._call_tmp
+        self._supervised, self._call_tmp, self.proc = None, "", None
         self.turn_count = 0
+        try:
+            if handle is not None:
+                await terminate_and_reap_process_group(handle)
+        finally:
+            UnifiedAgentRunner._cleanup_isolated_call_tmp(temp)
 
 
 class UnifiedAgentRunner:
@@ -2173,19 +2282,39 @@ class UnifiedAgentRunner:
         self._injected_refs: Dict[Tuple[str, str], Set[str]] = {}
         self._binary_semaphores: Dict[Tuple[str, int], asyncio.Semaphore] = {}
         self._active_raw_procs: Dict[Tuple[str, str], Set[asyncio.subprocess.Process]] = {}
+        self._active_supervised_handles: Dict[Tuple[str, str], Set[SupervisedProcessHandle]] = {}
 
     def _get_binary_semaphore(self, binary_path: str, stateless_shared: bool = False) -> asyncio.Semaphore:
+        real_key = os.path.realpath(binary_path) if (binary_path and "://" not in binary_path and os.path.lexists(binary_path)) else binary_path
         cap = (
-            max(1, min(4, int(getattr(self.settings, "single_cli_concurrency", 3) or 3)))
+            max(1, min(6, int(getattr(self.settings, "single_cli_concurrency", 3) or 3)))
             if stateless_shared
-            else 3
+            else 4
         )
-        key = (binary_path, cap)
+        key = (real_key, cap)
         sem = self._binary_semaphores.get(key)
         if sem is None:
             sem = asyncio.Semaphore(cap)
             self._binary_semaphores[key] = sem
         return sem
+
+    @staticmethod
+    def _prepare_isolated_call_env(session_id: str, agent_id: str) -> Tuple[Dict[str, str], str]:
+        """为单 CLI 多路并发调用构造独立临时运行目录（隔离 TMPDIR/锁文件，同时保留用户登录态 HOME）。"""
+        env = build_host_env()
+        iso_root = os.path.join(os.path.expanduser(os.environ.get("AI_ROUNDTABLE_HOME") or "~/.ai-roundtable"), "tmp_runs")
+        os.makedirs(iso_root, exist_ok=True)
+        call_tmp = tempfile.mkdtemp(prefix=f"{session_id}_{agent_id}_", dir=iso_root)
+        env["TMPDIR"] = call_tmp
+        env["TEMP"] = call_tmp
+        env["TMP"] = call_tmp
+        env["AI_ROUNDTABLE_SEAT_ID"] = agent_id
+        return env, call_tmp
+
+    @staticmethod
+    def _cleanup_isolated_call_tmp(call_tmp: str) -> None:
+        if call_tmp and os.path.isdir(call_tmp):
+            shutil.rmtree(call_tmp, ignore_errors=True)
 
     def _register_raw_proc(self, seat_key: Tuple[str, str], proc: asyncio.subprocess.Process) -> None:
         self._active_raw_procs.setdefault(seat_key, set()).add(proc)
@@ -2274,7 +2403,7 @@ class UnifiedAgentRunner:
 
     @staticmethod
     def _discussion_sandbox_cwd() -> str:
-        discuss_dir = os.path.expanduser("~/.ai-roundtable/discuss_sandbox")
+        discuss_dir = os.path.join(os.path.expanduser(os.environ.get("AI_ROUNDTABLE_HOME") or "~/.ai-roundtable"), "discuss_sandbox")
         try:
             os.makedirs(discuss_dir, exist_ok=True)
             return discuss_dir
@@ -2287,7 +2416,7 @@ class UnifiedAgentRunner:
         if raw and os.path.isdir(raw):
             if os.path.realpath(raw) != home:
                 return raw
-        safe_ws = os.path.expanduser("~/.ai-roundtable/workspace")
+        safe_ws = os.path.join(os.path.expanduser(os.environ.get("AI_ROUNDTABLE_HOME") or "~/.ai-roundtable"), "workspace")
         try:
             os.makedirs(safe_ws, exist_ok=True)
             return safe_ws
@@ -2556,7 +2685,7 @@ class UnifiedAgentRunner:
             )
         elif shared_cli_roster:
             role_header += (
-                f"\n【单引擎多角色串行独立扮演铁律】：本场会议由同一底层引擎无状态分次承担多个角色（参会阵容：{shared_cli_roster}）。"
+                f"\n【单引擎多席位并行正交扮演铁律（严禁同源模型自我附和，必须彻底锁定本席专属专业视角独立交锋）】：本场会议由同一底层引擎无状态分次承担多个角色（参会阵容：{shared_cli_roster}）。"
                 f"你本轮仅代表【{seat_display} · {pspec['label']}】，严禁复述前序席位原话或客套附和（禁止出现“同意/赞同/说得好/整体可行/补充一点”），"
                 "必须独立输出当前角色职责视角的实质判断、风险审计或具体工程方案！"
             )
@@ -3226,17 +3355,24 @@ class UnifiedAgentRunner:
         sem = self._get_binary_semaphore(bpath, stateless_shared=use_stateless)
 
         is_unlimited = bool(ov and ov.get("unlimited_timeout"))
-        raw_idle = int(getattr(self.settings, "idle_timeout_sec", 900))
-        idle_timeout = 3600.0 if (is_unlimited or raw_idle <= 0) else float(max(15, raw_idle))
-        raw_turn = int(getattr(self.settings, "turn_timeout_sec", 0))
-        total_timeout: Optional[float] = None if (is_unlimited or raw_turn <= 0) else float(max(30, raw_turn))
-        if total_timeout is not None and stage == "synthesis":
+        raw_idle = int(getattr(self.settings, "idle_timeout_sec", DEFAULT_IDLE_TIMEOUT_SEC) or DEFAULT_IDLE_TIMEOUT_SEC)
+        if raw_idle <= 0:
+            raw_idle = DEFAULT_IDLE_TIMEOUT_SEC
+        _min_idle_b = 1 if os.environ.get("AI_ROUNDTABLE_FAST_TEST") == "1" else 15
+        idle_timeout = 1800.0 if is_unlimited else float(max(_min_idle_b, min(1800, raw_idle)))
+
+        raw_turn = int(getattr(self.settings, "turn_timeout_sec", DEFAULT_TURN_TIMEOUT_SEC) or DEFAULT_TURN_TIMEOUT_SEC)
+        if raw_turn <= 0:
+            raw_turn = DEFAULT_TURN_TIMEOUT_SEC
+        total_timeout: float = 3600.0 if is_unlimited else float(max(30, min(3600, raw_turn)))
+        if stage == "synthesis":
             total_timeout = max(total_timeout, 600.0)
 
         if sem.locked():
+            conc_cap = max(1, min(6, int(getattr(self.settings, "single_cli_concurrency", 3) or 3)))
             yield {
                 "type": "status",
-                "detail": "排队等待同引擎前序席位完成…",
+                "detail": f"等待单引擎并发槽位（当前上限 {conc_cap} 路并行）…",
                 "driver": eff_drv,
                 "model": eff_model,
                 "effort": eff_effort,
@@ -3264,16 +3400,14 @@ class UnifiedAgentRunner:
                 discuss_readonly=True,
                 disable_stepdown_fallback=bool(ov and ov.get("strict_effort")),
             ).__aiter__()
-            hard_deadline = (time.perf_counter() + total_timeout) if total_timeout is not None else None
+            hard_deadline = time.perf_counter() + total_timeout
+            terminal_ok = False
             try:
                 while True:
-                    if hard_deadline is not None:
-                        total_rem = hard_deadline - time.perf_counter()
-                        if total_rem <= 0:
-                            raise asyncio.TimeoutError("turn_cap_exceeded")
-                        step_wait = max(1.0, min(idle_timeout, total_rem))
-                    else:
-                        step_wait = idle_timeout
+                    total_rem = hard_deadline - time.perf_counter()
+                    if total_rem <= 0:
+                        raise asyncio.TimeoutError("turn_cap_exceeded")
+                    step_wait = max(0.2, min(idle_timeout, total_rem))
                     try:
                         ev = await asyncio.wait_for(stream_iter.__anext__(), timeout=step_wait)
                     except StopAsyncIteration:
@@ -3296,18 +3430,19 @@ class UnifiedAgentRunner:
                                 ttft_ms = int((time.perf_counter() - start_ts) * 1000)
                             chunks.append(delta)
                             yield {"type": "delta", "text": delta}
+                    elif ev_type == "terminal":
+                        terminal_ok = bool(ev.get("ok", True))
             except asyncio.TimeoutError:
-                partial_now = "".join(chunks).strip()
-                if len(partial_now) < 80:
-                    hit_total = bool(hard_deadline is not None and time.perf_counter() >= (hard_deadline - 0.5))
-                    reported_sec = (total_timeout or idle_timeout) if hit_total else idle_timeout
-                    raise classify_cli_error(
-                        eff_drv,
-                        is_timeout=True,
-                        timeout_sec=reported_sec,
-                        model=eff_model,
-                        effort=eff_effort,
-                    )
+                # P0.3 红线：彻底废除 >=80 字符吞超时分支！任何空闲超时或整轮超时无论已输出多少字符一律抛出超时异常，严禁残稿入白板
+                hit_total = bool(time.perf_counter() >= (hard_deadline - 0.25))
+                reported_sec = total_timeout if hit_total else idle_timeout
+                raise classify_cli_error(
+                    eff_drv,
+                    is_timeout=True,
+                    timeout_sec=reported_sec,
+                    model=eff_model,
+                    effort=eff_effort,
+                )
             finally:
                 try:
                     await stream_iter.aclose()
@@ -3339,6 +3474,11 @@ class UnifiedAgentRunner:
         elapsed_ms = int((time.perf_counter() - start_ts) * 1000)
         yield {
             "type": "done",
+            "status": "success",
+            "terminal_received": True if terminal_ok or bool(clean_body.strip()) else False,
+            "partial_output": False,
+            "error_kind": "",
+            "binary_path": bpath,
             "full_text": clean_body,
             "badge": badge,
             "target": target,
@@ -3374,39 +3514,58 @@ class UnifiedAgentRunner:
             attempts = [(eff_m, eff_e)]
         else:
             attempts = self._build_fallback_attempts(driver_key, model, effort, help_text=help_text)
-        last_exc: Optional[Exception] = None
+        terminal_exc: Optional[Exception] = None
 
         for cand_model, cand_effort in attempts:
+            # P0.3：每次候选尝试前独立清空前序尝试的异常记录与状态，绝不跨候选污染
+            attempt_exc: Optional[Exception] = None
             emitted_delta = False
-            try:
-                async for ev in self._stream_raw_cli(
-                    session_id=session_id,
-                    agent_id=agent_id,
-                    driver_key=driver_key,
-                    binary_path=binary_path,
-                    help_text=help_text,
-                    model=cand_model,
-                    effort=cand_effort,
-                    prompt=prompt,
-                    use_warm=use_warm,
-                    cwd_override=cwd_override,
-                    discuss_readonly=discuss_readonly,
-                ):
-                    if ev.get("type") == "delta" and ev.get("text"):
-                        emitted_delta = True
-                    yield ev
-                if emitted_delta:
-                    return
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                last_exc = exc
-                if emitted_delta or not _is_model_or_effort_rejection(exc):
+            retried_burst_429 = False
+            while True:
+                try:
+                    async for ev in self._stream_raw_cli(
+                        session_id=session_id,
+                        agent_id=agent_id,
+                        driver_key=driver_key,
+                        binary_path=binary_path,
+                        help_text=help_text,
+                        model=cand_model,
+                        effort=cand_effort,
+                        prompt=prompt,
+                        use_warm=use_warm,
+                        cwd_override=cwd_override,
+                        discuss_readonly=discuss_readonly,
+                    ):
+                        if ev.get("type") == "delta" and ev.get("text"):
+                            emitted_delta = True
+                        yield ev
+                    if emitted_delta:
+                        return
+                    break
+                except asyncio.CancelledError:
                     raise
-                continue
+                except Exception as exc:
+                    attempt_exc = exc
+                    # 单 CLI 多路并发下若首字节前触发瞬时并发限流（429），自动微退避重试 1 次
+                    if (
+                        not use_warm
+                        and not emitted_delta
+                        and not retried_burst_429
+                        and isinstance(exc, CLIInvocationError)
+                        and exc.error_kind == "quota_rate_limit"
+                    ):
+                        retried_burst_429 = True
+                        attempt_exc = None
+                        yield {"type": "status", "detail": "检测到并发瞬时限流，正在错峰重试…"}
+                        await asyncio.sleep(0.65 + (hash(f"{session_id}:{agent_id}") % 5) * 0.12)
+                        continue
+                    if emitted_delta or not _is_model_or_effort_rejection(exc):
+                        raise
+                    terminal_exc = attempt_exc
+                    break
 
-        if last_exc:
-            raise last_exc
+        if terminal_exc:
+            raise terminal_exc
 
     async def _stream_raw_cli(
         self,
@@ -3423,8 +3582,16 @@ class UnifiedAgentRunner:
         discuss_readonly: bool = True,
     ) -> AsyncGenerator[dict, None]:
         cwd = cwd_override if (cwd_override and os.path.isdir(cwd_override)) else self._effective_workspace_cwd()
-        env = build_host_env()
         seat_key = (session_id, agent_id)
+
+        async def spawn_call(cmd, stdin):
+            env, call_tmp = self._prepare_isolated_call_env(session_id, agent_id)
+            try:
+                handle = await spawn_supervised_cli(cmd, cwd=cwd, env=env, stdin=stdin)
+                return handle, call_tmp
+            except BaseException:
+                self._cleanup_isolated_call_tmp(call_tmp)
+                raise
 
         if driver_key == "agy":
             supports_stream_json = "stream-json" in help_text or "--output-format" in help_text
@@ -3514,16 +3681,8 @@ class UnifiedAgentRunner:
             if has_effort and agy_effort:
                 cmd.extend(["--effort", agy_effort])
 
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-                env=env,
-                limit=4 * 1024 * 1024,
-                start_new_session=True,
-            )
+            sup_handle, call_tmp_dir = await spawn_call(cmd, asyncio.subprocess.DEVNULL)
+            proc = sup_handle.proc
             self._register_raw_proc(seat_key, proc)
             try:
                 assert proc.stdout is not None
@@ -3590,7 +3749,7 @@ class UnifiedAgentRunner:
                         yield {"type": "delta", "text": chunk.decode("utf-8", errors="replace")}
 
                 rc = await proc.wait()
-                if not emitted:
+                if rc != 0 or stream_err or not emitted:
                     err_txt = (await proc.stderr.read()).decode("utf-8", errors="replace").strip() if proc.stderr else ""
                     raise classify_cli_error(
                         "agy",
@@ -3600,10 +3759,12 @@ class UnifiedAgentRunner:
                         model=model,
                         effort=agy_effort,
                     )
+                yield {"type": "terminal", "ok": True}
                 return
             finally:
                 self._unregister_raw_proc(seat_key, proc)
-                _safe_terminate_proc(proc)
+                await terminate_and_reap_process_group(sup_handle, proc)
+                self._cleanup_isolated_call_tmp(call_tmp_dir)
 
         if driver_key == "grok":
             grok_eff = normalize_model_effort("grok", model=model, effort=effort, help_text=help_text)
@@ -3627,16 +3788,8 @@ class UnifiedAgentRunner:
             if "--permission-mode" in help_text:
                 cmd.extend(["--permission-mode", "dontAsk"])
 
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-                env=env,
-                limit=4 * 1024 * 1024,
-                start_new_session=True,
-            )
+            sup_handle, call_tmp_dir = await spawn_call(cmd, asyncio.subprocess.DEVNULL)
+            proc = sup_handle.proc
             self._register_raw_proc(seat_key, proc)
             try:
                 assert proc.stdout is not None
@@ -3727,8 +3880,7 @@ class UnifiedAgentRunner:
                         yield {"type": "delta", "text": chunk.decode("utf-8", errors="replace")}
 
                 rc = await proc.wait()
-                # 只要本回合已生成有效分析正文（即便后续工具被权限拦截提前结束），一律完整保留已输出正文
-                if not emitted:
+                if rc != 0 or stream_err or not emitted:
                     err_txt = (await proc.stderr.read()).decode("utf-8", errors="replace").strip() if proc.stderr else ""
                     raise classify_cli_error(
                         "grok",
@@ -3738,10 +3890,12 @@ class UnifiedAgentRunner:
                         model=model,
                         effort=grok_eff,
                     )
+                yield {"type": "terminal", "ok": True}
                 return
             finally:
                 self._unregister_raw_proc(seat_key, proc)
-                _safe_terminate_proc(proc)
+                await terminate_and_reap_process_group(sup_handle, proc)
+                self._cleanup_isolated_call_tmp(call_tmp_dir)
 
         existing_tid = self._codex_threads.get(seat_key) if use_warm else None
         codex_eff = normalize_model_effort("codex", model=model, effort=effort, help_text=help_text)
@@ -3755,16 +3909,14 @@ class UnifiedAgentRunner:
         else:
             cmd.append("-")
 
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
-            env=env,
-            limit=4 * 1024 * 1024,
-            start_new_session=True,
-        )
+        if driver_key != "codex" and DRIVER_SPECS.get(driver_key, {}).get("cmd_template"):
+            tpl = DRIVER_SPECS[driver_key]["cmd_template"]
+            cmd = [
+                str(tok).format(binary=binary_path, model=model, effort=effort, prompt=prompt, cwd=cwd)
+                for tok in tpl
+            ]
+        sup_handle, call_tmp_dir = await spawn_call(cmd, asyncio.subprocess.PIPE)
+        proc = sup_handle.proc
         self._register_raw_proc(seat_key, proc)
         try:
             assert proc.stdin is not None and proc.stdout is not None
@@ -3777,6 +3929,7 @@ class UnifiedAgentRunner:
             emitted = False
             last_activity = ""
             stream_err = ""
+            turn_completed = turn_failed = False
             while True:
                 line_b = await proc.stdout.readline()
                 if not line_b:
@@ -3797,6 +3950,8 @@ class UnifiedAgentRunner:
                         self._codex_threads[seat_key] = evt["thread_id"]
                     if not emitted:
                         yield {"type": "status", "detail": "已连接推理线程，正在分析上下文…"}
+                elif etype == "turn.completed":
+                    turn_completed = True
                 elif etype == "turn.started":
                     if not emitted:
                         yield {"type": "status", "detail": "已进入高阶推理回合，正在深度思考…"}
@@ -3834,6 +3989,7 @@ class UnifiedAgentRunner:
                     elif itype == "error":
                         stream_err = item.get("message") or stream_err
                 elif etype in ("error", "turn.failed"):
+                    turn_failed = turn_failed or etype == "turn.failed"
                     err_obj = evt.get("error")
                     if isinstance(err_obj, dict):
                         stream_err = err_obj.get("message") or str(err_obj)
@@ -3841,19 +3997,23 @@ class UnifiedAgentRunner:
                         stream_err = evt.get("message") or str(err_obj or "")
 
             rc = await proc.wait()
-            if not emitted:
+            # A startup warning is also emitted as an item of type "error". A
+            # completed turn with a real assistant message confirms recovery.
+            if rc != 0 or turn_failed or not emitted or (stream_err and not (turn_completed and completed_item_count)):
                 stderr_txt = (await proc.stderr.read()).decode("utf-8", errors="replace").strip() if proc.stderr else ""
                 raise classify_cli_error(
-                    "codex",
+                    driver_key,
                     raw_err=stream_err,
                     stderr=stderr_txt,
                     exit_code=rc,
                     model=model,
                     effort=codex_eff,
                 )
+            yield {"type": "terminal", "ok": True}
         finally:
             self._unregister_raw_proc(seat_key, proc)
-            _safe_terminate_proc(proc)
+            await terminate_and_reap_process_group(sup_handle, proc)
+            self._cleanup_isolated_call_tmp(call_tmp_dir)
 
     @staticmethod
     async def _collect_git_diff_async(cwd: str) -> str:
@@ -3893,6 +4053,8 @@ class UnifiedAgentRunner:
         session_workspace: str = "",
         agent_id: str = "astra",
         persona_key: str = "",
+        session_id: str = "",
+        on_pgid_spawned=None,
     ) -> AsyncGenerator[dict, None]:
         """
         多席位动态主刀实时流式执行引擎：
@@ -3962,7 +4124,7 @@ class UnifiedAgentRunner:
 
         ref_budget = max(10000, int(getattr(self.settings, "max_ref_chars", MAX_ROUND_SOURCE_CHARS) or MAX_ROUND_SOURCE_CHARS))
         ref_corpus = "\n".join([topic] + decision_pts + checked_action_pts + risk_pts)
-        ws_snapshot = build_workspace_context_snapshot(cwd, reference_texts=ref_corpus, max_ref_chars=ref_budget)
+        ws_snapshot = await run_index_in_thread(build_workspace_context_snapshot, cwd, ref_corpus, None, ref_budget, False)
         has_real_project = bool(ws_snapshot)
 
         decisions_block = "\n".join(decision_pts) if decision_pts else "- 按议题目标与工程最佳实践推进"
@@ -4061,23 +4223,39 @@ class UnifiedAgentRunner:
                         if "--permission-mode" in help_text:
                             cmd.extend(["--permission-mode", "dontAsk"])
 
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd,
+                exec_env, exec_tmp = self._prepare_isolated_call_env(session_id or "exec", target_aid)
+                sup_handle = await spawn_supervised_cli(
+                    cmd,
+                    cwd=cwd,
+                    env=exec_env,
                     stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
-                    cwd=cwd,
-                    env=build_host_env(),
                     limit=4 * 1024 * 1024,
-                    start_new_session=True,
+                    wait_release=bool(on_pgid_spawned is not None),
                 )
+                if on_pgid_spawned is not None:
+                    await on_pgid_spawned(sup_handle.pgid)
+                    sup_handle.release_gate()
+                proc = sup_handle.proc
+                seat_exec_key = (session_id or "exec", target_aid)
+                self._register_raw_proc(seat_exec_key, proc)
                 stderr_task = asyncio.create_task(_read_stderr_tail(proc.stderr))
+                exec_idle_sec = float(max(30, int(getattr(self.settings, "idle_timeout_sec", DEFAULT_IDLE_TIMEOUT_SEC) or DEFAULT_IDLE_TIMEOUT_SEC)))
+                exec_turn_sec = float(max(60, int(getattr(self.settings, "turn_timeout_sec", DEFAULT_TURN_TIMEOUT_SEC) or DEFAULT_TURN_TIMEOUT_SEC)))
+                exec_deadline = time.perf_counter() + exec_turn_sec
                 try:
                     assert proc.stdout is not None
                     collected: List[str] = []
                     stream_err = ""
                     while True:
-                        line_b = await proc.stdout.readline()
+                        rem_exec = exec_deadline - time.perf_counter()
+                        if rem_exec <= 0:
+                            raise classify_cli_error(eff_drv, is_timeout=True, timeout_sec=exec_turn_sec, model=cand_model, effort=cand_effort)
+                        try:
+                            line_b = await asyncio.wait_for(proc.stdout.readline(), timeout=min(exec_idle_sec, rem_exec))
+                        except asyncio.TimeoutError:
+                            raise classify_cli_error(eff_drv, is_timeout=True, timeout_sec=min(exec_idle_sec, exec_turn_sec), model=cand_model, effort=cand_effort)
                         if not line_b:
                             break
                         line_s = line_b.decode("utf-8", errors="replace").rstrip("\r\n")
@@ -4163,8 +4341,10 @@ class UnifiedAgentRunner:
                     }
                     return
                 finally:
-                    _safe_terminate_proc(proc)
+                    self._unregister_raw_proc(seat_exec_key, proc)
                     stderr_task.cancel()
+                    await terminate_and_reap_process_group(sup_handle, proc)
+                    self._cleanup_isolated_call_tmp(exec_tmp)
 
         sandbox_mode = "workspace-write" if allow_workspace_write else "read-only"
         for idx, (cand_model, cand_effort) in enumerate(attempts):
@@ -4177,17 +4357,27 @@ class UnifiedAgentRunner:
 
             yield {"type": "term_log", "line": f"$ {' '.join(cmd[:-1])} <{cfg.name}决议指令> (cwd={cwd})"}
 
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
+            exec_env, exec_tmp = self._prepare_isolated_call_env(session_id or "exec", target_aid)
+            sup_handle = await spawn_supervised_cli(
+                cmd,
+                cwd=cwd,
+                env=exec_env,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-                env=build_host_env(),
-                start_new_session=True,
                 limit=4 * 1024 * 1024,
+                wait_release=bool(on_pgid_spawned is not None),
             )
+            if on_pgid_spawned is not None:
+                await on_pgid_spawned(sup_handle.pgid)
+                sup_handle.release_gate()
+            proc = sup_handle.proc
+            seat_exec_key = (session_id or "exec", target_aid)
+            self._register_raw_proc(seat_exec_key, proc)
             stderr_task = asyncio.create_task(_read_stderr_tail(proc.stderr))
+            exec_idle_sec = float(max(30, int(getattr(self.settings, "idle_timeout_sec", DEFAULT_IDLE_TIMEOUT_SEC) or DEFAULT_IDLE_TIMEOUT_SEC)))
+            exec_turn_sec = float(max(60, int(getattr(self.settings, "turn_timeout_sec", DEFAULT_TURN_TIMEOUT_SEC) or DEFAULT_TURN_TIMEOUT_SEC)))
+            exec_deadline = time.perf_counter() + exec_turn_sec
             try:
                 assert proc.stdin is not None and proc.stdout is not None
                 proc.stdin.write(exec_prompt.encode("utf-8"))
@@ -4199,7 +4389,13 @@ class UnifiedAgentRunner:
                 stream_err = ""
                 turn_failed = False
                 while True:
-                    line_b = await proc.stdout.readline()
+                    rem_exec = exec_deadline - time.perf_counter()
+                    if rem_exec <= 0:
+                        raise classify_cli_error("codex", is_timeout=True, timeout_sec=exec_turn_sec, model=cand_model, effort=cand_effort)
+                    try:
+                        line_b = await asyncio.wait_for(proc.stdout.readline(), timeout=min(exec_idle_sec, rem_exec))
+                    except asyncio.TimeoutError:
+                        raise classify_cli_error("codex", is_timeout=True, timeout_sec=min(exec_idle_sec, exec_turn_sec), model=cand_model, effort=cand_effort)
                     if not line_b:
                         break
                     line_s = line_b.decode("utf-8", errors="replace").strip()
@@ -4291,8 +4487,10 @@ class UnifiedAgentRunner:
                 }
                 return
             finally:
-                _safe_terminate_proc(proc)
+                self._unregister_raw_proc(seat_exec_key, proc)
                 stderr_task.cancel()
+                await terminate_and_reap_process_group(sup_handle, proc)
+                self._cleanup_isolated_call_tmp(exec_tmp)
 
     async def stream_astra_execution(
         self,

@@ -1,16 +1,37 @@
-// AI圆桌.app — 原生 macOS (Cocoa + WKWebView) 桌面端入口
-// 支持：原生 NSOpenPanel 目录选择 Sheet、窗口关闭保留后台任务、Dock 图标唤醒、退出忙态确认与启动故障自愈重试
+// AI圆桌.app — 原生 macOS (Cocoa + WKWebView) 桌面端入口（v3 安全凭据闭环 + 三态忙闲探针 + 星轨启动动效）
 #import <Cocoa/Cocoa.h>
+#import <Security/Security.h>
 #import <WebKit/WebKit.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <spawn.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 extern char **environ;
+
+typedef NS_ENUM(NSInteger, BackendBusyState) {
+    BackendBusyStateIdle = 0,
+    BackendBusyStateBusy = 1,
+    BackendBusyStateUnknown = 2,
+};
+
+static NSString *generateSecureHex(size_t byteCount) {
+    NSMutableData *buf = [NSMutableData dataWithLength:byteCount];
+    if (SecRandomCopyBytes(kSecRandomDefault, byteCount, buf.mutableBytes) != errSecSuccess) {
+        arc4random_buf(buf.mutableBytes, byteCount);
+    }
+    const unsigned char *bytes = (const unsigned char *)buf.bytes;
+    NSMutableString *hex = [NSMutableString stringWithCapacity:byteCount * 2];
+    for (size_t i = 0; i < byteCount; i++) {
+        [hex appendFormat:@"%02x", bytes[i]];
+    }
+    return [hex copy];
+}
 
 static int findAvailablePort(int startPort, int maxPort) {
     for (int port = startPort; port <= maxPort; port++) {
@@ -54,6 +75,8 @@ static NSString *escapeHtmlString(NSString *raw) {
 @property (nonatomic, strong) WKWebView *webView;
 @property (nonatomic, assign) pid_t serverPid;
 @property (nonatomic, assign) int serverPort;
+@property (nonatomic, copy) NSString *bootToken;
+@property (nonatomic, copy) NSString *bootId;
 @property (nonatomic, copy) NSString *bootLogPath;
 @end
 
@@ -163,6 +186,18 @@ static NSString *escapeHtmlString(NSString *raw) {
     }];
 }
 
+- (BOOL)isTrustedMainFrameOrigin:(WKFrameInfo *)frameInfo {
+    if (!frameInfo || !frameInfo.isMainFrame) {
+        return NO;
+    }
+    WKSecurityOrigin *origin = frameInfo.securityOrigin;
+    if (!origin) return NO;
+    BOOL protoOk = [origin.protocol.lowercaseString isEqualToString:@"http"];
+    BOOL hostOk = [origin.host isEqualToString:@"127.0.0.1"];
+    BOOL portOk = ((int)origin.port == self.serverPort);
+    return protoOk && hostOk && portOk;
+}
+
 - (void)userContentController:(WKUserContentController *)userContentController
       didReceiveScriptMessage:(WKScriptMessage *)message
                  replyHandler:(void (^)(id, NSString *))replyHandler {
@@ -172,14 +207,33 @@ static NSString *escapeHtmlString(NSString *raw) {
     }
     NSDictionary *dict = (NSDictionary *)message.body;
     NSString *action = dict[@"action"];
-    if ([action isEqualToString:@"pickFolder"]) {
-        [self chooseFolderWithCompletion:^(NSString *chosen) { replyHandler(chosen, nil); }];
-    } else if ([action isEqualToString:@"retryBoot"]) {
-        replyHandler(nil, nil);
+
+    if ([action isEqualToString:@"retryBoot"]) {
+        if (!message.frameInfo || !message.frameInfo.isMainFrame) {
+            replyHandler(nil, @"拒绝非主框架启动调用");
+            return;
+        }
+        replyHandler(@{@"ok": @YES}, nil);
         [self stopBackendProcess];
         [self showBootingScreen];
         [self startEmbeddedBackend];
         [self pollAndLoadFrontend];
+        return;
+    }
+
+    if (![self isTrustedMainFrameOrigin:message.frameInfo]) {
+        replyHandler(nil, @"拒绝非受信任源访问原生凭据桥");
+        return;
+    }
+
+    if ([action isEqualToString:@"getBootAuth"]) {
+        replyHandler(@{
+            @"token": self.bootToken ?: @"",
+            @"bootId": self.bootId ?: @"",
+            @"port": @(self.serverPort),
+        }, nil);
+    } else if ([action isEqualToString:@"pickFolder"]) {
+        [self chooseFolderWithCompletion:^(NSString *chosen) { replyHandler(chosen, nil); }];
     } else {
         replyHandler(nil, @"未知的桌面操作");
     }
@@ -189,12 +243,19 @@ static NSString *escapeHtmlString(NSString *raw) {
     if (self.serverPid > 0) {
         kill(-self.serverPid, SIGTERM);
         kill(self.serverPid, SIGTERM);
+        usleep(120000);
+        kill(-self.serverPid, SIGKILL);
+        int st = 0;
+        waitpid(self.serverPid, &st, WNOHANG);
         self.serverPid = 0;
     }
 }
 
 - (void)startEmbeddedBackend {
     self.serverPort = findAvailablePort(8765, 8799);
+    self.bootToken = generateSecureHex(32);
+    self.bootId = generateSecureHex(16);
+
     NSString *resPath = [[NSBundle mainBundle] resourcePath];
     NSString *serverPy = [resPath stringByAppendingPathComponent:@"app/backend/server.py"];
     NSString *dataDir = [NSHomeDirectory() stringByAppendingPathComponent:@".ai-roundtable"];
@@ -206,10 +267,35 @@ static NSString *escapeHtmlString(NSString *raw) {
                                                attributes:nil
                                                     error:nil];
 
+    NSMutableDictionary<NSString *, NSString *> *envMap = [NSMutableDictionary dictionary];
+    for (char **ep = environ; ep && *ep; ep++) {
+        NSString *entry = [NSString stringWithUTF8String:*ep];
+        if (!entry) continue;
+        NSRange eq = [entry rangeOfString:@"="];
+        if (eq.location != NSNotFound) {
+            NSString *k = [entry substringToIndex:eq.location];
+            NSString *v = [entry substringFromIndex:(eq.location + 1)];
+            envMap[k] = v;
+        }
+    }
+    envMap[@"AI_ROUNDTABLE_LOGIN_SHELL"] = @"1";
+    envMap[@"AI_ROUNDTABLE_BOOT_TOKEN"] = self.bootToken;
+    envMap[@"AI_ROUNDTABLE_BOOT_ID"] = self.bootId;
+    [envMap removeObjectForKey:@"AI_ROUNDTABLE_BOOTSTRAP_CODE"];
+
+    NSUInteger envCount = envMap.count;
+    char **childEnv = (char **)calloc(envCount + 1, sizeof(char *));
+    NSUInteger idx = 0;
+    for (NSString *k in envMap) {
+        NSString *kv = [NSString stringWithFormat:@"%@=%@", k, envMap[k]];
+        childEnv[idx++] = strdup([kv UTF8String]);
+    }
+    childEnv[idx] = NULL;
+
     NSString *escapedPy = [serverPy stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
     NSString *escapedWs = [defaultWs stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
     NSString *escapedLog = [self.bootLogPath stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
-    NSString *cmd = [NSString stringWithFormat:@"AI_ROUNDTABLE_LOGIN_SHELL=1 exec python3 '%@' --host 127.0.0.1 --port %d --workspace '%@' > '%@' 2>&1",
+    NSString *cmd = [NSString stringWithFormat:@"exec python3 '%@' --host 127.0.0.1 --port %d --workspace '%@' > '%@' 2>&1",
                      escapedPy, self.serverPort, escapedWs, escapedLog];
 
     char *argv[] = { "zsh", "-lic", (char *)[cmd UTF8String], NULL };
@@ -219,21 +305,35 @@ static NSString *escapeHtmlString(NSString *raw) {
     posix_spawnattr_setpgroup(&attr, 0);
 
     pid_t pid = 0;
-    if (posix_spawnp(&pid, "zsh", NULL, &attr, argv, environ) == 0 && pid > 0) {
+    if (posix_spawnp(&pid, "zsh", NULL, &attr, argv, childEnv) == 0 && pid > 0) {
         self.serverPid = pid;
     }
     posix_spawnattr_destroy(&attr);
+
+    for (NSUInteger i = 0; i < idx; i++) {
+        free(childEnv[i]);
+    }
+    free(childEnv);
 }
 
 - (void)showBootingScreen {
     NSString *bootHtml = @"<!DOCTYPE html><html><head><meta charset='utf-8'>"
-                         @"<style>"
-                         @"html,body{margin:0;height:100vh;display:flex;flex-direction:column;gap:14px;align-items:center;justify-content:center;"
-                         @"background:#f5f4fb;color:#4b5563;font-family:-apple-system,BlinkMacSystemFont,sans-serif;font-size:13.5px;font-weight:500;}"
-                         @".ring{width:34px;height:34px;border-radius:11px;background:linear-gradient(135deg,#5b5bd6,#3b63f6 55%,#0d9470);"
-                         @"box-shadow:0 8px 24px rgba(91,91,214,0.22);animation:pulse 1.4s infinite ease-in-out;}"
-                         @"@keyframes pulse{0%,100%{transform:scale(0.95);opacity:0.86}50%{transform:scale(1.06);opacity:1}}"
-                         @"</style></head><body><div class='ring'></div><div>正在启动 AI圆桌 本地服务并探测 CLI 环境…</div></body></html>";
+        @"<style>"
+        @"html,body{margin:0;height:100vh;display:flex;flex-direction:column;gap:16px;align-items:center;justify-content:center;"
+        @"background:#f5f4fb;color:#475569;font-family:-apple-system,BlinkMacSystemFont,sans-serif;font-size:13.5px;font-weight:500;}"
+        @".orbit-stage{position:relative;width:54px;height:54px;display:flex;align-items:center;justify-content:center;}"
+        @".node{position:absolute;width:11px;height:11px;border-radius:999px;will-change:transform,opacity;}"
+        @".n1{background:#3b63f6;animation:orb1 1.7s infinite cubic-bezier(0.34,1.45,0.64,1);}"
+        @".n2{background:#d97706;animation:orb2 1.7s infinite cubic-bezier(0.34,1.45,0.64,1);}"
+        @".n3{background:#0d9470;animation:orb3 1.7s infinite cubic-bezier(0.34,1.45,0.64,1);}"
+        @".core{width:18px;height:18px;border-radius:7px;background:linear-gradient(135deg,#4f46e5,#0d9470);opacity:0.18;animation:coreBreathe 1.7s infinite ease-in-out;}"
+        @"@keyframes orb1{0%,100%{transform:translate(0,-16px) scale(1)}33%{transform:translate(15px,10px) scale(0.86)}66%{transform:translate(-15px,10px) scale(0.92)}}"
+        @"@keyframes orb2{0%,100%{transform:translate(15px,10px) scale(0.92)}33%{transform:translate(-15px,10px) scale(1)}66%{transform:translate(0,-16px) scale(0.86)}}"
+        @"@keyframes orb3{0%,100%{transform:translate(-15px,10px) scale(0.86)}33%{transform:translate(0,-16px) scale(0.92)}66%{transform:translate(15px,10px) scale(1)}}"
+        @"@keyframes coreBreathe{0%,100%{transform:scale(0.9);opacity:0.14}50%{transform:scale(1.22);opacity:0.32}}"
+        @"</style></head><body>"
+        @"<div class='orbit-stage'><div class='core'></div><div class='node n1'></div><div class='node n2'></div><div class='node n3'></div></div>"
+        @"<div>正在启动 AI圆桌 安全控制面并探测 CLI 引擎…</div></body></html>";
     [self.webView loadHTMLString:bootHtml baseURL:nil];
 }
 
@@ -249,8 +349,8 @@ static NSString *escapeHtmlString(NSString *raw) {
         @"pre{margin:0 0 16px;padding:10px 12px;background:#f1f5f9;border-radius:10px;font-size:11.5px;max-height:180px;overflow:auto;white-space:pre-wrap;word-break:break-all;color:#334155;}"
         @"button{background:linear-gradient(135deg,#5b5bd6,#3b63f6);color:#fff;border:none;border-radius:999px;padding:8px 18px;font-size:13px;font-weight:600;cursor:pointer;}"
         @"</style></head><body><div class='card'>"
-        @"<h3>本地服务启动超时或异常退出</h3>"
-        @"<p>内置 Python 服务未能在预期时间内就绪，请检查终端环境配置（如 ~/.zshrc 中是否有阻塞交互命令）后点击下方重试：</p>"
+        @"<h3>本地服务启动超时或身份校验失败</h3>"
+        @"<p>内置 Python 服务未能在预期时间内完成鉴权握手，请检查终端环境配置后点击下方重试：</p>"
         @"<pre>%@</pre>"
         @"<button onclick=\"window.webkit.messageHandlers.roundtableNative.postMessage({action:'retryBoot'})\">重新启动本地服务</button>"
         @"</div></body></html>",
@@ -262,6 +362,8 @@ static NSString *escapeHtmlString(NSString *raw) {
     NSURL *statusUrl = buildLocalURL(self.serverPort, @"/api/status");
     NSURL *appUrl = buildLocalURL(self.serverPort, @"/");
     pid_t launchedPid = self.serverPid;
+    NSString *expectedToken = [self.bootToken copy];
+    NSString *expectedBootId = [self.bootId copy];
     NSString *logPath = [self.bootLogPath copy];
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
@@ -274,22 +376,29 @@ static NSString *escapeHtmlString(NSString *raw) {
                 }
             }
 
-            NSURLRequest *req = [NSURLRequest requestWithURL:statusUrl
-                                                 cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
-                                             timeoutInterval:0.25];
+            NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:statusUrl
+                                                               cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                           timeoutInterval:0.28];
+            [req setValue:(expectedToken ?: @"") forHTTPHeaderField:@"X-Roundtable-Token"];
             dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-            __block BOOL ok = NO;
+            __block BOOL verified = NO;
             [[[NSURLSession sharedSession] dataTaskWithRequest:req
                                              completionHandler:^(NSData *data, NSURLResponse *resp, NSError *error) {
                 NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)resp;
-                if (!error && httpResp.statusCode == 200) {
-                    ok = YES;
+                if (!error && httpResp.statusCode == 200 && data) {
+                    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                    if ([json isKindOfClass:[NSDictionary class]]) {
+                        NSString *remoteBootId = json[@"boot_id"];
+                        if ([remoteBootId isKindOfClass:[NSString class]] && [remoteBootId isEqualToString:expectedBootId]) {
+                            verified = YES;
+                        }
+                    }
                 }
                 dispatch_semaphore_signal(sem);
             }] resume];
-            dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)));
+            dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.32 * NSEC_PER_SEC)));
 
-            if (ok) {
+            if (verified) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     NSURLRequest *mainReq = [NSURLRequest requestWithURL:appUrl];
                     [self.webView loadRequest:mainReq];
@@ -309,41 +418,56 @@ static NSString *escapeHtmlString(NSString *raw) {
     });
 }
 
-- (BOOL)hasBusyBackendSession {
-    if (self.serverPid <= 0 || self.serverPort <= 0) return NO;
+- (BackendBusyState)queryBackendBusyState {
+    if (self.serverPid <= 0 || self.serverPort <= 0) return BackendBusyStateIdle;
+    int wstatus = 0;
+    if (waitpid(self.serverPid, &wstatus, WNOHANG) == self.serverPid) {
+        self.serverPid = 0;
+        return BackendBusyStateIdle;
+    }
+
     NSURL *statusUrl = buildLocalURL(self.serverPort, @"/api/status");
-    NSURLRequest *req = [NSURLRequest requestWithURL:statusUrl
-                                         cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
-                                     timeoutInterval:0.25];
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:statusUrl
+                                                       cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                   timeoutInterval:0.35];
+    [req setValue:(self.bootToken ?: @"") forHTTPHeaderField:@"X-Roundtable-Token"];
+    NSString *expectedBootId = [self.bootId copy];
+
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-    __block BOOL busy = NO;
+    __block BackendBusyState state = BackendBusyStateUnknown;
     [[[NSURLSession sharedSession] dataTaskWithRequest:req
                                      completionHandler:^(NSData *data, NSURLResponse *resp, NSError *error) {
-        if (!error && data) {
+        NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)resp;
+        if (!error && httpResp.statusCode == 200 && data) {
             NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            NSDictionary *sys = [json isKindOfClass:[NSDictionary class]] ? json[@"system"] : nil;
-            if ([sys isKindOfClass:[NSDictionary class]] && [sys[@"has_busy_session"] boolValue]) {
-                busy = YES;
+            if ([json isKindOfClass:[NSDictionary class]]) {
+                NSString *remoteBootId = json[@"boot_id"];
+                NSDictionary *sys = json[@"system"];
+                if ([remoteBootId isKindOfClass:[NSString class]]
+                    && [remoteBootId isEqualToString:expectedBootId]
+                    && [sys isKindOfClass:[NSDictionary class]]) {
+                    state = [sys[@"has_busy_session"] boolValue] ? BackendBusyStateBusy : BackendBusyStateIdle;
+                }
             }
         }
         dispatch_semaphore_signal(sem);
     }] resume];
-    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.28 * NSEC_PER_SEC)));
-    return busy;
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.42 * NSEC_PER_SEC)));
+    return state;
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     [self setupMainMenu];
     [self startEmbeddedBackend];
 
-    NSRect frame = NSMakeRect(0, 0, 1440, 880);
+    NSRect frame = NSMakeRect(0, 0, 1460, 900);
     NSUInteger style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                        NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable;
     self.window = [[NSWindow alloc] initWithContentRect:frame
                                               styleMask:style
                                                 backing:NSBackingStoreBuffered
                                                   defer:NO];
-    [self.window setTitle:@"AI圆桌 — 多 CLI 协作工作台"];
+    [self.window setTitle:@"AI圆桌 — 多引擎协同研讨与工程交付工作台"];
     [self.window setMinSize:NSMakeSize(980, 620)];
     [self.window setBackgroundColor:[NSColor colorWithSRGBRed:0.961 green:0.957 blue:0.984 alpha:1.0]];
     [self.window setReleasedWhenClosed:NO];
@@ -396,7 +520,6 @@ completionHandler:(void (^)(BOOL result))completionHandler {
     }];
 }
 
-// 关闭窗口仅隐藏主窗口，不中断后台讨论与 Astra 执行；点击 Dock 图标即可立即恢复
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {
     return NO;
 }
@@ -409,11 +532,17 @@ completionHandler:(void (^)(BOOL result))completionHandler {
 }
 
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
-    if ([self hasBusyBackendSession]) {
+    BackendBusyState busyState = [self queryBackendBusyState];
+    if (busyState != BackendBusyStateIdle) {
         NSAlert *alert = [[NSAlert alloc] init];
         alert.alertStyle = NSAlertStyleWarning;
-        alert.messageText = @"当前有正在进行的圆桌讨论或执行任务";
-        alert.informativeText = @"现在退出 AI圆桌 将立即终止后台正在运行的 CLI 进程。确定要退出吗？";
+        if (busyState == BackendBusyStateBusy) {
+            alert.messageText = @"当前有正在进行的圆桌讨论或代码执行任务";
+            alert.informativeText = @"现在退出 AI圆桌 将立即终止后台正在运行的 CLI 进程组，并在下次启动时进入恢复确认流程。确定要退出吗？";
+        } else {
+            alert.messageText = @"无法立即确认后台任务空闲状态（Unknown）";
+            alert.informativeText = @"本地后端可能正在执行高负载快照扫描或响应繁忙。强制退出将立即终止所有子进程组，确定要退出吗？";
+        }
         [alert addButtonWithTitle:@"中止并退出"];
         [alert addButtonWithTitle:@"取消"];
         NSModalResponse resp = [alert runModal];

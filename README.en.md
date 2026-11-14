@@ -10,7 +10,7 @@ A Mac workbench for reviewing a question with an architect, a risk reviewer and 
 
 1. On an Apple silicon Mac, check that `python3 --version` reports Python 3.9 or later. Install and sign in to at least one supported AI CLI such as Codex (`codex`), Antigravity (`agy`) or Grok (`grok`).
 2. Unzip the release, drag `AI圆桌.app` into Applications and open it. The release uses an ad-hoc signature and has no Apple notarization. If macOS prompts you about the download, follow [Apple’s instructions](https://support.apple.com/en-us/102445).
-3. Open settings with **⌘,**. Choose a CLI and a model available to your account, run **实测模型连通** (test connection), and save. **应用单引擎多角色配置** lets one CLI play all three roles.
+3. Open settings with **⌘,**. Select one to six seats under **阵容与称呼**, choose each seat’s CLI, model and reasoning effort under **席位与模型**, then select **保存配置** to save. **并发实测连通** sends a real connection test. Several seats can share one CLI.
 4. Choose **快速合议** (quick consensus) and ask *“Two fruits tie for first place in a vote. How should we pick a winner? One sentence per seat.”* Click **开始研讨** to start, **形成决议** for the resolution, and **导出 .md** on the whiteboard to export the minutes. The current application interface is in Chinese.
 
 In the recorded meeting above, the architect suggested one runoff. The reviewer wanted the tie-breaker published before voting. The engineer pointed out that retrying the same draw must return the original winner. All three seats used the same Codex CLI. The final resolution combined those constraints into a single rule.
@@ -20,7 +20,7 @@ In the recorded meeting above, the architect suggested one runoff. The reviewer 
 - Choose from five discussion formats, including adversarial review, divergent thinking and code review. Use one seat for a focused conversation or give each seat its own driver and role.
 - Bind a project folder and type `@` to select a file. A reference such as `@backend/server.py:31-62` supplies the specified lines to the discussion.
 - During the meeting you can interrupt, question a particular seat, promote a risk to a decision, or uncheck tasks. Export includes the discussion record, decisions, risks and task list.
-- The execution tab starts in read-only preview mode. Select **写入工作区** to allow changes to the bound workspace. For Git projects, the app snapshots the worktree and index for the run. Rollback checks for later edits to the same paths. Its snapshot lasts for the current app session.
+- The execution tab starts in read-only preview mode. Select **写入工作区** to allow changes to the bound workspace. The app snapshots files in both Git projects and ordinary directories, including ignored files. Rollback checks for later edits and preserves conflicting files. After an interrupted run, the app can reopen the saved recovery plan.
 
 The UI, HTTP service and meeting history run locally. Configured CLIs may send prompts and project context to their model providers using your existing account. Provider access and usage charges apply.
 

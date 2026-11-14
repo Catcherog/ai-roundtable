@@ -1,0 +1,161 @@
+{
+  "schema_version": 1,
+  "canonical_efforts": ["low", "medium", "high", "xhigh", "max"],
+  "exclusive_default_models": {
+    "gemini-4-carbon": "agy",
+    "gemini-4-argon": "agy",
+    "gemini-4-hydrogen": "agy",
+    "grok-4.7": "grok",
+    "gpt-6-astra": "codex",
+    "gpt-6.1-sol": "codex"
+  },
+  "drivers": {
+    "agy": {
+      "cli_name": "Antigravity CLI",
+      "short_label": "AGY",
+      "binary_candidates": ["agy", "antigravity"],
+      "default_model": "gemini-4-carbon",
+      "default_discuss_effort": "high",
+      "default_exec_effort": "high",
+      "macos_fallback_paths": [
+        "/Applications/Antigravity.app/Contents/Resources/app/bin/agy",
+        "/Applications/Antigravity.app/Contents/Resources/app/bin/antigravity",
+        "~/Applications/Antigravity.app/Contents/Resources/app/bin/agy"
+      ],
+      "models": {
+        "gemini-4-carbon": {
+          "supports_effort": true,
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "max": "high"
+        },
+        "gemini-4-argon": {
+          "supports_effort": true,
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "max": "high"
+        },
+        "gemini-4-hydrogen": {
+          "supports_effort": true,
+          "allowed": ["low", "medium", "high", "xhigh"],
+          "default": "xhigh",
+          "max": "xhigh"
+        },
+        "gemini-4-hydrogen*": {
+          "supports_effort": true,
+          "allowed": ["low", "medium", "high", "xhigh"],
+          "default": "xhigh",
+          "max": "xhigh"
+        },
+        "orchestrator (carbon)": {
+          "supports_effort": false,
+          "allowed": [],
+          "default": "",
+          "max": ""
+        },
+        "orchestrator (argon)": {
+          "supports_effort": false,
+          "allowed": [],
+          "default": "",
+          "max": ""
+        },
+        "gemini-pro-orchestrator": {
+          "supports_effort": false,
+          "allowed": [],
+          "default": "",
+          "max": ""
+        },
+        "gemini-pro-orchestrator-argon": {
+          "supports_effort": false,
+          "allowed": [],
+          "default": "",
+          "max": ""
+        },
+        "gemini-*": {
+          "supports_effort": true,
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "max": "high"
+        },
+        "claude-*": {
+          "supports_effort": true,
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "max": "high"
+        },
+        "*": {
+          "supports_effort": true,
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "max": "high"
+        }
+      }
+    },
+    "grok": {
+      "cli_name": "Grok CLI",
+      "short_label": "Grok",
+      "binary_candidates": ["grok"],
+      "default_model": "grok-4.7",
+      "default_discuss_effort": "xhigh",
+      "default_exec_effort": "xhigh",
+      "macos_fallback_paths": [],
+      "models": {
+        "grok-4.7": {
+          "supports_effort": true,
+          "allowed": ["low", "medium", "high", "xhigh"],
+          "default": "xhigh",
+          "max": "xhigh"
+        },
+        "grok-*": {
+          "supports_effort": true,
+          "allowed": ["low", "medium", "high", "xhigh"],
+          "default": "xhigh",
+          "max": "xhigh"
+        },
+        "*": {
+          "supports_effort": true,
+          "allowed": ["low", "medium", "high", "xhigh"],
+          "default": "xhigh",
+          "max": "xhigh"
+        }
+      }
+    },
+    "codex": {
+      "cli_name": "Codex CLI",
+      "short_label": "Codex",
+      "binary_candidates": ["codex"],
+      "default_model": "gpt-6-astra",
+      "default_discuss_effort": "max",
+      "default_exec_effort": "max",
+      "macos_fallback_paths": [
+        "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+        "/Applications/ChatGPT.app/Contents/Resources/codex",
+        "/Applications/Codex.app/Contents/Resources/codex",
+        "/Applications/Codex.app/Contents/MacOS/codex",
+        "~/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+        "~/Applications/Codex.app/Contents/Resources/codex",
+        "~/Applications/Codex.app/Contents/MacOS/codex"
+      ],
+      "models": {
+        "gpt-6-astra": {
+          "supports_effort": true,
+          "allowed": ["low", "medium", "high", "xhigh", "max"],
+          "default": "max",
+          "max": "max"
+        },
+        "gpt-6.1-sol": {
+          "supports_effort": true,
+          "allowed": ["low", "medium", "high", "xhigh"],
+          "default": "xhigh",
+          "max": "xhigh"
+        },
+        "*": {
+          "supports_effort": true,
+          "allowed": ["low", "medium", "high", "xhigh", "max"],
+          "default": "max",
+          "max": "max"
+        }
+      }
+    }
+  }
+}
