@@ -17,21 +17,31 @@ const STORAGE_KEYS = {
 
 const AGENT_ORDER = ["carbon", "grok", "astra"];
 
+// AI_ROUNDTABLE_V2_UPGRADE_20261114
 const AGENT_NAMES = {
-  carbon: "Carbon",
-  grok: "Grok",
-  astra: "Astra",
+  carbon: "架构师",
+  grok: "审计官",
+  astra: "工程师",
   chair: "主持人",
   system: "系统",
 };
 
 const AUTHOR_BADGE_META = {
   chair: { short: "主", name: "主持约束", cls: "badge-seat-chair" },
-  carbon: { short: "C", name: "Carbon", cls: "badge-seat-carbon" },
-  grok: { short: "G", name: "Grok", cls: "badge-seat-grok" },
-  astra: { short: "A", name: "Astra", cls: "badge-seat-astra" },
+  carbon: { short: "架", name: "架构师", cls: "badge-seat-carbon" },
+  grok: { short: "审", name: "审计官", cls: "badge-seat-grok" },
+  astra: { short: "工", name: "工程师", cls: "badge-seat-astra" },
   system: { short: "系", name: "决议归档", cls: "badge-seat-system" },
 };
+
+const ROSTER_NAME_PRESETS = {
+  role_experts: { label: "专业职能称呼", names: { carbon: "架构师", grok: "审计官", astra: "工程师" } },
+  council_alpha: { label: "中立席位代号", names: { carbon: "Alpha", grok: "Beta", astra: "Gamma" } },
+  product_studio: { label: "产品研发委员会", names: { carbon: "产品总监", grok: "红队审计", astra: "研发主程" } },
+  auto_driver: { label: "跟随底层引擎", names: {} },
+  classic: { label: "经典默认代号", names: { carbon: "Carbon", grok: "Grok", astra: "Astra" } },
+};
+const DEFAULT_ROSTER_PRESETS = ROSTER_NAME_PRESETS;
 
 const DRIVER_LABELS = {
   agy: "Antigravity CLI",
@@ -264,9 +274,11 @@ const state = {
   seatEfforts: {},
   executorAgent: "astra",
   sessionWorkspaceDir: "",
+  workspaceBound: null,
   workspaceIsGit: false,
   seatStates: {},
   messages: new Map(),
+  sendingSessions: new Set(),
   whiteboard: null,
   wbKnownItemIds: new Set(),
   lastWbTotalCount: 0,
@@ -279,6 +291,8 @@ const state = {
   expandedCliCard: null,
   personaPopoverSeat: null,
   execStartTs: 0,
+  rosterPreset: "role_experts",
+  singleCliConcurrency: 3,
   pacingMode: "unrestricted",
   idleTimeoutSec: 900,
   turnTimeoutSec: 0,
@@ -379,6 +393,7 @@ function normalizeCollabModeAndAutoExec(rawMode, rawAutoExec) {
 }
 
 function effectiveWorkspacePath() {
+  if ((state.workspaceBound ?? state.system?.workspace_bound) === false) return "";
   return (state.sessionWorkspaceDir || state.system?.workspace_dir || "").trim();
 }
 
@@ -532,8 +547,96 @@ function detectActiveScenarioKey() {
   return "";
 }
 
+function escapeRegExp(str) {
+  return String(str || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function computeAvatarShortChar(nameStr, fallbackAid = "carbon") {
+  const clean = String(nameStr || "").trim();
+  if (!clean) return fallbackAid[0].toUpperCase();
+  const ch = Array.from(clean)[0];
+  return /[a-z]/i.test(ch) ? ch.toUpperCase() : ch;
+}
+
+function syncDynamicRosterNames() {
+  const sysAgents = state.system?.agents || {};
+  if (state.system?.roster_preset) {
+    state.rosterPreset = state.system.roster_preset;
+  }
+  if (typeof state.system?.single_cli_concurrency === "number") {
+    state.singleCliConcurrency = state.system.single_cli_concurrency;
+  }
+  const serverRosterPresets = state.system?.roster_presets;
+  const presetObj =
+    serverRosterPresets?.[state.rosterPreset] ||
+    ROSTER_NAME_PRESETS[state.rosterPreset] ||
+    ROSTER_NAME_PRESETS.role_experts;
+
+  for (const aid of AGENT_ORDER) {
+    const stName = state.seatStates?.[aid]?.name;
+    const sysName = sysAgents?.[aid]?.name;
+    const resolved = String(sysName || stName || presetObj.names?.[aid] || AGENT_NAMES[aid] || aid).trim();
+    AGENT_NAMES[aid] = resolved;
+    AUTHOR_BADGE_META[aid].name = resolved;
+    AUTHOR_BADGE_META[aid].short = computeAvatarShortChar(resolved, aid);
+
+    const seatCard = el(`seat-${aid}`);
+    if (seatCard) {
+      const nameSpan = seatCard.querySelector(".seat-name");
+      if (nameSpan) nameSpan.textContent = resolved;
+      const av = seatCard.querySelector(".seat-avatar");
+      if (av) av.textContent = AUTHOR_BADGE_META[aid].short;
+      seatCard.title = `点击胶囊点名 @${resolved}；点击职责标签配置角色、名称与推理档位`;
+      const roleBtn = el(`seat-role-${aid}`);
+      if (roleBtn) roleBtn.title = `配置 ${resolved} 角色职责、显示名称、推理档位与参会状态`;
+    }
+
+    const execSegBtn = document.querySelector(`#executorSegmented [data-exec-agent="${aid}"]`);
+    if (execSegBtn) {
+      execSegBtn.textContent = resolved;
+      execSegBtn.title = `由 ${resolved} 承接执行交付`;
+    }
+
+    document.querySelectorAll(`.msg-card.speaker-${aid} [data-msg-act="mention"]`).forEach((btn) => {
+      btn.textContent = `@${resolved}`;
+    });
+  }
+
+  const slotLabels = { carbon: "席位一", grok: "席位二", astra: "席位三" };
+  for (const [aid, cap] of [
+    ["carbon", "Carbon"],
+    ["grok", "Grok"],
+    ["astra", "Astra"],
+  ]) {
+    const h4 = el(`cfgHead${cap}`);
+    if (h4) h4.textContent = `${AGENT_NAMES[aid]}（${slotLabels[aid]}）`;
+  }
+
+  // 动态刷新开局引导舱与侧栏的 5 大场景预设描述文案
+  const cN = AGENT_NAMES.carbon;
+  const gN = AGENT_NAMES.grok;
+  const aN = AGENT_NAMES.astra;
+  const scenarioDescMap = {
+    arch_review: `${cN} 架构规划 · ${gN} 风险审计 · ${aN} 工程实现`,
+    proposal_debate: `${aN} 立论 · ${gN} 压力审计 · ${cN} 架构裁定`,
+    product_design: `${cN} 产品交互 · ${gN} 风险审计 · ${aN} 全栈架构`,
+    code_diagnosis: `${cN} 性能与稳定性 · ${gN} 测试与验证 · ${aN} 工程实现`,
+    solo_focus: `启用单席「全栈架构」独立完成方案设计与自检交付`,
+  };
+  document.querySelectorAll("[data-scenario-preset]").forEach((node) => {
+    const pk = node.dataset.scenarioPreset;
+    if (!pk || !scenarioDescMap[pk]) return;
+    const descDiv = node.querySelector(".scenario-desc");
+    if (descDiv) descDiv.textContent = scenarioDescMap[pk];
+    if (node.classList.contains("lineup-pill")) {
+      node.title = scenarioDescMap[pk];
+    }
+  });
+}
+
 function syncScenarioPresetHighlight() {
   const activeKey = detectActiveScenarioKey();
+  document.documentElement.setAttribute("data-active-scenario", activeKey || "custom");
   document.querySelectorAll("[data-scenario-preset]").forEach((btn) => {
     btn.classList.toggle("active", Boolean(activeKey) && btn.dataset.scenarioPreset === activeKey);
   });
@@ -614,9 +717,14 @@ function getEffortSpecForModel(driverKey, modelName, seatId = "") {
     driverKey === "auto"
       ? state.system?.agents?.[seatId]?.effective_driver || "agy"
       : driverKey || "agy";
-  const catalog = state.system?.model_effort_catalog || FALLBACK_MODEL_EFFORT_CATALOG;
-  const drvMap = catalog[effDrv] || FALLBACK_MODEL_EFFORT_CATALOG[effDrv] || FALLBACK_MODEL_EFFORT_CATALOG.agy;
-  const cleanModel = String(modelName || "").trim().toLowerCase() || (DRIVER_DEFAULTS[effDrv]?.model || "").toLowerCase();
+  const rawCatalog = state.system?.model_effort_catalog;
+  const drvMap =
+    rawCatalog?.drivers?.[effDrv]?.models ||
+    rawCatalog?.[effDrv] ||
+    FALLBACK_MODEL_EFFORT_CATALOG[effDrv] ||
+    FALLBACK_MODEL_EFFORT_CATALOG.agy;
+  const cleanModel =
+    String(modelName || "").trim().toLowerCase() || (DRIVER_DEFAULTS[effDrv]?.model || "").toLowerCase();
 
   if (cleanModel && drvMap[cleanModel]) {
     return drvMap[cleanModel];
@@ -753,10 +861,13 @@ function formatInlineMarkdown(escapedLine) {
   s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
   s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   s = s.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
-  s = s.replace(
-    /@(Carbon|Grok|Astra|主持人)\b/gi,
-    '<span class="mention-tag">@$1</span>'
-  );
+  const mentionNames = Array.from(
+    new Set(["Carbon", "Grok", "Astra", "主持人", AGENT_NAMES.carbon, AGENT_NAMES.grok, AGENT_NAMES.astra].filter(Boolean))
+  ).map(escapeRegExp);
+  if (mentionNames.length) {
+    const mRe = new RegExp(`@(${mentionNames.join("|")})(?![A-Za-z0-9_])`, "gi");
+    s = s.replace(mRe, '<span class="mention-tag">@$1</span>');
+  }
   s = s.replace(
     /@([A-Za-z0-9_\u4e00-\u9fa5./-]+\.[A-Za-z0-9]{1,10}(?::[Ll]?\d+(?:-[Ll]?\d+)?)?)/g,
     '<span class="file-mention-tag">@$1</span>'
@@ -957,7 +1068,7 @@ function clearChatMessages() {
 function updateEmptyGuideVisibility() {
   const guide = el("emptyGuide");
   if (!guide) return;
-  const hasMsgs = state.messages.size > 0 || Boolean(state.topic);
+  const hasMsgs = state.messages.size > 0 || state.isBusy;
   guide.classList.toggle("hidden", hasMsgs);
 }
 
@@ -1065,9 +1176,15 @@ function createOrUpdateMessageCard(msgInput, options = {}) {
     container.appendChild(card);
   }
 
+  const staleBadges = ["思考中", "发言中", "调用中", "重试中", "排队等待发言…", "汇总决议中", "正在深度推演…"];
+  const rawBadgeStr = String(msg.badge || "").trim();
+  if (!msg.streaming && (staleBadges.includes(rawBadgeStr) || rawBadgeStr.startsWith("正在"))) {
+    msg.badge = "已中断";
+  }
+
   const speakerKey = msg.speaker || "system";
   const isResolution = msg.phase_label === "最终决议";
-  const isSkipped = Boolean(msg.skipped) || msg.badge === "已跳过本轮";
+  const isSkipped = Boolean(msg.skipped) || msg.badge === "已跳过本轮" || (!msg.streaming && msg.badge === "已中断" && !(msg.content || "").trim());
   const isError = Boolean(msg.error) && !isSkipped;
   const wasCollapsed = card.classList.contains("is-collapsed");
 
@@ -1085,15 +1202,11 @@ function createOrUpdateMessageCard(msgInput, options = {}) {
     .join(" ");
 
   const avatarChar =
-    speakerKey === "carbon"
-      ? "C"
-      : speakerKey === "grok"
-      ? "G"
-      : speakerKey === "astra"
-      ? "A"
-      : speakerKey === "chair"
+    speakerKey === "chair"
       ? "主"
-      : "系";
+      : speakerKey === "system"
+      ? "系"
+      : computeAvatarShortChar(msg.speaker_name || AGENT_NAMES[speakerKey] || speakerKey, speakerKey);
 
   const targetHtml = msg.target
     ? `<span class="msg-target-chip">→ @${escapeHtml(AGENT_NAMES[msg.target] || msg.target)}</span>`
@@ -1141,6 +1254,8 @@ function createOrUpdateMessageCard(msgInput, options = {}) {
   let bodyInnerHtml = "";
   if (isThinkingOnly) {
     bodyInnerHtml = buildThinkingPlaceholderHtml(msg);
+  } else if (!hasContent && !isError) {
+    bodyInnerHtml = renderMarkdown("*(该轮发言未生成内容或已中断)*");
   } else {
     bodyInnerHtml = renderMarkdown(msg.content || "");
   }
@@ -1735,7 +1850,7 @@ function startInlineWbItemEdit(liEl, item) {
     cancel();
   });
   input?.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
       e.preventDefault();
       commit();
     } else if (e.key === "Escape") {
@@ -1774,7 +1889,6 @@ function startInlineTopicEdit() {
       if (state.whiteboard) renderWhiteboard(state.whiteboard, true, false);
       return;
     }
-    state.topic = val;
     await postWhiteboardMutation({ topic: val }, val);
   };
   const cancel = () => {
@@ -1790,7 +1904,7 @@ function startInlineTopicEdit() {
     cancel();
   });
   inp?.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
       e.preventDefault();
       save();
     } else if (e.key === "Escape") {
@@ -1915,7 +2029,7 @@ function renderWhiteboard(rawWb, forceRender = false, isInitialSnapshot = false)
 
   const jumpBtn = el("wbToExecBtn");
   if (jumpBtn) {
-    const execName = AGENT_NAMES[state.executorAgent] || "Astra";
+    const execName = AGENT_NAMES[state.executorAgent] || "工程师";
     jumpBtn.textContent =
       actionItems.length > 0
         ? `前往执行终端由 ${execName} 交付已选任务 (${checkedActionCount}/${actionItems.length}) →`
@@ -2006,8 +2120,20 @@ async function copyTextToClipboard(text, okMsg = "已复制到剪贴板") {
   }
 }
 
-function exportMinutesMarkdownFile() {
+async function exportMinutesMarkdownFile() {
   const md = buildMinutesMarkdown();
+  if (window.webkit?.messageHandlers?.roundtableNative) {
+    try {
+      const result = await apiFetch(`/api/sessions/${state.currentSessionId}/export`, {
+        method: "POST",
+        body: JSON.stringify({ markdown: md }),
+      });
+      showToast(`会议纪要已保存到 ${result.saved_path}`, "ok", 4000);
+    } catch (err) {
+      showToast(err.message || "导出会议纪要失败", "err");
+    }
+    return;
+  }
   const safeName = (state.whiteboard?.topic_title || state.topic || "AI圆桌纪要")
     .replace(/[\\/:*?"<>|\s]+/g, "_")
     .slice(0, 36);
@@ -2019,7 +2145,7 @@ function exportMinutesMarkdownFile() {
   document.body.appendChild(a);
   a.click();
   a.remove();
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
   showToast("已导出规范四节排版的 .md 会议纪要", "ok", 2200);
 }
 
@@ -2073,7 +2199,7 @@ function renderStageAndHeader() {
   const composerBox = el("composerBox");
   const topicInp = el("topicInput");
 
-  const inMeeting = hasTopic || state.messages.size > 0;
+  const inMeeting = state.messages.size > 0 || state.isBusy;
   preBar?.classList.toggle("hidden", inMeeting);
   mentionBar?.classList.toggle("hidden", !inMeeting);
   quickBar?.classList.toggle("hidden", !inMeeting);
@@ -2207,7 +2333,19 @@ function renderSeatCard(agentId) {
   }
 }
 
+function syncMentionChipActiveStates() {
+  const val = el("topicInput")?.value || "";
+  document.querySelectorAll("#mentionChipsWrap [data-mention-seat]").forEach((btn) => {
+    const aid = btn.dataset.mentionSeat;
+    const token = `@${AGENT_NAMES[aid] || aid}`;
+    const escaped = escapeRegExp(token);
+    const tokenRe = new RegExp(`(^|\\s)${escaped}(?=\\s|$)`, "i");
+    btn.classList.toggle("is-mentioned", tokenRe.test(val));
+  });
+}
+
 function renderAllSeats() {
+  syncDynamicRosterNames();
   AGENT_ORDER.forEach((aid) => renderSeatCard(aid));
   // 同步底部 @点名胶囊可见状态
   const isSolo = state.enabledAgents.length === 1;
@@ -2230,6 +2368,7 @@ function renderAllSeats() {
       wrap.querySelectorAll("[data-mention]").forEach((btn) => {
         btn.onclick = () => insertMentionIntoComposer(btn.dataset.mention);
       });
+      syncMentionChipActiveStates();
     }
   }
 }
@@ -2249,7 +2388,7 @@ function openPersonaPopover(agentId, anchorEl) {
   const rect = anchorEl.getBoundingClientRect();
   const popWidth = 298;
   const left = Math.min(Math.max(12, rect.left - 8), window.innerWidth - popWidth - 12);
-  const top = Math.min(rect.bottom + 8, window.innerHeight - 360);
+  const top = Math.min(rect.bottom + 8, window.innerHeight - 400);
   pop.style.left = `${left}px`;
   pop.style.top = `${Math.max(12, top)}px`;
 }
@@ -2272,6 +2411,7 @@ function renderPersonaPopoverContents(agentId) {
   const effDrv = st.effective_driver || sysAgent.effective_driver || sysAgent.driver || "agy";
   const effModel = st.effective_model || sysAgent.effective_model || sysAgent.model || "";
   const curPersona = state.seatPersonas[agentId] || DEFAULT_SEAT_PERSONAS[agentId];
+  const curCustomName = sysAgent.custom_name || "";
   const personaMap = getPersonaMap();
 
   titleEl.innerHTML =
@@ -2279,6 +2419,53 @@ function renderPersonaPopoverContents(agentId) {
     `<span class="persona-pop-model">${escapeHtml(effModel || DRIVER_LABELS[effDrv] || effDrv)}</span>`;
 
   listEl.innerHTML = "";
+  const renameRow = document.createElement("div");
+  renameRow.className = "seat-pop-rename-box";
+  renameRow.innerHTML =
+    `<input type="text" class="seat-pop-rename-inp" maxlength="20" value="${escapeHtml(
+      curCustomName
+    )}" placeholder="自定义名称（当前：${escapeHtml(AGENT_NAMES[agentId])}）" />` +
+    `<button type="button" class="seat-pop-rename-btn">改名</button>`;
+  const renameInp = renameRow.querySelector(".seat-pop-rename-inp");
+  const renameBtn = renameRow.querySelector(".seat-pop-rename-btn");
+  const saveQuickSeatName = async () => {
+    const nextName = (renameInp?.value || "").trim();
+    try {
+      const cfgRes = await apiFetch("/api/config", {
+        method: "POST",
+        body: JSON.stringify({
+          active_session_id: state.currentSessionId || "",
+          agents: { [agentId]: { custom_name: nextName } },
+        }),
+      });
+      if (cfgRes.system) {
+        renderSystemStatus(cfgRes.system);
+      } else {
+        syncDynamicRosterNames();
+        renderAllSeats();
+      }
+      renderQuickCueButtons();
+      renderExecutorControls();
+      if (state.whiteboard) renderWhiteboard(state.whiteboard, true, false);
+      renderPersonaPopoverContents(agentId);
+      showToast(nextName ? `席位名称已设为「${nextName}」` : `已恢复预设名称「${AGENT_NAMES[agentId]}」`, "ok", 1800);
+    } catch (err) {
+      showToast(err.message || "修改名称失败", "err");
+    }
+  };
+  renameBtn?.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    saveQuickSeatName();
+  });
+  renameInp?.addEventListener("click", (ev) => ev.stopPropagation());
+  renameInp?.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" && !ev.isComposing) {
+      ev.preventDefault();
+      saveQuickSeatName();
+    }
+  });
+  listEl.appendChild(renameRow);
+
   for (const pKey of PERSONA_ORDER) {
     const spec = personaMap[pKey] || DEFAULT_PERSONA_PRESETS[pKey];
     const btn = document.createElement("button");
@@ -2438,7 +2625,7 @@ function renderQuickCueButtons() {
 
 function renderExecutorControls() {
   const execAid = AGENT_ORDER.includes(state.executorAgent) ? state.executorAgent : "astra";
-  const execName = AGENT_NAMES[execAid] || "Astra";
+  const execName = AGENT_NAMES[execAid] || "工程师";
   const allowWrite = Boolean(el("allowWriteCheckbox")?.checked);
   const ws = effectiveWorkspacePath();
 
@@ -2460,7 +2647,7 @@ function renderExecutorControls() {
   }
   el("stopExecFromTabBtn")?.classList.toggle("hidden", state.stage !== "executing");
   if (el("termTargetTitle")) {
-    el("termTargetTitle").textContent = `${execAid} · 执行终端`;
+    el("termTargetTitle").textContent = `${execName} · 执行终端`;
   }
 
   const descEl = el("execModeDesc");
@@ -2489,9 +2676,16 @@ function renderSystemStatus(sys) {
   state.idleTimeoutSec = Number(sys.idle_timeout_sec ?? 900);
   state.turnTimeoutSec = Number(sys.turn_timeout_sec ?? 0);
   state.maxRefChars = Number(sys.max_ref_chars ?? 120000);
+  if (sys.roster_preset) {
+    state.rosterPreset = sys.roster_preset;
+  }
+  if (typeof sys.single_cli_concurrency === "number") {
+    state.singleCliConcurrency = sys.single_cli_concurrency;
+  }
   if (!state.sessionWorkspaceDir) {
     state.workspaceIsGit = Boolean(sys.workspace_is_git);
   }
+  syncDynamicRosterNames();
 
   const agents = sys.agents || {};
   let readyCount = 0;
@@ -2509,9 +2703,10 @@ function renderSystemStatus(sys) {
       summaryBar.textContent = "3 席本地 CLI 引擎全部就绪 · 支持多模型并行深度交锋";
     } else if (readyCount >= 1) {
       summaryBar.classList.add("all-ready");
+      const concModeLabel = (state.singleCliConcurrency || 3) > 1 ? `${state.singleCliConcurrency || 3} 席并发` : "串行";
       summaryBar.textContent =
         sharedCount > 0
-          ? `已启用单引擎多角色串行模式 · ${readyCount} 席全部就绪`
+          ? `已启用单引擎多角色无状态模式（${concModeLabel}） · ${readyCount} 席全部就绪`
           : `${readyCount} 席本地 CLI 引擎已就绪 · 支持弹性研讨与交付`;
     } else {
       summaryBar.classList.add("warn-ready");
@@ -2587,14 +2782,19 @@ function renderSystemStatus(sys) {
 }
 
 async function pickWorkspaceFolder() {
+  const sessionId = state.currentSessionId;
   try {
+    const native = window.webkit?.messageHandlers?.roundtableNative;
+    const path = native ? await native.postMessage({ action: "pickFolder" }) : "";
+    if (native && !path) return;
     const res = await apiFetch("/api/system/pick-folder", {
       method: "POST",
-      body: JSON.stringify({ active_session_id: state.currentSessionId || "" }),
+      body: JSON.stringify({ active_session_id: sessionId || "", direct_path: path }),
     });
-    if (res.cancelled) return;
+    if (res.cancelled || sessionId !== state.currentSessionId) return;
     if (res.ok && res.path) {
       state.sessionWorkspaceDir = res.path;
+      state.workspaceBound = res.system?.workspace_bound ?? true;
       if (res.system) renderSystemStatus(res.system);
       if (el("cfgWorkspaceDir")) el("cfgWorkspaceDir").value = res.path;
       state.attachedFilesCache.clear();
@@ -2609,21 +2809,46 @@ async function pickWorkspaceFolder() {
 
 /* ==================== @源码检索补全菜单与已附加文件栏 ==================== */
 
-function insertMentionIntoComposer(tokenText) {
+function insertMentionIntoComposer(mentionText) {
   const inp = el("topicInput");
   if (!inp) return;
-  const start = inp.selectionStart ?? inp.value.length;
-  const end = inp.selectionEnd ?? inp.value.length;
-  const before = inp.value.slice(0, start);
-  const after = inp.value.slice(end);
-  const needSpace = before.length > 0 && !/\s$/.test(before) ? " " : "";
-  const inserted = `${needSpace}${tokenText}`;
-  inp.value = before + inserted + after;
-  const caret = before.length + inserted.length;
+  const cleanToken = String(mentionText || "").trim();
+  if (!cleanToken) return;
+
+  // 若是「+ @引用源码」按钮插入单个 "@" 触发补全，则在光标处插入且不追加尾随空格
+  if (cleanToken === "@") {
+    const start = inp.selectionStart ?? inp.value.length;
+    const end = inp.selectionEnd ?? inp.value.length;
+    const before = inp.value.slice(0, start);
+    const after = inp.value.slice(end);
+    const needSpace = before.length > 0 && !/\s$/.test(before) ? " " : "";
+    const inserted = `${needSpace}@`;
+    inp.value = before + inserted + after;
+    const caret = before.length + inserted.length;
+    inp.focus();
+    inp.setSelectionRange(caret, caret);
+    autoGrowComposer();
+    refreshAttachedFilesBar();
+    syncMentionChipActiveStates();
+    return;
+  }
+
+  // 定向点名幂等切换：已存在则移除，避免重复堆叠 @架构师 @架构师 或 @Carbon @Grok
+  const curVal = inp.value || "";
+  const escaped = escapeRegExp(cleanToken);
+  const tokenRe = new RegExp(`(^|\\s)${escaped}(?=\\s|$)`, "i");
+  if (tokenRe.test(curVal)) {
+    inp.value = curVal.replace(tokenRe, " ").replace(/^\s+/, "").replace(/\s{2,}/g, " ");
+  } else {
+    const prefix = curVal && !curVal.endsWith(" ") && !curVal.endsWith("\n") ? " " : "";
+    inp.value = `${curVal}${prefix}${cleanToken} `;
+  }
+  const endCaret = inp.value.length;
   inp.focus();
-  inp.setSelectionRange(caret, caret);
+  inp.setSelectionRange(endCaret, endCaret);
   autoGrowComposer();
   refreshAttachedFilesBar();
+  syncMentionChipActiveStates();
 }
 
 function autoGrowComposer() {
@@ -2636,6 +2861,8 @@ function autoGrowComposer() {
 }
 
 function closeAtSuggestMenu() {
+  clearTimeout(state.atMenu.fetchTimer);
+  state.atMenu.fetchTimer = null;
   state.atMenu.open = false;
   state.atMenu.items = [];
   el("atSuggestMenu")?.classList.add("hidden");
@@ -2655,6 +2882,8 @@ async function openOrUpdateAtSuggestMenu(query, tokenStart, tokenEnd) {
   const menu = el("atSuggestMenu");
   if (!menu) return;
   const rawFileQuery = query.split(":")[0];
+  const lineRange = query.slice(rawFileQuery.length);
+  const sessionId = state.currentSessionId;
 
   const seatCandidates = AGENT_ORDER.filter((aid) => state.enabledAgents.includes(aid))
     .map((aid) => ({
@@ -2676,10 +2905,10 @@ async function openOrUpdateAtSuggestMenu(query, tokenStart, tokenEnd) {
       const res = await apiFetch(`/api/workspace/files?${qs.toString()}`);
       fileItems = (res.files || []).map((f) => ({
         kind: "file",
-        insert: `@${f.path} `,
+        insert: `@${f.path}${lineRange} `,
         path: f.path,
         label: `@${f.path}`,
-        meta: `${f.lines || "?"} 行 · 支持 :起始-结束行`,
+        meta: `${f.lines ? f.lines + " 行 · " : ""}${f.size_kb ?? "?"} KB · 支持 :起始-结束行`,
       }));
       (res.files || []).forEach((f) => state.attachedFilesCache.set(f.path, true));
     } catch {
@@ -2687,6 +2916,10 @@ async function openOrUpdateAtSuggestMenu(query, tokenStart, tokenEnd) {
     }
   }
 
+  const input = el("topicInput");
+  const token = input && findActiveAtToken(input.value, input.selectionStart);
+  if (sessionId !== state.currentSessionId || document.activeElement !== input ||
+      !token || token.start !== tokenStart || token.end !== tokenEnd || token.query !== query) return;
   const combined = [...seatCandidates, ...fileItems].slice(0, 20);
   if (!combined.length) {
     if (!effectiveWorkspacePath()) {
@@ -2752,6 +2985,7 @@ function applyAtSuggestSelection(index) {
   closeAtSuggestMenu();
   autoGrowComposer();
   refreshAttachedFilesBar();
+  syncMentionChipActiveStates();
 }
 
 function refreshAttachedFilesBar() {
@@ -2883,6 +3117,7 @@ function applySessionSnapshot(snap) {
   state.isBusy = Boolean(snap.is_busy);
   state.topic = snap.topic || "";
   state.sessionWorkspaceDir = snap.workspace_dir || "";
+  state.workspaceBound = snap.workspace_bound ?? null;
   state.workspaceIsGit = Boolean(snap.workspace_is_git);
 
   const norm = normalizeCollabModeAndAutoExec(snap.collab_mode, snap.auto_preview_exec);
@@ -2941,6 +3176,11 @@ function connectSessionStream(sessionId) {
     applySessionSnapshot(snap);
   });
 
+  es.addEventListener("session_cleared", () => {
+    clearChatMessages();
+    updateEmptyGuideVisibility();
+  });
+
   es.addEventListener("session_meta", (ev) => {
     const meta = JSON.parse(ev.data);
     const prevStage = state.stage;
@@ -2948,6 +3188,7 @@ function connectSessionStream(sessionId) {
     state.isBusy = Boolean(meta.is_busy);
     if (typeof meta.topic === "string") state.topic = meta.topic;
     if (typeof meta.workspace_dir === "string") state.sessionWorkspaceDir = meta.workspace_dir;
+    if (typeof meta.workspace_bound === "boolean") state.workspaceBound = meta.workspace_bound;
     if (typeof meta.workspace_is_git === "boolean") state.workspaceIsGit = meta.workspace_is_git;
     if (Array.isArray(meta.enabled_agents)) state.enabledAgents = meta.enabled_agents;
     if (meta.seat_personas) state.seatPersonas = { ...state.seatPersonas, ...meta.seat_personas };
@@ -3066,22 +3307,29 @@ async function switchToSession(sessionId) {
 }
 
 async function createNewSession() {
+  if (!state.topic && !state.whiteboard?.items?.length && state.messages.size === 0 && !state.isBusy && state.currentSessionId) {
+    el("topicInput")?.focus();
+    showToast("当前已是空白新会议，可直接输入议题开启研讨", "info", 2000);
+    return;
+  }
   try {
     const res = await apiFetch("/api/sessions", {
       method: "POST",
       body: JSON.stringify({
-        title: "新圆桌会议",
-        collab_mode: state.collabMode,
+        title: "新会议",
+        collab_mode: state.collabMode || "deep_deliberation",
         auto_preview_exec: state.autoPreviewExec,
       }),
     });
-    state.sessions = res.sessions || state.sessions;
-    renderSessionList();
+    if (Array.isArray(res.sessions)) {
+      state.sessions = res.sessions;
+      renderSessionList();
+    }
     if (res.session?.session_id) {
       applySessionSnapshot(res.session);
       connectSessionStream(res.session.session_id);
-      el("topicInput")?.focus();
     }
+    el("topicInput")?.focus();
   } catch (err) {
     showToast(err.message || "新建圆桌会议失败", "err");
   }
@@ -3103,24 +3351,21 @@ async function deleteSessionById(sessionId) {
 
 async function startOrInterruptWithText(overrideText = "") {
   const inp = el("topicInput");
-  const text = (overrideText || inp?.value || "").trim();
+  const draft = inp?.value || "";
+  const inMeeting = state.messages.size > 0 || state.isBusy;
+  const text = (overrideText || draft.trim() || (!inMeeting && state.topic) || "").trim();
   if (!text) {
     inp?.focus();
     return;
   }
-  if (!state.currentSessionId) return;
-
-  if (!overrideText && inp) {
-    inp.value = "";
-    autoGrowComposer();
-    refreshAttachedFilesBar();
-  }
+  const sessionId = state.currentSessionId;
+  if (!sessionId || state.sendingSessions.has(sessionId)) return;
+  state.sendingSessions.add(sessionId);
   closeAtSuggestMenu();
 
-  const inMeeting = Boolean(state.topic) || state.messages.size > 0;
   try {
     if (!inMeeting) {
-      await apiFetch(`/api/sessions/${state.currentSessionId}/start`, {
+      await apiFetch(`/api/sessions/${sessionId}/start`, {
         method: "POST",
         body: JSON.stringify({
           topic: text,
@@ -3134,24 +3379,34 @@ async function startOrInterruptWithText(overrideText = "") {
       });
     } else {
       const endpoint = state.isBusy ? "interrupt" : "followup";
-      await apiFetch(`/api/sessions/${state.currentSessionId}/${endpoint}`, {
+      await apiFetch(`/api/sessions/${sessionId}/${endpoint}`, {
         method: "POST",
         body: JSON.stringify({ message: text }),
       });
     }
-    scrollToBottom(true);
+    if (sessionId === state.currentSessionId) {
+      if (!overrideText && inp?.value === draft) {
+        inp.value = "";
+        autoGrowComposer();
+        refreshAttachedFilesBar();
+        syncMentionChipActiveStates();
+      }
+      scrollToBottom(true);
+    }
   } catch (err) {
     showToast(err.message || "发送指令失败", "err");
+  } finally {
+    state.sendingSessions.delete(sessionId);
   }
 }
 
 async function triggerExecutionNow() {
   if (!state.currentSessionId) return;
-  if (!state.topic && state.messages.size === 0) {
+  if (!state.topic && !state.whiteboard?.items?.some(it => it.kind === "action" && it.checked !== false) && state.messages.size === 0) {
     showToast("请先输入议题完成研讨或添加白板任务", "warn", 2200);
     return;
   }
-  const allowWrite = Boolean(el("allowWriteCheckbox")?.checked);
+  const allowWrite = Boolean(effectiveWorkspacePath() && el("allowWriteCheckbox")?.checked);
   const execAid = state.executorAgent || "astra";
   setRightCollapsed(false);
   switchWorkbenchTab("terminal");
@@ -3179,19 +3434,39 @@ function openSettingsModal() {
   const sys = state.system || {};
   const agents = sys.agents || {};
 
-  syncPacingControlsInModal(
-    sys.pacing_mode || state.pacingMode || "unrestricted",
-    sys.idle_timeout_sec ?? state.idleTimeoutSec,
-    sys.turn_timeout_sec ?? state.turnTimeoutSec,
-    sys.max_ref_chars ?? state.maxRefChars
-  );
-
   if (el("cfgWorkspaceDir")) {
     el("cfgWorkspaceDir").value = effectiveWorkspacePath();
   }
   if (el("cfgSingleCliFallback")) {
     el("cfgSingleCliFallback").checked = sys.allow_single_cli_fallback !== false;
   }
+  if (el("cfgSingleCliConcurrency")) {
+    el("cfgSingleCliConcurrency").value = String(sys.single_cli_concurrency || state.singleCliConcurrency || 3);
+  }
+  if (el("cfgRosterPresetSelect")) {
+    const curRp = sys.roster_preset || state.rosterPreset || "role_experts";
+    el("cfgRosterPresetSelect").value = curRp;
+    const preset = ROSTER_NAME_PRESETS[curRp];
+    if (preset && preset.names) {
+      for (const [aid, cap] of [
+        ["carbon", "Carbon"],
+        ["grok", "Grok"],
+        ["astra", "Astra"],
+      ]) {
+        const inp = el(`cfg${cap}Name`);
+        if (inp && preset.names[aid]) {
+          inp.placeholder = `留空默认：${preset.names[aid]}`;
+        }
+      }
+    }
+  }
+
+  syncPacingControlsInModal(
+    sys.pacing_mode || state.pacingMode || "unrestricted",
+    sys.idle_timeout_sec ?? state.idleTimeoutSec ?? 900,
+    sys.turn_timeout_sec ?? state.turnTimeoutSec ?? 0,
+    sys.max_ref_chars ?? state.maxRefChars ?? 120000
+  );
 
   for (const [aid, cap] of [
     ["carbon", "Carbon"],
@@ -3202,27 +3477,45 @@ function openSettingsModal() {
     const drvSel = el(`cfg${cap}Driver`);
     const personaSel = el(`cfg${cap}Persona`);
     const modelInp = el(`cfg${cap}Model`);
+    const nameInp = el(`cfg${cap}Name`);
     const binInp = el(`cfg${cap}Bin`);
+    const statusPill = el(`cfgStatus${cap}`);
 
-    if (drvSel) drvSel.value = info.driver || info.effective_driver || (aid === "carbon" ? "agy" : aid === "grok" ? "grok" : "codex");
+    if (drvSel) drvSel.value = info.driver || "auto";
     if (personaSel) personaSel.value = state.seatPersonas[aid] || info.persona || DEFAULT_SEAT_PERSONAS[aid];
     if (modelInp) modelInp.value = info.model || info.effective_model || "";
+    if (nameInp) nameInp.value = info.custom_name || "";
     if (binInp) binInp.value = info.custom_binary || "";
 
     refreshSeatEffortSelectInModal(cap, false);
 
     const discSel = el(`cfg${cap}Effort`);
     const execSel = el(`cfg${cap}ExecEffort`);
-    const prefDisc = state.seatEfforts[aid] || info.discussion_effort || info.effective_discussion_effort;
-    const prefExec = info.execution_effort || info.effective_execution_effort;
-    if (discSel && prefDisc && Array.from(discSel.options).some((o) => o.value === prefDisc)) {
-      discSel.value = prefDisc;
-    }
-    if (execSel && prefExec && Array.from(execSel.options).some((o) => o.value === prefExec)) {
-      execSel.value = prefExec;
+    const spec = getEffortSpecForModel(drvSel?.value || "auto", modelInp?.value || "", aid);
+    const prefDisc = state.seatEfforts[aid] || info.discussion_effort || info.effective_discussion_effort || spec.default;
+    const prefExec = info.execution_effort || info.effective_execution_effort || spec.default;
+    populateEffortSelectElement(discSel, spec.allowed, prefDisc, spec.supports_effort);
+    const execAllowed = (spec.allowed || []).filter((x) => x !== "low");
+    populateEffortSelectElement(execSel, execAllowed.length ? execAllowed : spec.allowed, prefExec, spec.supports_effort);
+
+    if (statusPill) {
+      const latency = state.pingLatencyBySeat?.[aid];
+      if (info.binary_detected) {
+        if (latency > 0) {
+          statusPill.textContent = `已就绪 · ${latency}ms`;
+          statusPill.className = `driver-pill ${latency < 2800 ? "latency-fast" : latency < 7500 ? "latency-normal" : "latency-slow"}`;
+        } else {
+          statusPill.textContent = info.shared_cli_group ? "单引擎多角色" : "已就绪";
+          statusPill.className = "driver-pill live";
+        }
+      } else {
+        statusPill.textContent = "未安装";
+        statusPill.className = "driver-pill missing";
+      }
     }
   }
 
+  syncDynamicRosterNames();
   modal.classList.remove("hidden");
 }
 
@@ -3237,12 +3530,15 @@ function collectDraftAgentConfigsFromModal() {
     ["grok", "Grok"],
     ["astra", "Astra"],
   ]) {
+    const discSel = el(`cfg${cap}Effort`);
+    const execSel = el(`cfg${cap}ExecEffort`);
     out[aid] = {
       driver: el(`cfg${cap}Driver`)?.value || "auto",
       persona: el(`cfg${cap}Persona`)?.value || DEFAULT_SEAT_PERSONAS[aid],
+      custom_name: (el(`cfg${cap}Name`)?.value || "").trim(),
       model: (el(`cfg${cap}Model`)?.value || "").trim(),
-      discussion_effort: el(`cfg${cap}Effort`)?.value || "",
-      execution_effort: el(`cfg${cap}ExecEffort`)?.value || "",
+      discussion_effort: discSel?.disabled ? "" : discSel?.value || "",
+      execution_effort: execSel?.disabled ? "" : execSel?.value || "",
       custom_binary: (el(`cfg${cap}Bin`)?.value || "").trim(),
     };
   }
@@ -3250,40 +3546,62 @@ function collectDraftAgentConfigsFromModal() {
 }
 
 function applyQuickSingleCliTriad() {
-  let chosenDrv = el("singleCliTriadDriver")?.value || "auto";
+  const triadSel = el("singleCliTriadDriver");
+  let chosenDrv = triadSel?.value || "auto";
   if (chosenDrv === "auto") {
-    const sysAgents = state.system?.agents || {};
-    for (const aid of AGENT_ORDER) {
-      if (sysAgents[aid]?.binary_detected && sysAgents[aid]?.effective_driver) {
-        chosenDrv = sysAgents[aid].effective_driver;
-        break;
-      }
-    }
-    if (chosenDrv === "auto") chosenDrv = "agy";
+    const agents = state.system?.agents || {};
+    chosenDrv =
+      ["agy", "codex", "grok"].find((d) =>
+        Object.values(agents).some((info) => info?.binary_detected && info?.effective_driver === d)
+      ) || "agy";
   }
 
   const dSpec = DRIVER_DEFAULTS[chosenDrv] || DRIVER_DEFAULTS.agy;
-  if (el("cfgSingleCliFallback")) el("cfgSingleCliFallback").checked = true;
-
-  const personaTriad = {
-    Carbon: "planner",
-    Grok: "red_team",
-    Astra: "implementer",
-  };
-  for (const cap of ["Carbon", "Grok", "Astra"]) {
-    if (el(`cfg${cap}Driver`)) el(`cfg${cap}Driver`).value = chosenDrv;
-    if (el(`cfg${cap}Persona`)) el(`cfg${cap}Persona`).value = personaTriad[cap];
-    if (el(`cfg${cap}Model`)) el(`cfg${cap}Model`).value = dSpec.model;
-    refreshSeatEffortSelectInModal(cap, false);
+  const triadPersonas = { carbon: "planner", grok: "red_team", astra: "implementer" };
+  const singleFb = el("cfgSingleCliFallback");
+  if (singleFb) singleFb.checked = true;
+  const concSel = el("cfgSingleCliConcurrency");
+  if (concSel && !concSel.value) {
+    concSel.value = String(state.singleCliConcurrency || 3);
   }
+  state.singleCliConcurrency = Number(concSel?.value || state.singleCliConcurrency || 3);
+
+  for (const [aid, cap] of [
+    ["carbon", "Carbon"],
+    ["grok", "Grok"],
+    ["astra", "Astra"],
+  ]) {
+    const drvEl = el(`cfg${cap}Driver`);
+    const perEl = el(`cfg${cap}Persona`);
+    const modEl = el(`cfg${cap}Model`);
+    const discEl = el(`cfg${cap}Effort`);
+    const execEl = el(`cfg${cap}ExecEffort`);
+    if (drvEl) drvEl.value = chosenDrv;
+    if (perEl) perEl.value = triadPersonas[aid];
+    if (modEl) modEl.value = dSpec.model;
+    if (discEl) discEl.value = dSpec.discussEffort;
+    if (execEl) execEl.value = dSpec.execEffort;
+    refreshSeatEffortSelectInModal(cap, true);
+    const spec = getEffortSpecForModel(chosenDrv, dSpec.model, aid);
+    populateEffortSelectElement(discEl, spec.allowed, spec.default || dSpec.discussEffort, spec.supports_effort);
+    const execAllowed = (spec.allowed || []).filter((x) => x !== "low");
+    populateEffortSelectElement(
+      execEl,
+      execAllowed.length ? execAllowed : spec.allowed,
+      spec.default || dSpec.execEffort,
+      spec.supports_effort
+    );
+  }
+  state.seatEfforts = {};
+  const concNote = state.singleCliConcurrency > 1 ? `${state.singleCliConcurrency} 席并发` : "串行防限流";
   showToast(
-    `已填入「${DRIVER_LABELS[chosenDrv] || chosenDrv}」单引擎多角色配置（规划 + 审计 + 工程），点击右下角「保存配置」生效`,
+    `已填入「${DRIVER_LABELS[chosenDrv] || chosenDrv}」单引擎三角色推荐配置（${concNote}），点击「保存配置」生效`,
     "ok",
-    3200
+    2800
   );
 }
 
-async function runCliTest(fromModal = false) {
+async function runCliTest(fromModal = false, targetAgentId = "") {
   const btn = el(fromModal ? "modalTestCliBtn" : "testCliBtn");
   const origTxt = btn?.textContent || "实测连通";
   if (btn) {
@@ -3291,24 +3609,53 @@ async function runCliTest(fromModal = false) {
     btn.textContent = "实测中…";
   }
   try {
-    const payload = fromModal ? { agents: collectDraftAgentConfigsFromModal() } : {};
+    let overrideAgents = null;
+    if (fromModal) {
+      overrideAgents = collectDraftAgentConfigsFromModal();
+    }
     const res = await apiFetch("/api/cli/test", {
       method: "POST",
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        agents: overrideAgents,
+        agent_id: targetAgentId || "",
+      }),
     });
     const results = res.results || {};
-    state.cliTestResults = results;
+    state.cliTestResults = { ...state.cliTestResults, ...results };
+    let okCount = 0;
+    let totalCount = 0;
     for (const [aid, r] of Object.entries(results)) {
-      if (r?.latency_ms) state.pingLatencyBySeat[aid] = r.latency_ms;
+      totalCount += 1;
+      const ms = Number(r?.elapsed_ms ?? r?.latency_ms ?? 0);
+      if (r?.ok) {
+        okCount += 1;
+        if (ms > 0) state.pingLatencyBySeat[aid] = ms;
+      }
+      const cap = aid.charAt(0).toUpperCase() + aid.slice(1);
+      const pill = el(`cfgStatus${cap}`);
+      if (pill && fromModal) {
+        if (r?.ok) {
+          pill.textContent = `连通 ${ms}ms`;
+          pill.className = `driver-pill ${ms < 2500 ? "latency-fast" : ms < 6000 ? "latency-normal" : "latency-slow"}`;
+        } else {
+          pill.textContent = "未通过";
+          pill.className = "driver-pill missing";
+        }
+      }
     }
-    if (res.system) renderSystemStatus(res.system);
-    const okList = AGENT_ORDER.filter((a) => results[a]?.ok);
-    if (okList.length === 3) {
-      showToast("3 席 CLI 引擎连通实测全部通过", "ok", 2500);
-    } else if (okList.length >= 1) {
-      showToast(`${okList.length} 席连通正常，未通过席位请查看卡片诊断提示`, "warn", 3200);
+    if (res.system) {
+      renderSystemStatus(res.system);
     } else {
-      showToast("未检测到可用 CLI 响应，请检查可执行路径或登录态", "err", 3400);
+      renderAllSeats();
+    }
+    if (okCount === totalCount && totalCount > 0) {
+      const summary = Object.entries(results)
+        .map(([aid, r]) => `${AGENT_NAMES[aid] || aid} ${r.elapsed_ms ?? r.latency_ms ?? 0}ms`)
+        .join(" / ");
+      showToast(`连通实测全部通过：${summary}`, "ok", 3200);
+    } else {
+      const firstErr = Object.values(results).find((r) => !r?.ok)?.error || "部分席位未通过实测，请查看卡片诊断提示";
+      showToast(firstErr, "warn", 4200);
     }
   } catch (err) {
     showToast(err.message || "连通性实测失败", "err");
@@ -3324,29 +3671,40 @@ async function saveSettingsFromModal() {
   const btn = el("saveSettingsBtn");
   if (btn) btn.disabled = true;
 
-  const draftAgents = collectDraftAgentConfigsFromModal();
-  const wsVal = (el("cfgWorkspaceDir")?.value || "").trim();
-  const singleFallback = Boolean(el("cfgSingleCliFallback")?.checked);
-
-  const pacingMode = state.pacingMode || "unrestricted";
-  const preset = PACING_PRESETS[pacingMode];
-  const idleSec = preset
-    ? preset.idle_timeout_sec
-    : Math.max(0, Number(el("cfgIdleTimeout")?.value || 900));
-  const turnSec = preset
-    ? preset.turn_timeout_sec
-    : Math.max(0, Number(el("cfgTurnTimeout")?.value || 0));
-  const maxRef = preset
-    ? preset.max_ref_chars
-    : Math.max(10000, Number(el("cfgMaxRefChars")?.value || 120000));
-
   try {
+    const activePacingBtn = document.querySelector("#cfgPacingGroup .pacing-seg-btn.active");
+    const pacingMode = activePacingBtn?.dataset.pacingMode || state.pacingMode || "unrestricted";
+    const preset = PACING_PRESETS[pacingMode];
+    const idleSec = preset
+      ? preset.idle_timeout_sec
+      : Math.max(0, Number(el("cfgIdleTimeout")?.value ?? 900));
+    const turnSec = preset
+      ? preset.turn_timeout_sec
+      : Math.max(0, Number(el("cfgTurnTimeout")?.value ?? 0));
+    const maxRef = preset
+      ? preset.max_ref_chars
+      : Math.max(10000, Number(el("cfgMaxRefChars")?.value ?? 120000));
+
+    const wsVal = (el("cfgWorkspaceDir")?.value || "").trim();
+    const singleFallback = Boolean(el("cfgSingleCliFallback")?.checked);
+    const singleConc = Number(el("cfgSingleCliConcurrency")?.value || 3);
+    const rosterPreset = el("cfgRosterPresetSelect")?.value || "role_experts";
+
+    const draftAgents = collectDraftAgentConfigsFromModal();
+    for (const aid of AGENT_ORDER) {
+      if (!draftAgents[aid].execution_effort && draftAgents[aid].discussion_effort) {
+        draftAgents[aid].execution_effort = draftAgents[aid].discussion_effort;
+      }
+    }
+
     const res = await apiFetch("/api/config", {
       method: "POST",
       body: JSON.stringify({
         active_session_id: state.currentSessionId || "",
         workspace_dir: wsVal,
         allow_single_cli_fallback: singleFallback,
+        roster_preset: rosterPreset,
+        single_cli_concurrency: singleConc,
         pacing_mode: pacingMode,
         idle_timeout_sec: idleSec,
         turn_timeout_sec: turnSec,
@@ -3360,28 +3718,37 @@ async function saveSettingsFromModal() {
       grok: draftAgents.grok.persona,
       astra: draftAgents.astra.persona,
     };
-    const nextEfforts = {};
-    for (const aid of AGENT_ORDER) {
-      if (draftAgents[aid].discussion_effort) {
-        nextEfforts[aid] = draftAgents[aid].discussion_effort;
-      }
+    const resetSeatEfforts = { carbon: "", grok: "", astra: "" };
+
+    state.seatPersonas = { ...state.seatPersonas, ...nextPersonas };
+    state.seatEfforts = {};
+    state.rosterPreset = res.system?.roster_preset || rosterPreset;
+    state.singleCliConcurrency = res.system?.single_cli_concurrency || singleConc;
+    if (wsVal) {
+      state.sessionWorkspaceDir = wsVal;
+      state.workspaceBound = res.system?.workspace_bound ?? null;
     }
-    state.seatPersonas = nextPersonas;
-    state.seatEfforts = nextEfforts;
-    if (wsVal) state.sessionWorkspaceDir = wsVal;
+
+    if (res.system) {
+      renderSystemStatus(res.system);
+    } else {
+      syncDynamicRosterNames();
+      renderAllSeats();
+    }
 
     if (state.currentSessionId) {
       await persistSessionSeatsPatch({
         seat_personas: nextPersonas,
-        seat_efforts: nextEfforts,
+        seat_efforts: resetSeatEfforts,
       });
     }
-    if (res.system) renderSystemStatus(res.system);
+
     renderStageAndHeader();
+    if (state.whiteboard) renderWhiteboard(state.whiteboard, true, false);
     closeSettingsModal();
-    showToast("系统运行策略与席位配置已保存", "ok", 2200);
+    showToast("系统运行策略、成员称呼与模型配置已保存", "ok", 2200);
   } catch (err) {
-    showToast(err.message || "保存系统配置失败", "err", 3400);
+    showToast(err.message || "保存系统配置失败", "err", 3800);
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -3524,6 +3891,7 @@ function bindEvents() {
   topicInp?.addEventListener("input", () => {
     autoGrowComposer();
     refreshAttachedFilesBar();
+    syncMentionChipActiveStates();
     const caret = topicInp.selectionStart ?? topicInp.value.length;
     const tok = findActiveAtToken(topicInp.value, caret);
     if (state.atMenu.fetchTimer) clearTimeout(state.atMenu.fetchTimer);
@@ -3537,6 +3905,7 @@ function bindEvents() {
   });
 
   topicInp?.addEventListener("keydown", (e) => {
+    if (e.isComposing || e.keyCode === 229) return;
     if (state.atMenu.open && state.atMenu.items.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -3658,10 +4027,8 @@ function bindEvents() {
         e.preventDefault();
         const txt = inp.value.trim();
         if (!txt) return;
-        inp.value = "";
-        box.classList.add("hidden");
         const isConstraint = editorKey === "chair_constraints";
-        await postWhiteboardMutation({
+        const wb = await postWhiteboardMutation({
           op: "add",
           bucket: isConstraint ? "chair_constraints" : editorKey,
           kind: isConstraint ? "decision" : editorKey,
@@ -3670,6 +4037,10 @@ function bindEvents() {
           checked: true,
           text: txt,
         });
+        if (wb && inp.value.trim() === txt) {
+          inp.value = "";
+          box.classList.add("hidden");
+        }
       } else if (e.key === "Escape") {
         box.classList.add("hidden");
       }
@@ -3769,6 +4140,23 @@ function bindEvents() {
     el(`cfg${cap}Model`)?.addEventListener("input", () => refreshSeatEffortSelectInModal(cap, false));
   }
 
+  el("cfgRosterPresetSelect")?.addEventListener("change", (e) => {
+    const val = e.target.value || "role_experts";
+    const preset = ROSTER_NAME_PRESETS[val];
+    for (const [aid, cap] of [
+      ["carbon", "Carbon"],
+      ["grok", "Grok"],
+      ["astra", "Astra"],
+    ]) {
+      const inp = el(`cfg${cap}Name`);
+      if (inp) {
+        inp.placeholder = preset?.names?.[aid]
+          ? `留空默认：${preset.names[aid]}`
+          : "留空跟随底层引擎自动生成";
+      }
+    }
+  });
+
   // 点击空白处收起浮层与全局快捷键
   document.addEventListener("click", (e) => {
     if (!e.target.closest("#appearanceMenuWrap")) {
@@ -3810,6 +4198,16 @@ function bindEvents() {
     }
   });
 }
+
+window.__roundtableMenu = (action) => {
+  switch (action) {
+    case "settings": openSettingsModal(); break;
+    case "newSession": createNewSession(); break;
+    case "pickFolder": pickWorkspaceFolder(); break;
+    case "toggleLeft": el("brandToggleRailBtn")?.click(); break;
+    case "toggleRight": el("toggleRightBtn")?.click(); break;
+  }
+};
 
 async function bootstrap() {
   applyTheme(localStorage.getItem(STORAGE_KEYS.theme) || "light");

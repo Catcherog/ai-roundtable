@@ -18,7 +18,13 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from backend.cli_adapters import PERSONA_PRESETS, parse_structured_tail_with_kinds  # noqa: E402
+# AI_ROUNDTABLE_V2_UPGRADE_20261114
+from backend.cli_adapters import (  # noqa: E402
+    PERSONA_PRESETS,
+    ROSTER_NAME_PRESETS,
+    normalize_model_effort,
+    parse_structured_tail_with_kinds,
+)
 from backend.orchestrator import (  # noqa: E402
     COLLAB_MODES,
     RoundtableOrchestrator,
@@ -57,7 +63,7 @@ async def run_local_benchmark(orch: RoundtableOrchestrator) -> None:
     orig_stream = orch.runner.stream_discussion_turn
     orig_exec_stream = orch.runner.stream_agent_execution
     try:
-        orch.settings.inspect_status = lambda: {
+        orch.settings.inspect_status = lambda *a, **kw: {
             "carbon": {
                 "binary_detected": True,
                 "binary_path": "mock://agy",
@@ -246,12 +252,61 @@ async def run_local_benchmark(orch: RoundtableOrchestrator) -> None:
         assert conflict_res.get("conflict") is True, "乐观锁版本号冲突校验未生效"
         await orch.delete_session(wb_sess.session_id)
         print("[3-zone whiteboard   ] 历史迁移确定性 ID + 噪音黑名单 + 采纳共识 + 勾选过滤 + 乐观锁断言通过")
+
+        # 5. 验证 v2 修复项：normalize_model_effort(strict=True)、僵尸「思考中」卡片自愈、自定义成员名称与单引擎并发加速
+        assert normalize_model_effort("agy", model="gemini-4-carbon", effort="max", strict=True) == "high"
+        assert normalize_model_effort("codex", model="gpt-6-astra", effort="max", strict=True) == "max"
+        assert set(ROSTER_NAME_PRESETS.keys()) >= {
+            "role_experts",
+            "council_alpha",
+            "product_studio",
+            "auto_driver",
+            "classic",
+        }
+
+        zombie_sess = orch.create_session(title="僵尸卡片自愈验证", collab_mode="rapid_consensus")
+        zombie_sess.seat_efforts = {"carbon": "max", "grok": "xhigh", "astra": "max"}
+        orch._sync_seat_readiness(zombie_sess)
+        assert zombie_sess.seat_states["carbon"]["effective_effort"] == "high", "单会话越界档位未被 strict 收敛"
+        zombie_sess.messages.append(
+            {
+                "id": "m_zombie",
+                "speaker": "carbon",
+                "speaker_name": "架构师",
+                "content": "",
+                "badge": "思考中",
+                "streaming": True,
+            }
+        )
+        persisted_z = zombie_sess.to_persisted_dict()
+        assert persisted_z["messages"][0]["streaming"] is False
+        assert persisted_z["messages"][0]["badge"] == "已中断"
+        assert persisted_z["messages"][0]["content"], "空白僵尸卡片未自动填充中断说明"
+        await orch.delete_session(zombie_sess.session_id)
+
+        prev_preset = orch.settings.roster_preset
+        prev_carbon_cname = orch.settings.agents["carbon"].custom_name
+        orch.update_runtime_config(
+            {"roster_preset": "council_alpha", "agents": {"carbon": {"custom_name": "首席架构"}}}
+        )
+        assert orch.settings.resolve_seat_name("carbon") == "首席架构"
+        assert orch.settings.resolve_seat_name("grok") == "Beta"
+        _, _, parsed_tgt, _, _ = orch.runner.parse_structured_tail_with_kinds(
+            "请 @首席架构 核对接口边界\n[状态: 质询完成 | 共识: 需继续 | 点名: @首席架构]",
+            seat_names={"carbon": "首席架构", "grok": "Beta", "astra": "Gamma"},
+        )
+        assert parsed_tgt == "carbon", f"自定义成员名点名解析失败: {parsed_tgt}"
+        orch.update_runtime_config(
+            {"roster_preset": prev_preset, "agents": {"carbon": {"custom_name": prev_carbon_cname}}}
+        )
+        print("[v2 fixes & roster   ] strict 档位收敛 + 僵尸卡片自愈 + 自定义成员名点名解析断言通过")
         print("=" * 74)
         print("全部离线基准压测与契约断言 100% 通过！")
     finally:
         orch.settings.inspect_status = orig_inspect
         orch.runner.stream_discussion_turn = orig_stream
         orch.runner.stream_agent_execution = orig_exec_stream
+        orch._sync_agent_meta_names()
 
 
 async def main() -> None:
@@ -284,8 +339,8 @@ async def main() -> None:
             cands = ", ".join(info["binary_candidates"])
             print(f"[未找到] {info['name']:6s} ({info['title']}) | {info['cli_name']:15s} -> 未找到: {cands}")
 
+    await run_local_benchmark(orch)
     if args.bench:
-        await run_local_benchmark(orch)
         await orch.runner.shutdown()
         return
 

@@ -18,13 +18,17 @@ import glob
 import json
 import os
 import re
+# AI_ROUNDTABLE_V2_UPGRADE_20261114
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import AsyncGenerator, Dict, List, Optional, Set, Tuple
+
+from .workspace_backup import WorkspaceBackup
 
 
 _CACHED_LOGIN_PATH: Optional[str] = None
@@ -143,6 +147,41 @@ DEFAULT_SEAT_PERSONAS: Dict[str, str] = {
     "grok": "red_team",
     "astra": "implementer",
 }
+
+ROSTER_NAME_PRESETS: Dict[str, dict] = {
+    "role_experts": {
+        "key": "role_experts",
+        "label": "专业职能称呼（推荐默认）",
+        "desc": "脱离具体模型名，按圆桌席位职责直观称呼",
+        "names": {"carbon": "架构师", "grok": "审计官", "astra": "工程师"},
+    },
+    "council_alpha": {
+        "key": "council_alpha",
+        "label": "中立席位代号（Alpha / Beta / Gamma）",
+        "desc": "适合任意异构或单引擎多角色组合的中立代号",
+        "names": {"carbon": "Alpha", "grok": "Beta", "astra": "Gamma"},
+    },
+    "product_studio": {
+        "key": "product_studio",
+        "label": "产品研发委员会（总监 / 红队 / 主程）",
+        "desc": "适合产品方案评审、交互收敛与全栈交付",
+        "names": {"carbon": "产品总监", "grok": "红队审计", "astra": "研发主程"},
+    },
+    "auto_driver": {
+        "key": "auto_driver",
+        "label": "跟随底层引擎（自动映射 CLI·职责）",
+        "desc": "根据各席实际绑定的底层 CLI 与当前职责自动生成名称",
+        "names": {},
+    },
+    "classic": {
+        "key": "classic",
+        "label": "经典默认代号（Carbon / Grok / Astra）",
+        "desc": "保留原版三席经典代号",
+        "names": {"carbon": "Carbon", "grok": "Grok", "astra": "Astra"},
+    },
+}
+
+VALID_ROSTER_PRESETS = tuple(ROSTER_NAME_PRESETS.keys())
 
 DRIVER_SPECS: Dict[str, dict] = {
     "agy": {
@@ -375,6 +414,13 @@ _AT_FILE_REF_RE = re.compile(
 FULL_FILE_LINE_THRESHOLD = 1200
 MAX_SLICE_LINES = 1200
 MAX_ROUND_SOURCE_CHARS = 120000
+
+_WORKSPACE_TREE_CACHE: Dict[str, Tuple[float, str]] = {}
+_FILE_SKELETON_CACHE: Dict[str, Tuple[int, int, str]] = {}
+_CODE_TOPIC_HINT_RE = re.compile(
+    r"(@[A-Za-z0-9_./-]+\.[A-Za-z0-9]{1,10}|代码|源码|函数|接口|报错|异常|bug|修复|重构|模块|文件|目录|脚本|性能|延迟|样式|前端|后端|测试|编译|打包|git|cli|api|css|html|js|py)",
+    re.IGNORECASE,
+)
 
 
 def get_persona_spec(persona_key: str, fallback_agent_id: str = "carbon") -> dict:
@@ -667,11 +713,19 @@ def list_workspace_files(workspace_dir: str, query: str = "", limit: int = 200) 
                 continue
             full_p = os.path.join(root, fname)
             rel_p = fname if rel_dir == "." else f"{rel_dir.replace(os.sep, '/')}/{fname}"
+            line_cnt = 0
             try:
                 sz = os.path.getsize(full_p)
+                if 0 < sz <= 524288:
+                    with open(full_p, "rb") as bf:
+                        raw_b = bf.read()
+                    line_cnt = raw_b.count(b"\n") + (1 if raw_b and not raw_b.endswith(b"\n") else 0)
             except Exception:
                 sz = 0
-            all_items.append({"path": rel_p, "size_kb": round(max(sz, 1) / 1024.0, 1)})
+            item_entry = {"path": rel_p, "size_kb": round(max(sz, 1) / 1024.0, 1)}
+            if line_cnt > 0:
+                item_entry["lines"] = line_cnt
+            all_items.append(item_entry)
             if len(all_items) >= max_scan:
                 break
         if len(all_items) >= max_scan:
@@ -902,7 +956,16 @@ def extract_referenced_files_context(
                 range_label = f"完整源码 L1–L{total_lines}（共 {total_lines} 行）"
                 block = f"【引用源码 @{rel_raw}（{range_label}）】：\n```{ext}\n{body_txt}\n```"
             else:
-                skeleton_txt = build_file_outline_skeleton(rel_raw, all_lines)
+                try:
+                    st_f = os.stat(cand_path)
+                    sk_cached = _FILE_SKELETON_CACHE.get(cand_path)
+                    if sk_cached and sk_cached[0] == st_f.st_mtime_ns and sk_cached[1] == st_f.st_size:
+                        skeleton_txt = sk_cached[2]
+                    else:
+                        skeleton_txt = build_file_outline_skeleton(rel_raw, all_lines)
+                        _FILE_SKELETON_CACHE[cand_path] = (st_f.st_mtime_ns, st_f.st_size, skeleton_txt)
+                except Exception:
+                    skeleton_txt = build_file_outline_skeleton(rel_raw, all_lines)
                 range_label = f"索引骨架（全文件共 {total_lines} 行 > {FULL_FILE_LINE_THRESHOLD} 行阈值）"
                 block = f"【引用文件大纲 @{rel_raw}（{range_label}）】：\n```text\n{skeleton_txt}\n```"
 
@@ -946,14 +1009,38 @@ def build_workspace_context_snapshot(
     reference_texts: str = "",
     prebuilt_ref_block: Optional[str] = None,
     max_ref_chars: int = MAX_ROUND_SOURCE_CHARS,
+    lightweight_hint_only: bool = False,
 ) -> str:
     """
-    构建深度本地项目快照（3 层目录树 + 最多 5 份核心工程清单 + @文件名 智能大纲/切片源码），
-    兼顾毫秒级读取速度与全栈代码架构全景感知，杜绝超大文件全量注入爆炸。
+    构建深度本地项目快照（支持 20s 目录树内存缓存 + 非代码议题轻量摘要模式）：
+    兼顾亚毫秒级读取速度与全栈代码架构全景感知，避免无关非代码议题注入冗长目录树拖慢首字响应。
     """
     bound, real_ws = is_real_bound_workspace(workspace_dir)
     if not bound:
         return ""
+
+    if prebuilt_ref_block is not None:
+        ref_block = prebuilt_ref_block
+    else:
+        ref_block, _ = extract_referenced_files_context(
+            real_ws,
+            reference_texts,
+            max_total_chars=max_ref_chars,
+        )
+
+    if lightweight_hint_only and not ref_block:
+        return (
+            f"【当前绑定本地项目】：{os.path.basename(real_ws)} ({real_ws})\n"
+            "（本议题未显式引用源码文件；如分析无需依赖具体代码实现，请直接作答，切勿盲目遍历工作区文件。）"
+        )
+
+    now_mono = time.monotonic()
+    cached_base = _WORKSPACE_TREE_CACHE.get(real_ws)
+    if cached_base and (now_mono - cached_base[0]) < 20.0:
+        base_text = cached_base[1]
+        if not base_text:
+            return ""
+        return f"{base_text}\n\n{ref_block}" if ref_block else base_text
 
     try:
         top_entries = sorted(os.listdir(real_ws))
@@ -1031,32 +1118,38 @@ def build_workspace_context_snapshot(
             except Exception:
                 pass
 
-    if prebuilt_ref_block is not None:
-        ref_block = prebuilt_ref_block
-    else:
-        ref_block, _ = extract_referenced_files_context(
-            real_ws,
-            reference_texts,
-            max_total_chars=max_ref_chars,
-        )
-
-    parts = [
+    base_parts = [
         f"【当前绑定本地项目】：{os.path.basename(real_ws)} ({real_ws})",
         "【项目目录结构快照（支持用 @相对路径 或 @相对路径:起始行-结束行 引用源码）】：\n" + "\n".join(tree_lines),
     ]
     if manifest_snippets:
-        parts.append("\n\n".join(manifest_snippets))
-    if ref_block:
-        parts.append(ref_block)
-    return "\n\n".join(parts)
+        base_parts.append("\n\n".join(manifest_snippets))
+    base_text = "\n\n".join(base_parts)
+    _WORKSPACE_TREE_CACHE[real_ws] = (now_mono, base_text)
+    return f"{base_text}\n\n{ref_block}" if ref_block else base_text
 
 
 def _safe_terminate_proc(proc: Optional[asyncio.subprocess.Process]) -> None:
     if proc and proc.returncode is None:
         try:
+            if hasattr(os, "killpg") and proc.pid:
+                os.killpg(proc.pid, signal.SIGKILL)
+                return
+        except Exception:
+            pass
+        try:
             proc.kill()
         except Exception:
             pass
+
+
+async def _read_stderr_tail(reader: asyncio.StreamReader) -> str:
+    tail = b""
+    while True:
+        chunk = await reader.read(16384)
+        if not chunk:
+            return tail.decode("utf-8", errors="replace").strip()
+        tail = (tail + chunk)[-65536:]
 
 
 def resolve_effective_model_for_driver(
@@ -1153,6 +1246,8 @@ def normalize_model_effort(
     model: str = "",
     effort: str = "",
     help_text: str = "",
+    strict: bool = False,
+    **_kwargs: object,
 ) -> str:
     """
     将任意输入推理档位严格收敛至「CLI 驱动 + 模型名」支持的合法档位：
@@ -1504,6 +1599,7 @@ class AgentRoleConfig:
     fallback_paths: List[str] = field(default_factory=list)
     driver: str = "auto"
     persona: str = ""
+    custom_name: str = ""
     custom_binary: str = ""
     model: str = ""
     discussion_effort: str = "high"
@@ -1581,7 +1677,36 @@ class RuntimeSettings:
     idle_timeout_sec: int = 900
     turn_timeout_sec: int = 0
     max_ref_chars: int = MAX_ROUND_SOURCE_CHARS
+    roster_preset: str = "role_experts"
+    single_cli_concurrency: int = 3
     agents: Dict[str, AgentRoleConfig] = field(default_factory=dict)
+    _status_cache: Optional[Dict[str, dict]] = field(default=None, repr=False)
+    _status_cache_ts: float = field(default=0.0, repr=False)
+
+    def invalidate_status_cache(self) -> None:
+        self._status_cache = None
+        self._status_cache_ts = 0.0
+
+    def resolve_seat_name(
+        self,
+        agent_id: str,
+        eff_drv: str = "",
+        eff_model: str = "",
+        persona_key: str = "",
+    ) -> str:
+        cfg = self.agents.get(agent_id)
+        if cfg and cfg.custom_name.strip():
+            return cfg.custom_name.strip()[:20]
+        preset_key = self.roster_preset if self.roster_preset in ROSTER_NAME_PRESETS else "role_experts"
+        if preset_key == "auto_driver":
+            drv = eff_drv or (cfg.preferred_driver_key() if cfg else "agy")
+            short_drv = {"agy": "AGY", "grok": "Grok", "codex": "Codex"}.get(drv, drv.upper())
+            pspec = get_persona_spec(persona_key or (cfg.persona if cfg else ""), fallback_agent_id=agent_id)
+            return f"{short_drv}·{pspec['short_tag']}"
+        preset_names = ROSTER_NAME_PRESETS[preset_key].get("names") or {}
+        if preset_names.get(agent_id):
+            return preset_names[agent_id]
+        return {"carbon": "架构师", "grok": "审计官", "astra": "工程师"}.get(agent_id, agent_id.capitalize())
 
     @classmethod
     def create_default(cls, workspace_dir: str) -> "RuntimeSettings":
@@ -1592,10 +1717,12 @@ class RuntimeSettings:
             idle_timeout_sec=900,
             turn_timeout_sec=0,
             max_ref_chars=MAX_ROUND_SOURCE_CHARS,
+            roster_preset="role_experts",
+            single_cli_concurrency=3,
             agents={
                 "carbon": AgentRoleConfig(
                     agent_id="carbon",
-                    name="Carbon",
+                    name="架构师",
                     title="规划",
                     cli_name="Antigravity CLI",
                     binary_candidates=["agy", "antigravity"],
@@ -1608,7 +1735,7 @@ class RuntimeSettings:
                 ),
                 "grok": AgentRoleConfig(
                     agent_id="grok",
-                    name="Grok",
+                    name="审计官",
                     title="审计",
                     cli_name="Grok CLI",
                     binary_candidates=["grok"],
@@ -1620,7 +1747,7 @@ class RuntimeSettings:
                 ),
                 "astra": AgentRoleConfig(
                     agent_id="astra",
-                    name="Astra",
+                    name="工程师",
                     title="工程",
                     cli_name="Codex CLI",
                     binary_candidates=["codex"],
@@ -1634,8 +1761,11 @@ class RuntimeSettings:
             },
         )
 
-    def inspect_status(self) -> Dict[str, dict]:
-        """三路并发探测所有 CLI 元信息并统一落盘缓存，真实反馈实际运行模型、合法推理档位与预设身份状态。"""
+    def inspect_status(self, force_refresh: bool = False) -> Dict[str, dict]:
+        """三路并发探测所有 CLI 元信息并缓存（5s TTL），实时同步预设/自定义成员名称。"""
+        now_m = time.monotonic()
+        if not force_refresh and self._status_cache is not None and (now_m - self._status_cache_ts) < 5.0:
+            return {k: dict(v) for k, v in self._status_cache.items()}
         items = list(self.agents.items())
         need_parallel = any(
             (cfg.detect_binary(self.allow_single_cli_fallback) or "") != cfg._cached_probe_path
@@ -1698,10 +1828,19 @@ class RuntimeSettings:
 
             pspec = get_persona_spec(cfg.persona, fallback_agent_id=aid)
             cfg.title = pspec["short_tag"]
+            resolved_name = self.resolve_seat_name(
+                aid,
+                eff_drv=eff_drv,
+                eff_model=effective_model,
+                persona_key=pspec["key"],
+            )
+            cfg.name = resolved_name
 
             result[aid] = {
                 "agent_id": aid,
-                "name": cfg.name,
+                "name": resolved_name,
+                "custom_name": cfg.custom_name,
+                "avatar_char": resolved_name[0].upper() if resolved_name else aid[0].upper(),
                 "title": pspec["short_tag"],
                 "persona": pspec["key"],
                 "persona_label": pspec["label"],
@@ -1730,6 +1869,8 @@ class RuntimeSettings:
                 "effective_execution_effort": eff_exec,
                 "lock_discussion_effort": bool(cfg.lock_discussion_effort),
             }
+        self._status_cache = {k: dict(v) for k, v in result.items()}
+        self._status_cache_ts = now_m
         return result
 
 
@@ -2030,14 +2171,31 @@ class UnifiedAgentRunner:
         self._last_seen_msg_idx: Dict[Tuple[str, str], int] = {}
         self._last_persona_by_seat: Dict[Tuple[str, str], str] = {}
         self._injected_refs: Dict[Tuple[str, str], Set[str]] = {}
-        self._binary_semaphores: Dict[str, asyncio.Semaphore] = {}
+        self._binary_semaphores: Dict[Tuple[str, int], asyncio.Semaphore] = {}
+        self._active_raw_procs: Dict[Tuple[str, str], Set[asyncio.subprocess.Process]] = {}
 
-    def _get_binary_semaphore(self, binary_path: str) -> asyncio.Semaphore:
-        sem = self._binary_semaphores.get(binary_path)
+    def _get_binary_semaphore(self, binary_path: str, stateless_shared: bool = False) -> asyncio.Semaphore:
+        cap = (
+            max(1, min(4, int(getattr(self.settings, "single_cli_concurrency", 3) or 3)))
+            if stateless_shared
+            else 3
+        )
+        key = (binary_path, cap)
+        sem = self._binary_semaphores.get(key)
         if sem is None:
-            sem = asyncio.Semaphore(1)
-            self._binary_semaphores[binary_path] = sem
+            sem = asyncio.Semaphore(cap)
+            self._binary_semaphores[key] = sem
         return sem
+
+    def _register_raw_proc(self, seat_key: Tuple[str, str], proc: asyncio.subprocess.Process) -> None:
+        self._active_raw_procs.setdefault(seat_key, set()).add(proc)
+
+    def _unregister_raw_proc(self, seat_key: Tuple[str, str], proc: asyncio.subprocess.Process) -> None:
+        bucket = self._active_raw_procs.get(seat_key)
+        if bucket is not None:
+            bucket.discard(proc)
+            if not bucket:
+                self._active_raw_procs.pop(seat_key, None)
 
     async def prewarm(self) -> None:
         """服务启动后异步预热 1 个空闲 Antigravity 常驻流，供首个匹配席位零延迟认领。"""
@@ -2092,11 +2250,15 @@ class UnifiedAgentRunner:
                 await proc.close()
 
     async def cancel_seat_active_stream(self, session_id: str, agent_id: str) -> None:
-        """单席跳过本轮时安全关闭该席位可能正在阻塞读取的常驻流进程，不影响其余席位。"""
+        """单席跳过本轮时立即终止该席位的常驻流与一次性 CLI 子进程组，释放信号量，绝不阻塞其余席位。"""
         seat_key = (session_id, agent_id)
         proc = self._warm_agy_pool.pop(seat_key, None)
         if proc:
             await proc.close()
+        raw_set = self._active_raw_procs.pop(seat_key, None)
+        if raw_set:
+            for rproc in list(raw_set):
+                _safe_terminate_proc(rproc)
 
     async def shutdown(self) -> None:
         if self._prewarmed_agy:
@@ -2105,6 +2267,10 @@ class UnifiedAgentRunner:
         for proc in list(self._warm_agy_pool.values()):
             await proc.close()
         self._warm_agy_pool.clear()
+        for raw_set in list(self._active_raw_procs.values()):
+            for rproc in list(raw_set):
+                _safe_terminate_proc(rproc)
+        self._active_raw_procs.clear()
 
     @staticmethod
     def _discussion_sandbox_cwd() -> str:
@@ -2174,6 +2340,7 @@ class UnifiedAgentRunner:
                 fallback_paths=list(base_cfg.fallback_paths),
                 driver=drv,
                 persona=persona_val if persona_val in PERSONA_PRESETS else base_cfg.persona,
+                custom_name=base_cfg.custom_name,
                 custom_binary=custom_bin,
                 model=model_val,
                 discussion_effort=disc_eff,
@@ -2268,17 +2435,13 @@ class UnifiedAgentRunner:
         return "\n".join(lines)
 
     @staticmethod
-    def _format_whiteboard_for_prompt(whiteboard: dict) -> str:
-        """
-        拼装三区结构化白板上下文摘要：
-        - 将 kind == "decision"（含主持约束与已确认共识）置顶标记为【已锁定会议共识与硬约束（后续分析须严格遵循）】；
-        - 未置顶的 risk / action 条目保留合理软上限防止撑爆上下文；
-        - 平滑兼容旧版仅含纯字符串数组的会话白板。
-        """
+    def _format_whiteboard_for_prompt(whiteboard: dict, seat_names: Optional[Dict[str, str]] = None) -> str:
+        """拼装三区结构化白板上下文摘要，支持动态成员称呼映射。"""
+        dyn = seat_names or {}
         seat_labels = {
-            "carbon": "Carbon",
-            "grok": "Grok",
-            "astra": "Astra",
+            "carbon": dyn.get("carbon") or "架构师",
+            "grok": dyn.get("grok") or "审计官",
+            "astra": dyn.get("astra") or "工程师",
             "chair": "主持",
             "system": "系统",
         }
@@ -2377,8 +2540,13 @@ class UnifiedAgentRunner:
         extra_ref_block: str = "",
         shared_cli_roster: str = "",
         collab_mode_key: str = "",
+        seat_names_map: Optional[Dict[str, str]] = None,
     ) -> str:
-        seat_names = {"carbon": "Carbon", "grok": "Grok", "astra": "Astra"}
+        seat_names = {
+            "carbon": (seat_names_map or {}).get("carbon") or "架构师",
+            "grok": (seat_names_map or {}).get("grok") or "审计官",
+            "astra": (seat_names_map or {}).get("astra") or "工程师",
+        }
         seat_display = seat_names.get(agent_id, agent_id.capitalize())
         pspec = get_persona_spec(persona_key, fallback_agent_id=agent_id)
         role_header = f"你是圆桌席位中的 {seat_display}，当前担任【{pspec['label']}】。{pspec['prompt']}"
@@ -2401,7 +2569,7 @@ class UnifiedAgentRunner:
             )
 
         constraints = "；".join(whiteboard.get("chair_constraints", [])) or "无"
-        wb_digest = cls._format_whiteboard_for_prompt(whiteboard)
+        wb_digest = cls._format_whiteboard_for_prompt(whiteboard, seat_names=seat_names)
         quality_constraint = (
             "请简明分点直出关键要点、核心风险与明确动作；严禁客套寒暄与无效复述，确保每条具备实质信息增量"
             if is_rapid and stage != "synthesis"
@@ -2464,7 +2632,7 @@ class UnifiedAgentRunner:
                 f"【当前环节：交叉质询（证伪与边界审计协议）】严禁出现“同意/赞同/说得好/整体可行/补充一点”等附和套话，禁止复述已达成观点！"
                 f"必须严格执行：1) 对存在分歧的设计列出 `方案 A vs 方案 B` 的工程代价对比与具体失效反例；"
                 f"2) 对已达成共识的模块补充极端异常边界或量化验收条件；"
-                f"3) 鼓励使用 @Carbon / @Grok / @Astra 定向提出尖锐质询（并在末尾标记的点名栏写明被质询席位）。{cue_note}"
+                f"3) 鼓励使用 @{seat_names['carbon']} / @{seat_names['grok']} / @{seat_names['astra']} 定向提出尖锐质询（并在末尾标记的点名栏写明被质询席位）。{cue_note}"
             ),
             "rebuttal": (
                 f"【当前环节：定向答辩】你在上一轮交叉质询中被点名质询{cue_note}。"
@@ -2526,7 +2694,7 @@ class UnifiedAgentRunner:
         }
         stage_desc = stage_desc_map.get(stage, f"【当前环节：会议研讨】{cue_note}")
 
-        mention_hint = "无" if is_solo_mode else "@Carbon或@Grok或@Astra或无"
+        mention_hint = "无" if is_solo_mode else f"@{seat_names['carbon']}或@{seat_names['grok']}或@{seat_names['astra']}或无"
         tail_rule = (
             f"{quality_constraint}；"
             "圆桌讨论阶段仅允许按需精准只读源码（已提供源码或索引骨架的文件请勿全量重复读取；单轮只读查看收敛在 1–3 处最关键代码段以内，禁止全仓遍历扫盘），严禁修改任何磁盘文件，"
@@ -2570,6 +2738,7 @@ class UnifiedAgentRunner:
     def parse_structured_tail_with_kinds(
         cls,
         full_text: str,
+        seat_names: Optional[Dict[str, str]] = None,
     ) -> Tuple[str, str, Optional[str], List[dict], Optional[bool]]:
         """
         独立解析末尾 [白板: 共识=... | 风险=... | 任务=...]（兼容旧版 [白板: 要点1；要点2]）
@@ -2584,10 +2753,29 @@ class UnifiedAgentRunner:
         badge = "发言完成"
         target: Optional[str] = None
 
+        alias_to_aid: Dict[str, str] = {
+            "carbon": "carbon",
+            "grok": "grok",
+            "astra": "astra",
+            "架构师": "carbon",
+            "审计官": "grok",
+            "工程师": "astra",
+            "alpha": "carbon",
+            "beta": "grok",
+            "gamma": "astra",
+            "产品总监": "carbon",
+            "红队审计": "grok",
+            "研发主程": "astra",
+        }
+        if isinstance(seat_names, dict):
+            for k_aid, disp_n in seat_names.items():
+                if k_aid in ("carbon", "grok", "astra") and disp_n and str(disp_n).strip():
+                    alias_to_aid[str(disp_n).strip().lower()] = k_aid
+
         status_pat = re.compile(
             r"\[(?:状态|徽章)[:：]\s*([^\]|｜]+?)"
             r"(?:\s*[|｜]\s*共识[:：]\s*([^\]|｜]+?))?"
-            r"(?:\s*[|｜]\s*点名[:：]\s*@?([A-Za-z\u4e00-\u9fa5]+))?\s*\]\s*$"
+            r"(?:\s*[|｜]\s*点名[:：]\s*@?([A-Za-z0-9_·\-\u4e00-\u9fa5]+))?\s*\]\s*$"
         )
         wb_pat = re.compile(r"\[白板(?:要点)?[:：]\s*([^\]]+)\]\s*$")
         kind_prefix_pat = re.compile(
@@ -2609,7 +2797,7 @@ class UnifiedAgentRunner:
                     elif any(k in raw_cons for k in ("需继续", "分歧", "存疑", "未达成", "继续")):
                         consensus_reached = False
                 raw_target = (m_status.group(3) or "").strip().lower()
-                target = raw_target if raw_target in ("carbon", "grok", "astra") else None
+                target = alias_to_aid.get(raw_target)
                 continue
 
             m_wb = wb_pat.search(working)
@@ -2653,9 +2841,12 @@ class UnifiedAgentRunner:
             break
 
         if target is None:
-            m_at = re.search(r"@(Carbon|Grok|Astra)\b", working, flags=re.IGNORECASE)
-            if m_at:
-                target = m_at.group(1).lower()
+            sorted_aliases = sorted((k for k in alias_to_aid.keys() if len(k) >= 2), key=len, reverse=True)
+            if sorted_aliases:
+                alias_union = "|".join(re.escape(a) for a in sorted_aliases)
+                m_at = re.search(rf"@({alias_union})(?![A-Za-z0-9_])", working, flags=re.IGNORECASE)
+                if m_at:
+                    target = alias_to_aid.get(m_at.group(1).lower())
 
         return working, badge, target, wb_typed_items[:4], consensus_reached
 
@@ -2785,7 +2976,7 @@ class UnifiedAgentRunner:
             effort=cfg.discussion_effort,
             help_text=help_text,
         )
-        sem = self._get_binary_semaphore(bpath)
+        sem = self._get_binary_semaphore(bpath, stateless_shared=is_fb)
         try:
             async def _collect() -> None:
                 async with sem:
@@ -2980,13 +3171,23 @@ class UnifiedAgentRunner:
                 ref_corpus,
                 max_total_chars=ref_budget,
             )
+            use_lightweight_ws = (
+                collab_mode_key != "code_review"
+                and not full_ref_block
+                and not bool(_CODE_TOPIC_HINT_RE.search(f"{topic}\n{cue_instruction}"))
+            )
             ws_snapshot = build_workspace_context_snapshot(
                 eff_ws,
                 reference_texts=ref_corpus,
                 prebuilt_ref_block=full_ref_block,
                 max_ref_chars=ref_budget,
+                lightweight_hint_only=use_lightweight_ws,
             )
 
+        seat_names_now = {
+            aid_k: self.settings.resolve_seat_name(aid_k)
+            for aid_k in ("carbon", "grok", "astra")
+        }
         prompt = self._build_prompt(
             agent_id=agent_id,
             stage=stage,
@@ -3002,6 +3203,7 @@ class UnifiedAgentRunner:
             extra_ref_block=extra_ref_block,
             shared_cli_roster=shared_cli_roster,
             collab_mode_key=collab_mode_key,
+            seat_names_map=seat_names_now,
         )
 
         explicit_ov_model = str(ov.get("model") or "").strip() if ov else ""
@@ -3021,7 +3223,7 @@ class UnifiedAgentRunner:
         chunks: List[str] = []
         bound_ws, real_ws = is_real_bound_workspace(eff_ws)
         discuss_cwd = real_ws if bound_ws else self._discussion_sandbox_cwd()
-        sem = self._get_binary_semaphore(bpath)
+        sem = self._get_binary_semaphore(bpath, stateless_shared=use_stateless)
 
         is_unlimited = bool(ov and ov.get("unlimited_timeout"))
         raw_idle = int(getattr(self.settings, "idle_timeout_sec", 900))
@@ -3130,7 +3332,7 @@ class UnifiedAgentRunner:
             if all_completed_count >= 0:
                 self._last_seen_msg_idx[seen_key] = all_completed_count + 1
 
-        clean_body, badge, target, wb_typed_items, consensus_reached = self.parse_structured_tail_with_kinds(full_raw)
+        clean_body, badge, target, wb_typed_items, consensus_reached = self.parse_structured_tail_with_kinds(full_raw, seat_names=seat_names_now)
         wb_points = [it["text"] for it in wb_typed_items]
         if is_solo_mode or stage == "synthesis" or target == agent_id:
             target = None
@@ -3320,7 +3522,9 @@ class UnifiedAgentRunner:
                 cwd=cwd,
                 env=env,
                 limit=4 * 1024 * 1024,
+                start_new_session=True,
             )
+            self._register_raw_proc(seat_key, proc)
             try:
                 assert proc.stdout is not None
                 emitted = False
@@ -3398,6 +3602,7 @@ class UnifiedAgentRunner:
                     )
                 return
             finally:
+                self._unregister_raw_proc(seat_key, proc)
                 _safe_terminate_proc(proc)
 
         if driver_key == "grok":
@@ -3430,7 +3635,9 @@ class UnifiedAgentRunner:
                 cwd=cwd,
                 env=env,
                 limit=4 * 1024 * 1024,
+                start_new_session=True,
             )
+            self._register_raw_proc(seat_key, proc)
             try:
                 assert proc.stdout is not None
                 emitted = False
@@ -3533,6 +3740,7 @@ class UnifiedAgentRunner:
                     )
                 return
             finally:
+                self._unregister_raw_proc(seat_key, proc)
                 _safe_terminate_proc(proc)
 
         existing_tid = self._codex_threads.get(seat_key) if use_warm else None
@@ -3555,7 +3763,9 @@ class UnifiedAgentRunner:
             cwd=cwd,
             env=env,
             limit=4 * 1024 * 1024,
+            start_new_session=True,
         )
+        self._register_raw_proc(seat_key, proc)
         try:
             assert proc.stdin is not None and proc.stdout is not None
             proc.stdin.write(prompt.encode("utf-8"))
@@ -3642,6 +3852,7 @@ class UnifiedAgentRunner:
                     effort=codex_eff,
                 )
         finally:
+            self._unregister_raw_proc(seat_key, proc)
             _safe_terminate_proc(proc)
 
     @staticmethod
@@ -3664,127 +3875,15 @@ class UnifiedAgentRunner:
             return ""
 
     @staticmethod
-    async def capture_workspace_backup(cwd: str) -> Optional[dict]:
-        """在执行写入工作区前记录当前子目录内跟踪文件的原始内容快照，支持一键安全回滚。"""
-        git_bin = shutil.which("git") or "git"
-        try:
-            proc_chk = await asyncio.create_subprocess_exec(
-                git_bin,
-                "rev-parse",
-                "--is-inside-work-tree",
-                cwd=cwd,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            out_chk, _ = await asyncio.wait_for(proc_chk.communicate(), timeout=2.0)
-            if proc_chk.returncode != 0 or b"true" not in out_chk:
-                return None
-
-            proc_diff = await asyncio.create_subprocess_exec(
-                git_bin,
-                "diff",
-                "--binary",
-                "HEAD",
-                "--",
-                ".",
-                cwd=cwd,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            pre_patch, _ = await asyncio.wait_for(proc_diff.communicate(), timeout=3.0)
-
-            proc_untracked = await asyncio.create_subprocess_exec(
-                git_bin,
-                "ls-files",
-                "--others",
-                "--exclude-standard",
-                "--",
-                ".",
-                cwd=cwd,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            untracked_out, _ = await asyncio.wait_for(proc_untracked.communicate(), timeout=2.0)
-            untracked = [
-                ln.strip()
-                for ln in untracked_out.decode("utf-8", errors="replace").splitlines()
-                if ln.strip()
-            ]
-            return {
-                "cwd": cwd,
-                "pre_patch": pre_patch.decode("utf-8", errors="replace"),
-                "pre_untracked": untracked,
-                "timestamp": time.time(),
-            }
-        except Exception:
-            return None
+    async def capture_workspace_backup(cwd: str) -> Optional[WorkspaceBackup]:
+        return await asyncio.to_thread(WorkspaceBackup.capture, cwd)
 
     @staticmethod
-    async def rollback_workspace_backup(backup: dict) -> Tuple[bool, str]:
-        """恢复执行前的 Git 工作区状态并清理本次执行新增的未跟踪文件。"""
-        cwd = backup.get("cwd", "")
-        if not cwd or not os.path.isdir(cwd):
-            return False, "原工作区目录不存在，无法回滚"
-        git_bin = shutil.which("git") or "git"
+    async def rollback_workspace_backup(backup: WorkspaceBackup) -> Tuple[bool, str]:
         try:
-            proc_reset = await asyncio.create_subprocess_exec(
-                git_bin,
-                "checkout",
-                "--",
-                ".",
-                cwd=cwd,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            await asyncio.wait_for(proc_reset.communicate(), timeout=5.0)
-
-            pre_patch = backup.get("pre_patch", "")
-            if pre_patch.strip():
-                proc_apply = await asyncio.create_subprocess_exec(
-                    git_bin,
-                    "apply",
-                    "--whitespace=nowarn",
-                    "-",
-                    cwd=cwd,
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                assert proc_apply.stdin is not None
-                proc_apply.stdin.write(pre_patch.encode("utf-8"))
-                await proc_apply.stdin.drain()
-                proc_apply.stdin.close()
-                await asyncio.wait_for(proc_apply.wait(), timeout=5.0)
-
-            proc_untracked = await asyncio.create_subprocess_exec(
-                git_bin,
-                "ls-files",
-                "--others",
-                "--exclude-standard",
-                "--",
-                ".",
-                cwd=cwd,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            now_untracked_out, _ = await asyncio.wait_for(proc_untracked.communicate(), timeout=3.0)
-            pre_set = set(backup.get("pre_untracked") or [])
-            removed_cnt = 0
-            for ln in now_untracked_out.decode("utf-8", errors="replace").splitlines():
-                rel = ln.strip()
-                if rel and rel not in pre_set:
-                    full_p = os.path.realpath(os.path.join(cwd, rel))
-                    if full_p.startswith(os.path.realpath(cwd) + os.sep) and os.path.isfile(full_p):
-                        os.remove(full_p)
-                        removed_cnt += 1
-            return True, f"已成功回滚工作区至执行前状态（清理新增文件 {removed_cnt} 个）"
-        except Exception as exc:
-            return False, f"回滚异常：{exc}"
+            return await asyncio.to_thread(backup.restore)
+        except (ValueError, OSError, subprocess.SubprocessError) as exc:
+            return False, f"回滚失败：{exc}"
 
     async def stream_agent_execution(
         self,
@@ -3970,7 +4069,9 @@ class UnifiedAgentRunner:
                     cwd=cwd,
                     env=build_host_env(),
                     limit=4 * 1024 * 1024,
+                    start_new_session=True,
                 )
+                stderr_task = asyncio.create_task(_read_stderr_tail(proc.stderr))
                 try:
                     assert proc.stdout is not None
                     collected: List[str] = []
@@ -4021,6 +4122,8 @@ class UnifiedAgentRunner:
                                         yield {"type": "term_log", "line": f"▶ {act}"}
                                 elif gtype == "error":
                                     stream_err = str(evt.get("message") or evt.get("error") or stream_err)
+                                elif gtype == "end" and evt.get("error"):
+                                    stream_err = str(evt["error"])
                                 continue
                             except json.JSONDecodeError:
                                 pass
@@ -4030,8 +4133,8 @@ class UnifiedAgentRunner:
 
                     rc = await proc.wait()
                     final_txt = "".join(collected).strip()
-                    if not final_txt:
-                        stderr_txt = (await proc.stderr.read()).decode("utf-8", errors="replace").strip() if proc.stderr else ""
+                    if rc or stream_err or not final_txt:
+                        stderr_txt = await stderr_task
                         classified = classify_cli_error(
                             eff_drv,
                             raw_err=stream_err,
@@ -4040,7 +4143,7 @@ class UnifiedAgentRunner:
                             model=cand_model,
                             effort=cand_effort,
                         )
-                        if idx + 1 < len(attempts) and _is_model_or_effort_rejection(classified):
+                        if not collected and idx + 1 < len(attempts) and _is_model_or_effort_rejection(classified):
                             yield {"type": "term_log", "line": "↻ 当前档位受限，自动切换备用模型档位重试..."}
                             continue
                         raise classified
@@ -4061,6 +4164,7 @@ class UnifiedAgentRunner:
                     return
                 finally:
                     _safe_terminate_proc(proc)
+                    stderr_task.cancel()
 
         sandbox_mode = "workspace-write" if allow_workspace_write else "read-only"
         for idx, (cand_model, cand_effort) in enumerate(attempts):
@@ -4080,7 +4184,10 @@ class UnifiedAgentRunner:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
                 env=build_host_env(),
+                start_new_session=True,
+                limit=4 * 1024 * 1024,
             )
+            stderr_task = asyncio.create_task(_read_stderr_tail(proc.stderr))
             try:
                 assert proc.stdin is not None and proc.stdout is not None
                 proc.stdin.write(exec_prompt.encode("utf-8"))
@@ -4090,6 +4197,7 @@ class UnifiedAgentRunner:
                 seen_lengths: Dict[str, int] = {}
                 completed_msg_parts: List[str] = []
                 stream_err = ""
+                turn_failed = False
                 while True:
                     line_b = await proc.stdout.readline()
                     if not line_b:
@@ -4137,6 +4245,7 @@ class UnifiedAgentRunner:
                         elif itype == "error":
                             stream_err = item.get("message") or stream_err
                     elif etype in ("error", "turn.failed"):
+                        turn_failed = etype == "turn.failed" or turn_failed
                         err_obj = evt.get("error")
                         if isinstance(err_obj, dict):
                             err_m = err_obj.get("message") or str(err_obj)
@@ -4147,8 +4256,8 @@ class UnifiedAgentRunner:
 
                 rc = await proc.wait()
                 final_message = "\n\n".join(completed_msg_parts).strip()
-                if not final_message:
-                    stderr_txt = (await proc.stderr.read()).decode("utf-8", errors="replace").strip() if proc.stderr else ""
+                if rc or turn_failed or not final_message:
+                    stderr_txt = await stderr_task
                     classified = classify_cli_error(
                         "codex",
                         raw_err=stream_err,
@@ -4157,7 +4266,7 @@ class UnifiedAgentRunner:
                         model=cand_model,
                         effort=cand_effort,
                     )
-                    if idx + 1 < len(attempts) and _is_model_or_effort_rejection(classified):
+                    if not seen_lengths and idx + 1 < len(attempts) and _is_model_or_effort_rejection(classified):
                         next_m, next_e = attempts[idx + 1]
                         yield {
                             "type": "term_log",
@@ -4183,6 +4292,7 @@ class UnifiedAgentRunner:
                 return
             finally:
                 _safe_terminate_proc(proc)
+                stderr_task.cancel()
 
     async def stream_astra_execution(
         self,
@@ -4205,7 +4315,13 @@ class UnifiedAgentRunner:
             yield ev
 
 
-def parse_structured_tail_with_kinds(full_text: str) -> Tuple[str, List[dict]]:
+def parse_structured_tail_with_kinds(
+    full_text: str,
+    seat_names: Optional[Dict[str, str]] = None,
+) -> Tuple[str, List[dict]]:
     """模块级白板结构化尾标解析辅助函数：返回 (clean_body, wb_typed_items)。"""
-    clean_body, _, _, wb_typed_items, _ = UnifiedAgentRunner.parse_structured_tail_with_kinds(full_text)
+    clean_body, _, _, wb_typed_items, _ = UnifiedAgentRunner.parse_structured_tail_with_kinds(
+        full_text,
+        seat_names=seat_names,
+    )
     return clean_body, wb_typed_items

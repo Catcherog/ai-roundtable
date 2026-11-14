@@ -47,6 +47,7 @@ PY
 
 echo "3/4 正在编译原生 arm64 Cocoa + WKWebView 可执行程序..."
 clang -O2 -fobjc-arc -framework Cocoa -framework WebKit \
+  -mmacosx-version-min=12.0 \
   "${ROOT_DIR}/macos_app/main.m" \
   -o "${MACOS_DIR}/${APP_NAME}"
 
@@ -93,8 +94,7 @@ cat << 'EOF' > "${CONTENTS_DIR}/Info.plist"
 </plist>
 EOF
 
-if command -v codesign >/dev/null 2>&1; then
-  codesign --force --deep -s - "${APP_BUNDLE}" >/dev/null 2>&1 || true
-fi
+codesign --force -s - "${APP_BUNDLE}"
+codesign --verify --deep --strict "${APP_BUNDLE}"
 
 echo "✅ 构建完成: ${APP_BUNDLE}"

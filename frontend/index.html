@@ -129,10 +129,11 @@
         </select>
         <div id="collabModeHint" class="mode-hint">独立立论 → 交叉质询 → 定向答辩 → 架构裁定</div>
         <div class="lineup-preset-grid" id="sidebarLineupPresets">
-          <button type="button" class="lineup-pill active" data-scenario-preset="arch_review" title="深度研讨 · Carbon 架构规划 / Grok 风险审计 / Astra 工程实现">架构评审</button>
-          <button type="button" class="lineup-pill" data-scenario-preset="proposal_debate" title="正反辩证 · Astra 工程实现立论 / Grok 风险审计 / Carbon 架构裁定">方案论证</button>
-          <button type="button" class="lineup-pill" data-scenario-preset="code_diagnosis" title="代码审查 · Carbon 性能与稳定性 / Grok 测试与验证 / Astra 工程实现">源码诊断</button>
-          <button type="button" class="lineup-pill" data-scenario-preset="solo_focus" title="快速合议 · 首席全栈架构独立完成设计与交付">单席专注</button>
+          <button type="button" class="lineup-pill active" data-scenario-preset="arch_review" title="深度研讨 · 架构师 架构规划 / 审计官 风险审计 / 工程师 工程实现">架构评审</button>
+          <button type="button" class="lineup-pill" data-scenario-preset="proposal_debate" title="正反辩证 · 工程师 立论 / 审计官 压力审计 / 架构师 架构裁定">方案论证</button>
+          <button type="button" class="lineup-pill" data-scenario-preset="product_design" title="发散收敛 · 架构师 产品交互 / 审计官 风险审计 / 工程师 全栈架构">产品设计</button>
+          <button type="button" class="lineup-pill" data-scenario-preset="code_diagnosis" title="代码审查 · 架构师 性能与稳定性 / 审计官 测试与验证 / 工程师 工程实现">源码诊断</button>
+          <button type="button" class="lineup-pill lineup-pill-wide" data-scenario-preset="solo_focus" title="快速合议 · 首席全栈架构独立完成设计与交付">单席专注</button>
         </div>
       </div>
 
@@ -797,17 +798,54 @@
           </div>
           <div class="single-cli-triad-bar">
             <div class="triad-bar-info">
-              <strong>单引擎多角色串行模式：</strong>
-              <span>仅需单个可用 CLI，即可按「架构规划 + 风险审计 + 工程实现」无状态串行开展多视角辩证研讨</span>
+              <strong>单引擎多角色无状态模式：</strong>
+              <span>仅需单个可用 CLI，即可按三席独立视角无状态并发/串行开展辩证研讨（支持一键对齐合法档位）</span>
             </div>
             <div class="triad-bar-actions">
-              <select id="singleCliTriadDriver" class="select-input triad-driver-select" title="选择用于串行驱动三席的底层 CLI">
+              <select id="singleCliTriadDriver" class="select-input triad-driver-select" title="选择用于驱动三席的底层 CLI">
                 <option value="auto" selected>自动选用已就绪 CLI</option>
                 <option value="agy">Antigravity CLI (agy)</option>
                 <option value="codex">Codex CLI (codex)</option>
                 <option value="grok">Grok CLI (grok)</option>
               </select>
+              <select id="cfgSingleCliConcurrency" class="select-input triad-conc-select" title="同引擎无状态多席位并发度（遇 429 限流可调为串行 1）">
+                <option value="3" selected>3 席并发（极速）</option>
+                <option value="2">2 席并发（均衡）</option>
+                <option value="1">串行 1（防限流）</option>
+              </select>
               <button type="button" id="quickSingleCliTriadBtn" class="mini-primary-btn triad-apply-btn">应用单引擎多角色配置</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 上半区 4：会议成员称呼方案与自定义名称 -->
+        <div class="modal-section-card">
+          <div class="modal-sec-head">
+            <span class="modal-sec-title">会议成员称呼方案与自定义名称</span>
+            <span class="modal-sec-hint">支持一键预设或自定义三席显示名称（同步作用于消息流、白板与 @点名）</span>
+          </div>
+          <div class="roster-cfg-grid">
+            <div class="roster-preset-col">
+              <label>成员称呼预设方案</label>
+              <select id="cfgRosterPresetSelect" class="select-input">
+                <option value="role_experts" selected>专业职能称呼（架构师 / 审计官 / 工程师）</option>
+                <option value="council_alpha">中立席位代号（Alpha / Beta / Gamma）</option>
+                <option value="product_studio">产品研发委员会（产品总监 / 红队审计 / 研发主程）</option>
+                <option value="auto_driver">跟随底层引擎（自动映射 CLI·职责）</option>
+                <option value="classic">经典默认代号（Carbon / Grok / Astra）</option>
+              </select>
+            </div>
+            <div>
+              <label>席位一自定义名（留空跟预设）</label>
+              <input type="text" id="cfgCarbonName" class="text-input" maxlength="20" placeholder="如：架构师 / 首席规划" />
+            </div>
+            <div>
+              <label>席位二自定义名（留空跟预设）</label>
+              <input type="text" id="cfgGrokName" class="text-input" maxlength="20" placeholder="如：审计官 / 安全红队" />
+            </div>
+            <div>
+              <label>席位三自定义名（留空跟预设）</label>
+              <input type="text" id="cfgAstraName" class="text-input" maxlength="20" placeholder="如：工程师 / 主刀实现" />
             </div>
           </div>
         </div>
@@ -831,7 +869,7 @@
         <div class="agent-cfg-grid">
           <div class="agent-cfg-box cfg-carbon">
             <div class="cfg-box-head">
-              <h4>Carbon 席位</h4>
+              <h4 id="cfgHeadCarbon">架构师（席位一）</h4>
               <span id="cfgStatusCarbon" class="driver-pill">检测中</span>
             </div>
             <div class="cfg-row-2">
@@ -884,7 +922,7 @@
 
           <div class="agent-cfg-box cfg-grok">
             <div class="cfg-box-head">
-              <h4>Grok 席位</h4>
+              <h4 id="cfgHeadGrok">审计官（席位二）</h4>
               <span id="cfgStatusGrok" class="driver-pill">检测中</span>
             </div>
             <div class="cfg-row-2">
@@ -939,7 +977,7 @@
 
           <div class="agent-cfg-box cfg-astra">
             <div class="cfg-box-head">
-              <h4>Astra 席位</h4>
+              <h4 id="cfgHeadAstra">工程师（席位三）</h4>
               <span id="cfgStatusAstra" class="driver-pill">检测中</span>
             </div>
             <div class="cfg-row-2">

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import itertools
 import mimetypes
 import os
 import subprocess
@@ -459,8 +460,16 @@ class AsyncHTTPServer:
                 save_dir = dl_dir if dl_dir.is_dir() else Path(self.orchestrator.settings.workspace_dir)
                 safe_title = "".join(c for c in (sess.title or "会议纪要") if c.isalnum() or c in ("-", "_"))[:20]
                 ts_str = time.strftime("%Y%m%d_%H%M%S", time.localtime())
-                out_file = save_dir / f"AI圆桌_{safe_title or '纪要'}_{ts_str}.md"
-                out_file.write_text(md_content, encoding="utf-8")
+                stem = f"AI圆桌_{safe_title or '纪要'}_{ts_str}"
+                for number in itertools.count(1):
+                    suffix = "" if number == 1 else f"_{number}"
+                    out_file = save_dir / f"{stem}{suffix}.md"
+                    try:
+                        with out_file.open("x", encoding="utf-8") as out:
+                            out.write(md_content)
+                        break
+                    except FileExistsError:
+                        continue
                 await self._send_json(writer, 200, {"ok": True, "saved_path": str(out_file)})
                 return
 
@@ -488,9 +497,9 @@ class AsyncHTTPServer:
             while True:
                 try:
                     pkt = await asyncio.wait_for(queue.get(), timeout=15.0)
-                    ev_name = pkt["event"]
-                    ev_data = json.dumps(pkt["data"], ensure_ascii=False)
-                    writer.write(f"event: {ev_name}\ndata: {ev_data}\n\n".encode("utf-8"))
+                    if pkt is None:
+                        break
+                    writer.write(pkt)
                     await writer.drain()
                 except asyncio.TimeoutError:
                     writer.write(b": ping\n\n")

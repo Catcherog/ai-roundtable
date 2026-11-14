@@ -69,6 +69,15 @@
   --bg-input: rgba(99, 102, 241, 0.04);
   --border-input: rgba(15, 23, 42, 0.13);
   --bg-fade-solid: #fafafd;
+  --msg-surface-grad: linear-gradient(165deg, rgba(255, 255, 255, 0.96) 0%, rgba(246, 247, 253, 0.93) 100%);
+  --msg-head-tint: rgba(91, 91, 214, 0.036);
+  --wb-deck-bg: linear-gradient(180deg, rgba(245, 246, 253, 0.86) 0%, rgba(251, 252, 255, 0.78) 100%);
+  --wb-topic-grad: linear-gradient(145deg, rgba(79, 70, 229, 0.065) 0%, rgba(255, 255, 255, 0.95) 68%);
+  --wb-decision-grad: linear-gradient(165deg, rgba(79, 70, 229, 0.055) 0%, rgba(255, 255, 255, 0.95) 62%);
+  --wb-risk-grad: linear-gradient(165deg, rgba(217, 119, 6, 0.058) 0%, rgba(255, 255, 255, 0.95) 62%);
+  --wb-action-grad: linear-gradient(165deg, rgba(13, 148, 112, 0.058) 0%, rgba(255, 255, 255, 0.95) 62%);
+  --wb-item-surface: rgba(255, 255, 255, 0.88);
+  --wb-empty-well: rgba(91, 91, 214, 0.035);
 
   --shadow-island: 0 16px 38px -12px rgba(30, 41, 59, 0.085), 0 2px 8px rgba(15, 23, 42, 0.03);
   --shadow-card: 0 6px 20px -8px rgba(30, 41, 59, 0.065), 0 1px 3px rgba(15, 23, 42, 0.03);
@@ -117,6 +126,15 @@
   --ribbon-c: #bbf7d0;
   --bg-input: rgba(180, 83, 9, 0.045);
   --bg-fade-solid: #fffdfa;
+  --msg-surface-grad: linear-gradient(165deg, rgba(255, 253, 249, 0.97) 0%, rgba(249, 243, 233, 0.93) 100%);
+  --msg-head-tint: rgba(180, 83, 9, 0.042);
+  --wb-deck-bg: linear-gradient(180deg, rgba(250, 244, 234, 0.88) 0%, rgba(255, 252, 246, 0.8) 100%);
+  --wb-topic-grad: linear-gradient(145deg, rgba(180, 83, 9, 0.07) 0%, rgba(255, 253, 249, 0.96) 68%);
+  --wb-decision-grad: linear-gradient(165deg, rgba(55, 73, 184, 0.055) 0%, rgba(255, 253, 249, 0.96) 62%);
+  --wb-risk-grad: linear-gradient(165deg, rgba(194, 65, 12, 0.062) 0%, rgba(255, 253, 249, 0.96) 62%);
+  --wb-action-grad: linear-gradient(165deg, rgba(15, 118, 110, 0.058) 0%, rgba(255, 253, 249, 0.96) 62%);
+  --wb-item-surface: rgba(255, 252, 246, 0.9);
+  --wb-empty-well: rgba(180, 83, 9, 0.038);
 }
 
 [data-theme="light"][data-palette="glacier"] {
@@ -162,6 +180,15 @@
   --ribbon-c: #99f6e4;
   --bg-input: rgba(37, 99, 235, 0.045);
   --bg-fade-solid: #fafdff;
+  --msg-surface-grad: linear-gradient(165deg, rgba(255, 255, 255, 0.97) 0%, rgba(240, 247, 255, 0.93) 100%);
+  --msg-head-tint: rgba(37, 99, 235, 0.04);
+  --wb-deck-bg: linear-gradient(180deg, rgba(239, 246, 254, 0.88) 0%, rgba(249, 252, 255, 0.8) 100%);
+  --wb-topic-grad: linear-gradient(145deg, rgba(37, 99, 235, 0.068) 0%, rgba(255, 255, 255, 0.96) 68%);
+  --wb-decision-grad: linear-gradient(165deg, rgba(37, 99, 235, 0.058) 0%, rgba(255, 255, 255, 0.96) 62%);
+  --wb-risk-grad: linear-gradient(165deg, rgba(217, 119, 6, 0.058) 0%, rgba(255, 255, 255, 0.96) 62%);
+  --wb-action-grad: linear-gradient(165deg, rgba(13, 148, 136, 0.06) 0%, rgba(255, 255, 255, 0.96) 62%);
+  --wb-item-surface: rgba(255, 255, 255, 0.9);
+  --wb-empty-well: rgba(37, 99, 235, 0.038);
 }
 
 [data-theme="light"][data-palette="sage"] {
@@ -207,6 +234,15 @@
   --ribbon-c: #fde68a;
   --bg-input: rgba(5, 150, 105, 0.045);
   --bg-fade-solid: #fbfefc;
+  --msg-surface-grad: linear-gradient(165deg, rgba(253, 255, 254, 0.97) 0%, rgba(239, 247, 243, 0.93) 100%);
+  --msg-head-tint: rgba(5, 150, 105, 0.042);
+  --wb-deck-bg: linear-gradient(180deg, rgba(238, 246, 242, 0.88) 0%, rgba(249, 253, 251, 0.8) 100%);
+  --wb-topic-grad: linear-gradient(145deg, rgba(13, 138, 99, 0.068) 0%, rgba(253, 255, 254, 0.96) 68%);
+  --wb-decision-grad: linear-gradient(165deg, rgba(2, 132, 199, 0.056) 0%, rgba(253, 255, 254, 0.96) 62%);
+  --wb-risk-grad: linear-gradient(165deg, rgba(180, 83, 9, 0.058) 0%, rgba(253, 255, 254, 0.96) 62%);
+  --wb-action-grad: linear-gradient(165deg, rgba(5, 150, 105, 0.062) 0%, rgba(253, 255, 254, 0.96) 62%);
+  --wb-item-surface: rgba(255, 255, 255, 0.9);
+  --wb-empty-well: rgba(5, 150, 105, 0.038);
 }
 
 [data-theme="dark"] {
@@ -266,6 +302,15 @@
   --bg-input: rgba(255, 255, 255, 0.05);
   --border-input: rgba(255, 255, 255, 0.14);
   --bg-fade-solid: #161c29;
+  --msg-surface-grad: linear-gradient(165deg, rgba(24, 31, 46, 0.95) 0%, rgba(18, 24, 36, 0.93) 100%);
+  --msg-head-tint: rgba(148, 163, 184, 0.055);
+  --wb-deck-bg: linear-gradient(180deg, rgba(16, 21, 32, 0.88) 0%, rgba(20, 26, 39, 0.84) 100%);
+  --wb-topic-grad: linear-gradient(145deg, rgba(99, 102, 241, 0.12) 0%, rgba(22, 28, 42, 0.95) 70%);
+  --wb-decision-grad: linear-gradient(165deg, rgba(96, 165, 250, 0.095) 0%, rgba(22, 28, 42, 0.95) 65%);
+  --wb-risk-grad: linear-gradient(165deg, rgba(251, 191, 36, 0.088) 0%, rgba(22, 28, 42, 0.95) 65%);
+  --wb-action-grad: linear-gradient(165deg, rgba(52, 211, 153, 0.09) 0%, rgba(22, 28, 42, 0.95) 65%);
+  --wb-item-surface: rgba(28, 35, 52, 0.86);
+  --wb-empty-well: rgba(255, 255, 255, 0.03);
 
   --shadow-island: 0 18px 42px rgba(0, 0, 0, 0.42);
   --shadow-card: 0 6px 20px rgba(0, 0, 0, 0.28);
@@ -4699,4 +4744,206 @@ body {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* ==================== AI_ROUNDTABLE_V2_UPGRADE_20261114: 消息框、右侧白板与全预设视觉细化 ==================== */
+
+.lineup-pill.lineup-pill-wide {
+  grid-column: span 2;
+}
+
+/* 消息框：告别整块纯白，加入微渐变磨砂底纹 + 角色左上柔光晕 + 顶栏细分割带 */
+.msg-card {
+  background: var(--msg-surface-grad);
+  border: 1px solid var(--border-subtle);
+  box-shadow: inset 0 1px 0 var(--island-highlight), var(--shadow-card);
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.msg-card:hover {
+  border-color: var(--border-strong);
+}
+
+.msg-card.speaker-carbon {
+  background:
+    radial-gradient(420px 140px at 0% 0%, var(--carbon-bg), transparent 72%),
+    var(--msg-surface-grad);
+}
+
+.msg-card.speaker-grok {
+  background:
+    radial-gradient(420px 140px at 0% 0%, var(--grok-bg), transparent 72%),
+    var(--msg-surface-grad);
+}
+
+.msg-card.speaker-astra {
+  background:
+    radial-gradient(420px 140px at 0% 0%, var(--astra-bg), transparent 72%),
+    var(--msg-surface-grad);
+}
+
+.msg-card:not(.speaker-chair) .msg-header {
+  margin: -5px -8px 2px;
+  padding: 5px 8px 8px;
+  border-radius: 9px;
+  background: var(--msg-head-tint);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.msg-card.msg-resolution-card {
+  background:
+    radial-gradient(520px 180px at 50% 0%, var(--astra-bg), transparent 74%),
+    var(--msg-surface-grad);
+}
+
+/* 右侧会议白板：分层甲板底色 + 四卡片独立低饱和语义晕染 + 条目左侧色标 + 空态微槽 */
+.right-workbench {
+  background: var(--wb-deck-bg);
+}
+
+.wb-toolbar {
+  padding: 5px 8px;
+  border-radius: 10px;
+  background: var(--bg-panel-solid);
+  border: 1px solid var(--border-subtle);
+}
+
+.wb-card.wb-topic-card {
+  background: var(--wb-topic-grad);
+  border-color: var(--border-strong);
+  box-shadow: inset 0 1px 0 var(--island-highlight), 0 3px 10px -6px rgba(15, 23, 42, 0.06);
+}
+
+.wb-card.wb-zone-decision {
+  background: var(--wb-decision-grad);
+  box-shadow: inset 0 1px 0 var(--island-highlight), 0 3px 10px -6px rgba(15, 23, 42, 0.05);
+}
+
+.wb-card.wb-zone-risk {
+  background: var(--wb-risk-grad);
+  box-shadow: inset 0 1px 0 var(--island-highlight), 0 3px 10px -6px rgba(15, 23, 42, 0.05);
+}
+
+.wb-card.wb-zone-action {
+  background: var(--wb-action-grad);
+  box-shadow: inset 0 1px 0 var(--island-highlight), 0 3px 10px -6px rgba(15, 23, 42, 0.05);
+}
+
+.wb-card-header {
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.wb-empty-tip {
+  background: var(--wb-empty-well);
+  border: 1px dashed var(--border-subtle);
+  border-radius: 9px;
+  padding: 8px 10px;
+  color: var(--text-muted);
+}
+
+.wb-pool-item {
+  position: relative;
+  background: var(--wb-item-surface);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.03);
+  border-left-width: 3px;
+}
+
+#wbDecisionList .wb-pool-item {
+  border-left-color: var(--accent-primary);
+}
+
+#wbRiskList .wb-pool-item {
+  border-left-color: var(--grok-color);
+}
+
+#wbActionList .wb-pool-item {
+  border-left-color: var(--astra-color);
+}
+
+/* 五大场景预设顶栏与引导舱氛围微联动 */
+[data-active-scenario="proposal_debate"] .stage-header {
+  box-shadow: inset 0 1.5px 0 var(--grok-border), var(--shadow-island);
+}
+[data-active-scenario="product_design"] .stage-header {
+  box-shadow: inset 0 1.5px 0 var(--chair-border), var(--shadow-island);
+}
+[data-active-scenario="code_diagnosis"] .stage-header {
+  box-shadow: inset 0 1.5px 0 var(--astra-border), var(--shadow-island);
+}
+[data-active-scenario="solo_focus"] .stage-header {
+  box-shadow: inset 0 1.5px 0 var(--border-strong), var(--shadow-island);
+}
+
+.mention-btn.is-mentioned {
+  background: var(--carbon-bg);
+  border-color: var(--carbon-color);
+  color: var(--carbon-color);
+  font-weight: 750;
+}
+
+/* 成员称呼预设与席位浮层快速改名样式 */
+.roster-cfg-grid {
+  display: grid;
+  grid-template-columns: 1.35fr 1fr 1fr 1fr;
+  gap: 8px;
+  align-items: end;
+}
+
+.roster-cfg-grid label {
+  display: block;
+  font-size: 11.2px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+  font-weight: 650;
+}
+
+@media (max-width: 780px) {
+  .roster-cfg-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.triad-conc-select {
+  width: auto;
+  min-width: 126px;
+  padding: 5.5px 9px;
+}
+
+.seat-pop-rename-box {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 9px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+}
+
+.seat-pop-rename-inp {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-panel-solid);
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--text-primary);
+  outline: none;
+}
+
+.seat-pop-rename-inp:focus {
+  border-color: var(--accent-primary);
+}
+
+.seat-pop-rename-btn {
+  background: var(--accent-primary);
+  color: #fff;
+  border: none;
+  border-radius: 7px;
+  padding: 4px 9px;
+  font-size: 11.2px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
 }

@@ -49,15 +49,7 @@ static NSString *escapeHtmlString(NSString *raw) {
     return s;
 }
 
-static NSString *escapeJsSingleQuoted(NSString *raw) {
-    if (!raw) return @"";
-    NSString *s = [raw stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"];
-    s = [s stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"];
-    s = [s stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
-    return s;
-}
-
-@interface AppDelegate : NSObject <NSApplicationDelegate, WKUIDelegate, WKNavigationDelegate, WKScriptMessageHandler, NSWindowDelegate>
+@interface AppDelegate : NSObject <NSApplicationDelegate, WKUIDelegate, WKNavigationDelegate, WKScriptMessageHandlerWithReply, NSWindowDelegate>
 @property (nonatomic, strong) NSWindow *window;
 @property (nonatomic, strong) WKWebView *webView;
 @property (nonatomic, assign) pid_t serverPid;
@@ -150,6 +142,10 @@ static NSString *escapeJsSingleQuoted(NSString *raw) {
 
 - (void)openNativeFolderSheet:(id)sender {
     [self ensureWindowVisible];
+    [self.webView evaluateJavaScript:@"window.__roundtableMenu && window.__roundtableMenu('pickFolder')" completionHandler:nil];
+}
+
+- (void)chooseFolderWithCompletion:(void (^)(NSString *))completion {
     NSOpenPanel *panel = [NSOpenPanel openPanel];
     panel.canChooseFiles = NO;
     panel.canChooseDirectories = YES;
@@ -163,25 +159,29 @@ static NSString *escapeJsSingleQuoted(NSString *raw) {
         if (result == NSModalResponseOK && panel.URL.path.length > 0) {
             chosen = panel.URL.path;
         }
-        NSString *js = [NSString stringWithFormat:@"window.__onNativeFolderPicked && window.__onNativeFolderPicked('%@')",
-                        escapeJsSingleQuoted(chosen)];
-        [self.webView evaluateJavaScript:js completionHandler:nil];
+        completion(chosen);
     }];
 }
 
 - (void)userContentController:(WKUserContentController *)userContentController
-      didReceiveScriptMessage:(WKScriptMessage *)message {
-    if (![message.name isEqualToString:@"roundtableNative"]) return;
-    if (![message.body isKindOfClass:[NSDictionary class]]) return;
+      didReceiveScriptMessage:(WKScriptMessage *)message
+                 replyHandler:(void (^)(id, NSString *))replyHandler {
+    if (![message.name isEqualToString:@"roundtableNative"] || ![message.body isKindOfClass:[NSDictionary class]]) {
+        replyHandler(nil, @"无效的桌面操作");
+        return;
+    }
     NSDictionary *dict = (NSDictionary *)message.body;
     NSString *action = dict[@"action"];
     if ([action isEqualToString:@"pickFolder"]) {
-        [self openNativeFolderSheet:nil];
+        [self chooseFolderWithCompletion:^(NSString *chosen) { replyHandler(chosen, nil); }];
     } else if ([action isEqualToString:@"retryBoot"]) {
+        replyHandler(nil, nil);
         [self stopBackendProcess];
         [self showBootingScreen];
         [self startEmbeddedBackend];
         [self pollAndLoadFrontend];
+    } else {
+        replyHandler(nil, @"未知的桌面操作");
     }
 }
 
@@ -351,7 +351,7 @@ static NSString *escapeJsSingleQuoted(NSString *raw) {
     [self.window center];
 
     WKWebViewConfiguration *cfg = [[WKWebViewConfiguration alloc] init];
-    [cfg.userContentController addScriptMessageHandler:self name:@"roundtableNative"];
+    [cfg.userContentController addScriptMessageHandlerWithReply:self contentWorld:WKContentWorld.pageWorld name:@"roundtableNative"];
     self.webView = [[WKWebView alloc] initWithFrame:self.window.contentView.bounds configuration:cfg];
     self.webView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     self.webView.UIDelegate = self;
