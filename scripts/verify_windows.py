@@ -78,8 +78,14 @@ async def check(root):
         await terminate_and_reap_process_group(h)
     fixture = project / "node_modules" / "@test" / "tool"
     fixture.mkdir(parents=True);(fixture/"package.json").write_text('{"bin":{"rt":"main.js"}}')
-    (fixture/"main.js").write_text(""); (project/"rt.cmd").write_text("@exit /b 9")
-    assert native_command([str(project/"rt.cmd"),argv[-1]],os.environ.copy())[1:] == [str(fixture/"main.js"),argv[-1]]
+    (fixture/"main.js").write_text(
+        "const a=process.argv.slice(2); if(a.includes('--version'))console.log('fixture 1.0');"
+        "else if(a.includes('--help'))console.log('usage: fixture -p');"
+        "else if(a.includes('-p'))console.log('WINDOWS_ADAPTER_OK'); else process.exit(4);"
+    )
+    (project/"rt.cmd").write_text("@exit /b 9")
+    resolved = native_command([str(project/"rt.cmd"), argv[-1]], os.environ.copy())
+    assert len(resolved) == 3 and Path(resolved[1]).samefile(fixture/"main.js") and resolved[2] == argv[-1], resolved
     marker = project / "tree.json"
     code = ("import json,os,subprocess,sys,time;from pathlib import Path;"
             "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(120)']);"
@@ -114,6 +120,9 @@ async def check(root):
         rc,s=await asyncio.to_thread(request,"/api/config",app.boot_token,{"agents":{"carbon":{"model":"gemini-4-argon","discussion_effort":"medium"}}})
         assert rc==200 and s["system"]["agents"]["carbon"]["model"]=="gemini-4-argon"
         assert json.loads((data/"config.json").read_text(encoding="utf8"))["agents"]["carbon"]["model"]=="gemini-4-argon"
+        rc,s=await asyncio.to_thread(request,"/api/cli/test",app.boot_token,{"agent_id":"carbon","agents":{"carbon":{"driver":"agy","custom_binary":str(project/"rt.cmd")}}})
+        ping=s["results"]["carbon"]
+        assert rc == 200 and ping["ok"] and "WINDOWS_ADAPTER_OK" in ping["reply"], ping
     finally:
         server.close();await server.wait_closed();await app.orchestrator.shutdown()
     print("PASS extracted release API authentication, six seats, saved model and SQLite startup",flush=True)
