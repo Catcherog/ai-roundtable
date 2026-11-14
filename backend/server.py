@@ -270,9 +270,11 @@ class AsyncHTTPServer:
 
         if method == "POST" and path == "/api/sessions":
             data = self._parse_json(body_bytes)
+            raw_auto = data.get("auto_preview_exec")
             sess = self.orchestrator.create_session(
                 title=str(data.get("title", "新会议")),
-                collab_mode=str(data.get("collab_mode", "standard_roundtable")),
+                collab_mode=str(data.get("collab_mode", "deep_deliberation")),
+                auto_preview_exec=bool(raw_auto) if raw_auto is not None else None,
             )
             await self._send_json(
                 writer,
@@ -322,16 +324,20 @@ class AsyncHTTPServer:
                     await self._send_json(writer, 400, {"error": "议题内容不能为空"})
                     return
                 collab_mode = payload.get("collab_mode")
+                raw_auto_exec = payload.get("auto_preview_exec")
                 enabled_agents = payload.get("enabled_agents")
                 seat_personas = payload.get("seat_personas")
+                seat_efforts = payload.get("seat_efforts")
                 executor_agent = str(payload.get("executor_agent", "")).strip().lower() or None
                 reset_history = bool(payload.get("reset_history", False))
                 await self.orchestrator.start_topic_meeting(
                     sess,
                     topic=topic,
                     collab_mode=collab_mode,
+                    auto_preview_exec=bool(raw_auto_exec) if raw_auto_exec is not None else None,
                     enabled_agents=enabled_agents if isinstance(enabled_agents, list) else None,
                     seat_personas=seat_personas if isinstance(seat_personas, dict) else None,
+                    seat_efforts=seat_efforts if isinstance(seat_efforts, dict) else None,
                     executor_agent=executor_agent,
                     reset_history=reset_history,
                 )
@@ -352,9 +358,25 @@ class AsyncHTTPServer:
                 await self._send_json(writer, 200, {"ok": True})
                 return
 
+            if method == "POST" and action == "skip":
+                agent_id = str(payload.get("agent_id", "")).strip().lower()
+                if not agent_id:
+                    await self._send_json(writer, 400, {"error": "缺少跳过席位标识 agent_id"})
+                    return
+                try:
+                    res = await self.orchestrator.skip_agent_turn(sess, agent_id=agent_id)
+                except ValueError as ve:
+                    await self._send_json(writer, 400, {"error": str(ve)})
+                    return
+                await self._send_json(writer, 200, res)
+                return
+
             if method == "POST" and action == "seats":
                 enabled = payload.get("enabled_agents")
                 seat_personas = payload.get("seat_personas")
+                seat_efforts = payload.get("seat_efforts")
+                collab_mode = payload.get("collab_mode")
+                raw_auto_exec = payload.get("auto_preview_exec")
                 executor_agent = str(payload.get("executor_agent", "")).strip().lower() or None
                 if enabled is not None and not isinstance(enabled, list):
                     await self._send_json(writer, 400, {"error": "参会席位列表格式无效"})
@@ -365,6 +387,9 @@ class AsyncHTTPServer:
                         enabled_agents=enabled,
                         seat_personas=seat_personas if isinstance(seat_personas, dict) else None,
                         executor_agent=executor_agent,
+                        seat_efforts=seat_efforts if isinstance(seat_efforts, dict) else None,
+                        collab_mode=str(collab_mode) if collab_mode is not None else None,
+                        auto_preview_exec=bool(raw_auto_exec) if raw_auto_exec is not None else None,
                     )
                 except ValueError as ve:
                     await self._send_json(writer, 400, {"error": str(ve)})
@@ -387,11 +412,21 @@ class AsyncHTTPServer:
             if method == "POST" and action == "retry":
                 agent_id = str(payload.get("agent_id", "")).strip().lower()
                 message_id = str(payload.get("message_id", "")).strip()
+                retry_mode = str(payload.get("mode", "unlimited")).strip().lower() or "unlimited"
                 if not agent_id:
                     await self._send_json(writer, 400, {"error": "缺少重试席位标识 agent_id"})
                     return
-                await self.orchestrator.retry_agent_turn(sess, agent_id=agent_id, message_id=message_id)
-                await self._send_json(writer, 200, {"ok": True})
+                try:
+                    retry_res = await self.orchestrator.retry_agent_turn(
+                        sess,
+                        agent_id=agent_id,
+                        message_id=message_id,
+                        mode=retry_mode,
+                    )
+                except ValueError as ve:
+                    await self._send_json(writer, 400, {"error": str(ve)})
+                    return
+                await self._send_json(writer, 200, retry_res)
                 return
 
             if method == "POST" and action == "conclude":
