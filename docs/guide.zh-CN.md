@@ -1,19 +1,18 @@
 # AI 圆桌使用手册
 
-[返回项目首页](../README.md) · [下载 Mac 版](https://github.com/Catcherog/ai-roundtable/releases/latest/download/AI-Roundtable-macOS-arm64.zip) · [English overview](../README.en.md)
+[返回项目首页](../README.md) · [下载 Windows x64](https://github.com/Catcherog/ai-roundtable/releases/latest/download/AI-Roundtable-Windows-x64.zip) · [下载 Apple 芯片 Mac 版](https://github.com/Catcherog/ai-roundtable/releases/latest/download/AI-Roundtable-macOS-arm64.zip) · [English overview](../README.en.md)
 
 ## 安装与首次打开
 
-发布包适用于 Apple 芯片 Mac。可在苹果菜单的「关于本机」里查看芯片型号。本版二进制的最低构建目标为 macOS 12，发布前的实机验证环境为 Apple 芯片、macOS 27.0.1。桌面窗口启动后，会从登录 shell 的环境启动 Python 本地服务。
+**Windows 10/11 x64**　完整解压 `AI-Roundtable-Windows-x64.zip`，进入 `AI-Roundtable` 文件夹，双击 `AI-Roundtable.exe`。主程序、内置 Python、.NET 和前后端文件需要保存在一起。若首次启动报告缺少 WebView2，请安装微软的 Evergreen 运行时。[微软官方下载](https://developer.microsoft.com/microsoft-edge/webview2/)
 
-1. 在终端运行 `python3 --version`，确认版本为 3.9 或更高。准备并登录一个受支持的 CLI，先直接用它问一个简单的问题，确认当前账号有模型访问权限。
-2. 从发行页下载 `AI-Roundtable-macOS-arm64.zip` 并解压，将 `AI圆桌.app` 拖入「应用程序」。桌面包自带前后端，无须运行编译脚本。
-3. 首次打开可能遇到 macOS 的来源验证提示。本版采用 ad-hoc 签名，尚无 Developer ID 公证。确认文件来自本仓库后，可以按 Apple 的说明在「系统设置 → 隐私与安全性」中允许这一次打开。[Apple 官方说明](https://support.apple.com/zh-cn/102445)
-4. 如需核对下载内容，把发行页的 `SHA256SUMS.txt` 和 ZIP 放进同一目录，在该目录运行 `shasum -a 256 -c SHA256SUMS.txt`。显示 `OK` 表示下载内容与发布时一致。
+**Apple 芯片 Mac**　确认 `python3 --version` 至少为 3.9，解压 `AI-Roundtable-macOS-arm64.zip`，将 `AI圆桌.app` 拖入「应用程序」。首次打开时若遇到来源验证提示，可核对下载来源后参考 Apple 的操作说明。[Apple 官方说明](https://support.apple.com/zh-cn/102445)
+
+两种平台都需要先安装至少一个支持的 CLI 并在终端完成登录。若使用 npm 安装，保留 Node.js 和 CLI 的安装目录。要核对下载文件，可在 Windows 使用 `Get-FileHash 文件名.zip -Algorithm SHA256`，在 macOS 使用 `shasum -a 256 文件名.zip`，对照发行页的 `SHA256SUMS.txt`。
 
 ## 配置 1–6 个席位
 
-按 **⌘,** 打开设置，在「阵容与称呼」选择参会席位，在「席位与模型」设置驱动、模型和推理档位，点「保存配置」。重新打开设置可以查看保存的值。「并发实测连通」会向所选驱动发起真实请求。可用模型取决于 CLI 版本和账号，可执行文件路径可在「驱动与诊断」指定。
+按 **Ctrl+,**（Windows）或 **⌘,**（Mac）打开设置，在「阵容与称呼」选择参会席位，在「席位与模型」设置驱动、模型和推理档位，点「保存配置」。重新打开设置可以查看保存的值。「并发实测连通」会向所选驱动发起真实请求。可用模型取决于 CLI 版本和账号，可执行文件路径可在「驱动与诊断」指定。
 
 | 现有环境 | 配置方法 |
 | --- | --- |
@@ -37,11 +36,15 @@
 
 进入右侧「执行终端」，核对执行席位、绑定的目录和已勾选的任务。默认选中的「只读预演」用于先看实施建议或补丁。开启自动预演也会使用只读模式。
 
-需要实际落盘时，选择「写入工作区」，再启动执行。圆桌为绑定目录建立文件快照，包括子目录和被 Git 忽略的普通文件。Git 项目和普通目录都可以回滚。执行后若有文件又被手动编辑，圆桌会列出冲突并保留当前内容。
+需要实际落盘时，选择「写入工作区」，再启动执行。圆桌为绑定目录建立文件快照，包括子目录和被 Git 忽略的普通文件。Git 项目和普通目录都可以回滚。执行后若有文件又被手动编辑，圆桌会列出冲突并保留当前内容。Windows 遇到目录联接等重解析点会在写入前提示，请使用普通本地项目目录。
 
 快照保存在本机。写入过程意外中断时，重新打开应用后可按恢复提示核对受影响的文件，再决定是否恢复。
 
 ## 源码运行与目录
+
+Windows 使用 PowerShell 7 和 .NET 8 SDK。在仓库根目录运行 `pwsh -File scripts/build_windows.ps1`，产物在 `dist/windows/AI-Roundtable-Windows-x64.zip`。构建时会下载 Python 官方嵌入版和 WebView2 SDK。
+
+在 macOS 上，从源码启动浏览器界面：
 
 ```bash
 git clone https://github.com/Catcherog/ai-roundtable.git
@@ -74,4 +77,4 @@ open ./AI圆桌.app
 
 **桌面版卡在启动页怎么办？** 先在终端检查 `python3 --version`，再查看 `~/.ai-roundtable/backend_boot.log`。页面能开但模型没回复时，优先检查 CLI 登录、模型名称和实际连通测试结果。
 
-**怎样反馈一个能复现的问题？** 在 Issue 里写清 macOS 版本、使用的 CLI、讨论策略、最短操作步骤，以及预期和实际结果。附上脱敏后的错误提示即可。[提交 Issue](https://github.com/Catcherog/ai-roundtable/issues)
+**怎样反馈一个能复现的问题？** 在 Issue 里写清 Windows 或 macOS 版本、使用的 CLI、讨论策略、最短操作步骤，以及预期和实际结果。附上脱敏后的错误提示即可。[提交 Issue](https://github.com/Catcherog/ai-roundtable/issues)

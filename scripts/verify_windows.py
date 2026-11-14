@@ -101,6 +101,29 @@ async def check(root):
         await terminate_and_reap_process_group(h)
     assert not any(running(p) for p in children)
     print("PASS stdin, Unicode argv, shell metacharacters, npm shim, release gate and descendant cleanup",flush=True)
+    # Kill the manager itself while its real child and grandchild are alive.
+    marker.unlink()
+    owner = ("import asyncio,os,sys;from backend.drivers.process_watchdog import spawn_supervised_cli\n"
+             "async def run():\n"
+             " h=await spawn_supervised_cli([sys.executable,'-c',sys.argv[1],sys.argv[2]],cwd=os.getcwd(),env=os.environ.copy())\n"
+             " await asyncio.sleep(60)\n"
+             "asyncio.run(run())")
+    manager = subprocess.Popen([sys.executable,"-c",owner,code,str(marker)],cwd=project)
+    try:
+        for _ in range(150):
+            if marker.exists() and marker.stat().st_size: break
+            await asyncio.sleep(.05)
+        tree = json.loads(marker.read_text())
+        assert all(running(pid) for pid in tree)
+    finally:
+        manager.kill()
+        manager.wait(timeout=8)
+    for _ in range(150):
+        if not any(running(pid) for pid in tree): break
+        await asyncio.sleep(.03)
+    assert not any(running(pid) for pid in tree)
+    print("PASS closing the manager's last Job handle on a crash removed the real process tree",flush=True)
+
 
     # Probe the packaged API without credentials for a hosted model.
     import socket

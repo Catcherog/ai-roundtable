@@ -1,37 +1,45 @@
+<p align="center"><img src="docs/images/app-icon.png" alt="AI Roundtable app icon" width="96" height="96"></p>
+
 # AI Roundtable
 
-A Mac workbench for reviewing a question with an architect, a risk reviewer and an engineer. Watch their replies arrive side by side with a shared whiteboard, ask one seat to defend a claim, then choose which tasks to hand to an execution agent.
+**English** · [简体中文](README.md)
 
-**[Download for Apple silicon](https://github.com/Catcherog/ai-roundtable/releases/latest/download/AI-Roundtable-macOS-arm64.zip)** · [简体中文](README.md) · [Detailed guide in Chinese](docs/guide.zh-CN.md)
+Give one question to 1–6 AI seats on Windows or macOS. Ask an architect to propose a solution, a reviewer to find a counterexample, and an engineer to work out the implementation. Each seat can have its own CLI, model and reasoning effort. Several seats can share one signed-in CLI.
 
-![Three seats discussing a tied vote in the Chinese-language Mac interface, with decisions and risks on the right.](docs/images/roundtable-session.png)
+**[Download for Windows x64](https://github.com/Catcherog/ai-roundtable/releases/latest/download/AI-Roundtable-Windows-x64.zip)** · **[Download for Apple silicon](https://github.com/Catcherog/ai-roundtable/releases/latest/download/AI-Roundtable-macOS-arm64.zip)** · [Release notes and checksums](https://github.com/Catcherog/ai-roundtable/releases/latest)
 
-## Try a meeting
+![Recorded meeting in the Chinese interface. Three seats discuss a tie-breaking rule on the left. Accepted constraints and open risks appear on the whiteboard on the right.](docs/images/roundtable-session.png)
 
-1. On an Apple silicon Mac, check that `python3 --version` reports Python 3.9 or later. Install and sign in to at least one supported AI CLI such as Codex (`codex`), Antigravity (`agy`) or Grok (`grok`).
-2. Unzip the release, drag `AI圆桌.app` into Applications and open it. The release uses an ad-hoc signature and has no Apple notarization. If macOS prompts you about the download, follow [Apple’s instructions](https://support.apple.com/en-us/102445).
-3. Open settings with **⌘,**. Select one to six seats under **阵容与称呼**, choose each seat’s CLI, model and reasoning effort under **席位与模型**, then select **保存配置** to save. **并发实测连通** sends a real connection test. Several seats can share one CLI.
-4. Choose **快速合议** (quick consensus) and ask *“Two fruits tie for first place in a vote. How should we pick a winner? One sentence per seat.”* Click **开始研讨** to start, **形成决议** for the resolution, and **导出 .md** on the whiteboard to export the minutes. The current application interface is in Chinese.
+## What a meeting produces
 
-In the recorded meeting above, the architect suggested one runoff. The reviewer wanted the tie-breaker published before voting. The engineer pointed out that retrying the same draw must return the original winner. All three seats used the same Codex CLI. The final resolution combined those constraints into a single rule.
+In the meeting above, three seats shared one Codex CLI and answered a small question: *How should a fruit poll pick one winner when two fruits tie?* The architect suggested one runoff. The reviewer wanted the rule published before voting. The engineer pointed out that retrying the draw should return the original winner. The final rule covered all three cases.
 
-## Working with a project
+| What you want to do | How the workbench helps |
+| --- | --- |
+| Compare designs or review code | Choose quick consensus, deep deliberation, adversarial review, divergent thinking or code review. Address one seat with `@name` or give everyone the same source lines with a reference such as `@backend/server.py:31-62`. |
+| Keep a reviewable decision | The whiteboard separates agreed constraints, unresolved risks and action items. Edit, accept or deselect items before exporting the decision, tasks and transcript to Markdown. |
+| Hand a task to an execution agent | Start with a read-only preview. When ready, bind a project folder, choose the executing seat, allow writes and optionally supply a verification command. |
 
-- Choose from five discussion formats, including adversarial review, divergent thinking and code review. Use one seat for a focused conversation or give each seat its own driver and role.
-- Bind a project folder and type `@` to select a file. A reference such as `@backend/server.py:31-62` supplies the specified lines to the discussion.
-- During the meeting you can interrupt, question a particular seat, promote a risk to a decision, or uncheck tasks. Export includes the discussion record, decisions, risks and task list.
-- The execution tab starts in read-only preview mode. Select **写入工作区** to allow changes to the bound workspace. The app snapshots files in both Git projects and ordinary directories, including ignored files. Rollback checks for later edits and preserves conflicting files. After an interrupted run, the app can reopen the saved recovery plan.
+## Start your first meeting
 
-The UI, HTTP service and meeting history run locally. Configured CLIs may send prompts and project context to their model providers using your existing account. Provider access and usage charges apply.
+| Platform | Open the app |
+| --- | --- |
+| Windows 10/11 x64 | Extract the whole ZIP and run `AI-Roundtable.exe`. Python and .NET are bundled. The desktop window uses the [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/). |
+| Apple silicon Mac | Drag `AI圆桌.app` into Applications. Python 3.9 or later must be available on your Mac. The release uses an ad-hoc signature. [Apple’s first-open guidance](https://support.apple.com/en-us/102445) |
 
-## Run from source
+1. Install and sign in to at least one supported CLI in your terminal: Antigravity (`agy`), Codex (`codex`) or Grok (`grok`).
+2. Open settings with **Ctrl+,** on Windows or **⌘,** on Mac. Under **阵容与称呼** choose seats. Under **席位与模型** choose their drivers and models, then click **保存配置** to save. **并发实测连通** sends a real connection test.
+3. Select **快速合议** (quick consensus), enter a question and click **开始研讨** (start). Use **形成决议** for a resolution and **导出 .md** to export the minutes. The desktop interface is in Chinese.
 
-```bash
-git clone https://github.com/Catcherog/ai-roundtable.git
-cd ai-roundtable
-bash scripts/start_web.sh
-```
+## How it works
 
-The web entry point opens `http://127.0.0.1:8765` on your Mac. To build the desktop app, install Apple’s Command Line Tools and run `bash scripts/build_macos_app.sh`. The release binary targets macOS 12 or later and was tested on macOS 27.0.1 on Apple silicon.
+- **Parallel seats on one CLI.** Seats that share an executable also share a concurrency limit. Each independent call gets its own temporary directory. In one Mac test, six Gemini CLI processes ran simultaneously and returned all six opening statements in 29.3 seconds. The meeting finished in 57.7 seconds including synthesis. [Test conditions and results](docs/verification.md)
+- **Reconnect without starting over.** Meeting events carry ordered revisions. A window requests the events it missed or loads a snapshot if those events have left the buffer. Messages and whiteboards are stored locally in SQLite.
+- **Rollback checks later edits.** Before a write, the app locks the workspace and records SHA-256 file snapshots. Recovery works in Git projects and ordinary folders, including ignored files. A conflicting edit is preserved and its path is shown for review.
+- **Local orchestration.** WebView2 on Windows and WKWebView on macOS connect to an authenticated loopback service. The selected CLIs send prompts and referenced project context to their respective model providers under your account.
 
-[Release notes and SHA-256 checksum](https://github.com/Catcherog/ai-roundtable/releases/latest) · [Report an issue](https://github.com/Catcherog/ai-roundtable/issues)
+## Build from source
+
+On Windows x64, run `pwsh -File scripts/build_windows.ps1` with the .NET 8 SDK installed. On an Apple silicon Mac with Apple Command Line Tools, run `bash scripts/build_macos_app.sh`. To open the browser interface on a Mac, run `bash scripts/start_web.sh`.
+
+[Detailed Chinese guide](docs/guide.zh-CN.md) · [Report an issue](https://github.com/Catcherog/ai-roundtable/issues)
