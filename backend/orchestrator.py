@@ -4736,7 +4736,11 @@ class RoundtableOrchestrator:
                     wait_deadline = time.monotonic() + 5.0
                     while time.monotonic() < wait_deadline and is_process_group_alive(pgid_val):
                         try:
-                            os.killpg(pgid_val, 9)
+                            if os.name == "nt":
+                                from .drivers.windows_support import stop_job
+                                stop_job(pgid_val)
+                            else:
+                                os.killpg(pgid_val, 9)
                         except OSError:
                             pass
                         await asyncio.sleep(0.03)

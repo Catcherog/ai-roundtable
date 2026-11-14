@@ -16,11 +16,30 @@ import asyncio
 import errno
 import os
 import signal
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
+
+if os.name == "nt":
+    import msvcrt
+    from . import windows_support
+
+
+_WINDOWS_GATE = """
+import msvcrt, os, subprocess, sys
+fd = msvcrt.open_osfhandle(int(sys.argv[1]), os.O_RDONLY | os.O_BINARY)
+try:
+    allowed = os.read(fd, 1) == bytes([1])
+finally:
+    os.close(fd)
+if not allowed:
+    sys.exit(125)
+sys.exit(subprocess.call(sys.argv[2:], stdin=sys.stdin.buffer, stdout=sys.stdout.buffer,
+                         stderr=sys.stderr.buffer, close_fds=True))
+"""
 
 
 _WATCHDOG_INLINE_CODE = r"""
@@ -189,6 +208,34 @@ async def spawn_supervised_cli(
 ) -> SupervisedProcessHandle:
     """拉起带 Pipe-EOF 生命线与独立进程组围栏的受监管 CLI 子进程。"""
     r_fd, w_fd = os.pipe()
+    if os.name == "nt":
+        proc = None
+        try:
+            argv = windows_support.native_command(cmd, env)
+            read_handle = msvcrt.get_osfhandle(r_fd)
+            os.set_handle_inheritable(read_handle, True)
+            startup = subprocess.STARTUPINFO()
+            startup.lpAttributeList = {"handle_list": [read_handle]}
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-I", "-u", "-c", _WINDOWS_GATE, str(read_handle), *argv,
+                stdin=stdin, stdout=stdout, stderr=stderr, cwd=cwd, env=env, limit=limit,
+                startupinfo=startup, creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            windows_support.attach_job(proc.pid)
+            handle = SupervisedProcessHandle(proc, proc.pid, w_fd, wait_release=True)
+            if not wait_release:
+                handle.release_gate()
+            return handle
+        except BaseException:
+            os.close(w_fd)
+            if proc is not None:
+                windows_support.close_job(proc.pid)
+                if proc.returncode is None:
+                    proc.kill()
+                await proc.wait()
+            raise
+        finally:
+            os.close(r_fd)
     os.set_inheritable(r_fd, True)
     os.set_inheritable(w_fd, False)
     wrapped_cmd = [
@@ -240,6 +287,8 @@ def is_process_group_alive(pgid: int) -> bool:
     """检测进程组是否仍有非僵尸态存活成员进程。"""
     if pgid <= 1:
         return False
+    if os.name == "nt":
+        return windows_support.job_alive(pgid)
     try:
         os.kill(-pgid, 0)
     except ProcessLookupError:
@@ -284,6 +333,18 @@ async def terminate_and_reap_process_group(
 
     if handle is not None:
         handle.close_lifeline()
+
+    if os.name == "nt":
+        try:
+            windows_support.stop_job(pgid)
+            if target_proc is not None:
+                await asyncio.wait_for(target_proc.wait(), max_wait_sec)
+            deadline = time.monotonic() + max_wait_sec
+            while is_process_group_alive(pgid) and time.monotonic() < deadline:
+                await asyncio.sleep(0.02)
+        finally:
+            windows_support.close_job(pgid)
+        return
 
     if pgid > 1 and is_process_group_alive(pgid):
         try:

@@ -1,0 +1,40 @@
+name: Windows desktop
+on:
+  push:
+    branches: [main, 'codex/windows-desktop']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 22
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Build portable desktop
+        shell: pwsh
+        run: ./scripts/build_windows.ps1
+      - name: Exercise the extracted release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $extract = Join-Path $env:RUNNER_TEMP '测试 圆桌'
+          Expand-Archive -LiteralPath dist/windows/AI-Roundtable-Windows-x64.zip -DestinationPath $extract
+          $app = Join-Path $extract 'AI-Roundtable'
+          & "$app/runtime/python.exe" -X utf8 scripts/verify_windows.py $app
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/verify_windows_ui.cjs $app
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: dist/windows/AI-Roundtable-Windows-x64.zip
+          compression-level: 0
+          retention-days: 7

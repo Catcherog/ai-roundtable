@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import difflib
 import errno
-import fcntl
 import hashlib
 import json
 import os
@@ -33,6 +32,11 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 
 MAX_BACKUP_WORKSPACE_BYTES = 128 * 1024 * 1024  # 128 MiB 写前准入红线
@@ -83,7 +87,7 @@ def atomic_write_bytes_fsync(target_path: Path, data: bytes, mode: int = 0o600) 
     target_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_name = f".{target_path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
     tmp_path = target_path.parent / tmp_name
-    fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0), mode)
     try:
         view = memoryview(data)
         written = 0
@@ -134,7 +138,7 @@ class WorkspaceWriteLock:
         base = runtime_home or Path(os.environ.get("AI_ROUNDTABLE_HOME") or str(DEFAULT_RUNTIME_HOME))
         locks_dir = base / "locks"
         locks_dir.mkdir(parents=True, exist_ok=True)
-        digest = hashlib.sha256(self.workspace_realpath.encode("utf-8")).hexdigest()
+        digest = hashlib.sha256(os.path.normcase(self.workspace_realpath).encode("utf-8")).hexdigest()
         self.lock_path = locks_dir / f"{digest}.lock"
         self._fd: Optional[int] = None
 
@@ -148,7 +152,12 @@ class WorkspaceWriteLock:
         flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
         fd = os.open(str(self.lock_path), flags, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if os.name == "nt":
+                # Lock a byte beyond the metadata so contenders can still read the holder.
+                os.lseek(fd, 1 << 30, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
             holder = self._read_holder_from_fd(fd)
             try:
@@ -217,7 +226,11 @@ class WorkspaceWriteLock:
         except OSError:
             pass
         try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            if os.name == "nt":
+                os.lseek(fd, 1 << 30, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(fd, fcntl.LOCK_UN)
         except OSError:
             pass
         try:
@@ -259,7 +272,11 @@ def _resolve_symlink_without_escaping(link_full_path: Path, raw_target: str, roo
 def _read_file_nofollow_bytes(full_path: Path) -> Tuple[bytes, os.stat_result]:
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(str(full_path), flags)
+        if os.name == "nt":
+            from .drivers.windows_support import open_regular_file
+            fd = open_regular_file(full_path)
+        else:
+            fd = os.open(str(full_path), flags)
     except PermissionError as exc:
         raise WorkspaceAdmissionError(
             f"工作区包含无读取权限的文件：{full_path.name}",
@@ -435,6 +452,11 @@ class WorkspaceBackup:
                         ) from exc
 
                     mode = lst.st_mode
+                    if os.name == "nt" and lst.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                        raise WorkspaceAdmissionError(
+                            f"Windows 工作区包含重解析点：{rel_posix}。请选择普通本地目录后再执行写入。",
+                            reason="windows_reparse_point", offending_path=rel_posix,
+                        )
                     # 仅跳过 .git 元数据目录本身（保留子模块工作树普通文件与所有 .gitignore 忽略文件）
                     if item.name == ".git" and stat.S_ISDIR(mode):
                         continue

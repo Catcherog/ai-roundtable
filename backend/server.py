@@ -779,14 +779,21 @@ class AsyncHTTPServer:
             self.orchestrator.unsubscribe_session_sse(sess, queue)
 
 
-async def run_async_server(host: str, port: int, workspace_dir: str) -> None:
-    app = AsyncHTTPServer(host=host, port=port, workspace_dir=workspace_dir)
-    server = await asyncio.start_server(
-        app.handle_client,
-        host=host,
-        port=port,
-        limit=max(MAX_REQUEST_LINE_BYTES, MAX_HEADER_LINE_BYTES) + 256,
-    )
+async def run_async_server(host: str, port: int, workspace_dir: str, *, notify_parent: bool = False) -> None:
+    import socket
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        listener.bind((host, port))
+        port = listener.getsockname()[1]
+        app = AsyncHTTPServer(host=host, port=port, workspace_dir=workspace_dir)
+        server = await asyncio.start_server(
+            app.handle_client, sock=listener, limit=max(MAX_REQUEST_LINE_BYTES, MAX_HEADER_LINE_BYTES) + 256,
+        )
+    except BaseException:
+        listener.close()
+        raise
+    if notify_parent:
+        print(f"ROUNDTABLE_PORT={port}", flush=True)
     asyncio.create_task(app.orchestrator.runner.prewarm())
     status = app.orchestrator.get_system_status()
     print("=" * 68, flush=True)
@@ -817,9 +824,13 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1", help="监听地址 (默认 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8765, help="监听端口 (默认 8765)")
     parser.add_argument("--workspace", default=str(ROOT_DIR), help="新建会话默认工作目录")
+    parser.add_argument("--notify-parent", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--wait-for-parent", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.wait_for_parent and sys.stdin.buffer.readline(16).strip() != b"START":
+        return
     try:
-        asyncio.run(run_async_server(args.host, args.port, args.workspace))
+        asyncio.run(run_async_server(args.host, args.port, args.workspace, notify_parent=args.notify_parent))
     except KeyboardInterrupt:
         print("\n服务已关闭。")
 

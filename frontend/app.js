@@ -450,7 +450,7 @@ async function initControlPlaneAuth() {
   }
 
   // 2. macOS 原生 WKWebView 主框架受信任源凭据桥
-  const nativeBridge = window.webkit?.messageHandlers?.roundtableNative;
+  const nativeBridge = window.webkit?.messageHandlers?.roundtableNative || window.roundtableDesktop;
   if (nativeBridge && typeof nativeBridge.postMessage === "function") {
     try {
       const nativeAuth = await nativeBridge.postMessage({ action: "getBootAuth" });
@@ -2462,7 +2462,7 @@ function renderStageAndHeader() {
 
 function renderWorkspaceBadges() {
   const ws = effectiveWorkspacePath();
-  const folderName = ws ? ws.split("/").filter(Boolean).pop() || ws : "";
+  const folderName = ws ? ws.split(/[\\/]/).filter(Boolean).pop() || ws : "";
 
   const headerChip = el("headerWsChip");
   const headerName = el("headerWsName");
@@ -3072,7 +3072,7 @@ async function switchCurrentSessionWorkspace(targetPath) {
 async function pickWorkspaceFolder() {
   const sessionId = state.currentSessionId;
   try {
-    const native = window.webkit?.messageHandlers?.roundtableNative;
+    const native = window.webkit?.messageHandlers?.roundtableNative || window.roundtableDesktop;
     if (native) {
       const chosenPath = await native.postMessage({ action: "pickFolder" });
       if (!chosenPath || sessionId !== state.currentSessionId) return;
@@ -4860,6 +4860,9 @@ window.__roundtableMenu = (action) => {
 };
 
 async function bootstrap() {
+  if (/Win/.test(navigator.platform)) {
+    document.querySelectorAll('[title*="⌘"]').forEach(node => { node.title = node.title.replaceAll("⌘", "Ctrl+"); });
+  }
   applyTheme(localStorage.getItem(STORAGE_KEYS.theme) || "light");
   applyPalette(localStorage.getItem(STORAGE_KEYS.palette) || "pearl");
   applyFontSize(localStorage.getItem(STORAGE_KEYS.fontsize) || "comfort");

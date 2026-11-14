@@ -36,7 +36,11 @@ async def run_post_execution_verification(
         }
 
     try:
-        argv = shlex.split(cleaned)
+        if os.name == "nt":
+            from ..drivers.windows_support import split_command
+            argv = split_command(cleaned)
+        else:
+            argv = shlex.split(cleaned)
     except ValueError as exc:
         return {
             "enabled": True,

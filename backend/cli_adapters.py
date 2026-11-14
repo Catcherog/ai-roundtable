@@ -543,6 +543,15 @@ def build_host_env() -> Dict[str, str]:
     env = os.environ.copy()
     home = os.path.expanduser("~")
 
+    if os.name == "nt":
+        extra = [os.path.join(home, ".local", "bin"), os.path.join(home, ".grok", "bin"),
+                 os.path.join(env.get("APPDATA", home), "npm")]
+        env["PATH"] = os.pathsep.join([env.get("PATH", ""), *(p for p in extra if os.path.isdir(p))])
+        env.pop("AI_ROUNDTABLE_BOOT_TOKEN", None)
+        env.pop("AI_ROUNDTABLE_BOOTSTRAP_CODE", None)
+        _CACHED_HOST_ENV = env.copy()
+        return env
+
     if _CACHED_LOGIN_PATH is None:
         if env.get("AI_ROUNDTABLE_LOGIN_SHELL") == "1":
             _CACHED_LOGIN_PATH = env.get("PATH", "")
@@ -679,12 +688,17 @@ def _binary_stat_signature(binary_path: str) -> str:
 
 def _run_probe_flag(binary_path: str, flag: str, env: Dict[str, str]) -> str:
     try:
+        argv = [binary_path, flag]
+        if os.name == "nt":
+            from .drivers.windows_support import native_command
+            argv = native_command(argv, env)
         out = subprocess.run(
-            [binary_path, flag],
+            argv,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             env=env,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             timeout=6.0,
         )
         return out.stdout.decode("utf-8", errors="replace")
