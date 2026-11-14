@@ -24,6 +24,7 @@ _set_job = _api("SetInformationJobObject", wintypes.BOOL, H, ctypes.c_int, P, D)
 _query_job = _api("QueryInformationJobObject", wintypes.BOOL, H, ctypes.c_int, P, D, P)
 _assign = _api("AssignProcessToJobObject", wintypes.BOOL, H, H)
 _end_job = _api("TerminateJobObject", wintypes.BOOL, H, wintypes.UINT)
+_wait = _api("WaitForSingleObject", D, H, D)
 _close = _api("CloseHandle", wintypes.BOOL, H)
 _open_process = _api("OpenProcess", H, D, wintypes.BOOL, D)
 _create_file = _api("CreateFileW", H, wintypes.LPCWSTR, D, D, P, D, D, H)
@@ -85,6 +86,45 @@ def stop_job(pid):
     job = _jobs.get(pid)
     if job and not _end_job(job, 1):
         raise ctypes.WinError(ctypes.get_last_error())
+
+
+def observe_job_members(pid):
+    """Retain waitable handles before terminating the job. Its accounting may reach zero first."""
+    job = _jobs.get(pid)
+    if not job:
+        return []
+    capacity = 32
+    while True:
+        class Members(ctypes.Structure):
+            _fields_ = [("assigned", D), ("count", D), ("pids", ctypes.c_size_t * capacity)]
+        info = Members()
+        if _query_job(job, 3, ctypes.byref(info), ctypes.sizeof(info), None):
+            break
+        error = ctypes.get_last_error()
+        if error != 234:  # ERROR_MORE_DATA
+            raise ctypes.WinError(error)
+        capacity = max(capacity * 2, info.assigned)
+    handles = []
+    for member in info.pids[:info.count]:
+        handle = _open_process(0x00100000, False, member)  # SYNCHRONIZE
+        if handle:
+            handles.append(handle)
+    return handles
+
+
+def members_exited(handles):
+    for handle in handles:
+        result = _wait(handle, 0)
+        if result == 258:  # WAIT_TIMEOUT
+            return False
+        if result != 0:
+            raise ctypes.WinError(ctypes.get_last_error())
+    return True
+
+
+def release_members(handles):
+    for handle in handles:
+        _close(handle)
 
 
 def close_job(pid):

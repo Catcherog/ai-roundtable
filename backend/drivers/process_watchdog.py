@@ -335,14 +335,18 @@ async def terminate_and_reap_process_group(
         handle.close_lifeline()
 
     if os.name == "nt":
+        members = windows_support.observe_job_members(pgid)
         try:
             windows_support.stop_job(pgid)
             if target_proc is not None:
                 await asyncio.wait_for(target_proc.wait(), max_wait_sec)
             deadline = time.monotonic() + max_wait_sec
-            while is_process_group_alive(pgid) and time.monotonic() < deadline:
+            while is_process_group_alive(pgid) or not windows_support.members_exited(members):
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Windows CLI processes did not finish exiting")
                 await asyncio.sleep(0.02)
         finally:
+            windows_support.release_members(members)
             windows_support.close_job(pgid)
         return
 

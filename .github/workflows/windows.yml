@@ -2,6 +2,7 @@ name: Windows desktop
 on:
   push:
     branches: [main, 'codex/windows-desktop']
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 permissions:
@@ -38,3 +39,26 @@ jobs:
           path: dist/windows/AI-Roundtable-Windows-x64.zip
           compression-level: 0
           retention-days: 7
+  attach:
+    if: github.ref_type == 'tag' && github.event_name == 'push'
+    needs: windows
+    runs-on: windows-2022
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-x64
+          path: dist/windows
+      - name: Attach the tested Windows build to an existing release draft
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $draft = gh release view $env:GITHUB_REF_NAME --json isDraft --jq '.isDraft'
+          if ($LASTEXITCODE -or $draft -ne 'true') { throw 'An existing draft release is required.' }
+          Get-FileHash dist/windows/AI-Roundtable-Windows-x64.zip -Algorithm SHA256
+          gh release upload $env:GITHUB_REF_NAME dist/windows/AI-Roundtable-Windows-x64.zip
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }

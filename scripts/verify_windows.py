@@ -90,16 +90,18 @@ async def check(root):
     code = ("import json,os,subprocess,sys,time;from pathlib import Path;"
             "child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(120)']);"
             "Path(sys.argv[1]).write_text(json.dumps([os.getpid(),child.pid]));time.sleep(120)")
-    h = await spawn_supervised_cli([sys.executable,"-c",code,str(marker)],cwd=str(project),env=os.environ.copy(),wait_release=True)
-    await asyncio.sleep(.15);assert not marker.exists(); h.release_gate()
-    try:
-        for _ in range(100):
-            if marker.exists() and marker.stat().st_size:break
-            await asyncio.sleep(.05)
-        children = json.loads(marker.read_text());assert all(running(p) for p in children)
-    finally:
-        await terminate_and_reap_process_group(h)
-    assert not any(running(p) for p in children)
+    for trial in range(12):
+        marker.unlink(missing_ok=True)
+        h = await spawn_supervised_cli([sys.executable,"-c",code,str(marker)],cwd=str(project),env=os.environ.copy(),wait_release=True)
+        await asyncio.sleep(.15);assert not marker.exists(); h.release_gate()
+        try:
+            for _ in range(100):
+                if marker.exists() and marker.stat().st_size:break
+                await asyncio.sleep(.05)
+            children = json.loads(marker.read_text());assert all(running(p) for p in children)
+        finally:
+            await terminate_and_reap_process_group(h)
+        assert not any(running(p) for p in children)
     print("PASS stdin, Unicode argv, shell metacharacters, npm shim, release gate and descendant cleanup",flush=True)
     # Kill the manager itself while its real child and grandchild are alive.
     marker.unlink()
