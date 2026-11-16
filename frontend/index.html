@@ -3,8 +3,23 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AI圆桌 — 多引擎协同研讨与工程交付工作台</title>
+  <title>AI圆桌 — 多模态协同研讨与工程交付工作台</title>
   <link rel="stylesheet" href="/styles.css" />
+  <link rel="stylesheet" href="/v4_ui.css" />
+  <style>
+    #v4ModePopover #preMeetingModeBar.hidden {
+      display: flex !important;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
+    }
+    #v4ModePopover .pre-meeting-mode-bar {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
+    }
+  </style>
 </head>
 <body>
   <!-- 柔和环境光晕背景 -->
@@ -29,24 +44,50 @@
     </svg>
   </div>
 
+  <!-- 全局文件/截图拖拽磨砂接收蒙层 -->
+  <div id="v4DropOverlay" class="v4-drop-overlay hidden" aria-hidden="true">
+    <div class="v4-drop-card">
+      <div class="v4-drop-icon">
+        <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+          <polyline points="17 8 12 3 7 8"></polyline>
+          <line x1="12" y1="3" x2="12" y2="15"></line>
+        </svg>
+      </div>
+      <div class="v4-drop-title">松手即可添加图片截图或参考文件</div>
+      <div class="v4-drop-sub">自动校验魔数并安全隔离存储（支持 PNG / JPG / WebP / GIF / PDF / Markdown / 代码与日志，不污染项目工作区）</div>
+    </div>
+  </div>
+
+  <!-- 隐藏原生多模态文件选择器（兼容 WKWebView NSOpenPanel 与桌面浏览器） -->
+  <input type="file" id="v4HiddenImageInput" class="hidden" accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml" multiple />
+  <input type="file" id="v4HiddenFileInput" class="hidden" accept="image/*,.pdf,.md,.markdown,.txt,.log,.csv,.tsv,.json,.yaml,.yml,.toml,.xml,.py,.js,.mjs,.ts,.tsx,.jsx,.vue,.svelte,.html,.css,.scss,.m,.mm,.swift,.c,.cc,.cpp,.h,.hpp,.rs,.go,.java,.kt,.rb,.php,.sh,.sql" multiple />
+
   <!-- 默认启用 left-collapsed 72px 紧凑图标轨（点左上图标或按 ⌘B 展开完整侧栏） -->
   <div class="app-shell left-collapsed" id="appShell">
     <!-- 左侧悬浮面板 -->
     <aside class="left-sidebar" id="leftSidebar">
       <div class="brand-bar">
         <div class="brand-logo" id="brandToggleRailBtn" title="点击展开左侧完整面板 (⌘B)">
-          <div class="logo-orb" aria-hidden="true">
-            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="6.5" r="2.8"></circle>
-              <circle cx="6.5" cy="16.5" r="2.8"></circle>
-              <circle cx="17.5" cy="16.5" r="2.8"></circle>
-              <path d="M9.9 8.9L8.1 13.8M14.1 8.9l1.8 4.9M9.4 16.5h5.2" opacity="0.85"></path>
+          <div class="logo-orb v4-logo-orb" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke-linecap="round" stroke-linejoin="round">
+              <defs>
+                <linearGradient id="v4LogoGrad3C" x1="8%" y1="90%" x2="92%" y2="14%">
+                  <stop offset="0%" stop-color="var(--carbon-color)" />
+                  <stop offset="50%" stop-color="var(--astra-color)" />
+                  <stop offset="100%" stop-color="var(--grok-color)" />
+                </linearGradient>
+                <path id="v4TrefoilPath" d="M 12.00 3.55 C 13.57 3.55 15.09 4.82 15.70 6.81 C 16.31 8.80 15.98 11.42 14.73 13.58 C 13.48 15.74 11.38 17.34 9.35 17.80 C 7.32 18.26 5.46 17.59 4.68 16.23 C 3.90 14.87 4.23 12.93 5.65 11.40 C 7.07 9.87 9.51 8.85 12.00 8.85 C 14.49 8.85 16.93 9.87 18.35 11.40 C 19.77 12.93 20.10 14.87 19.32 16.23 C 18.54 17.59 16.68 18.26 14.65 17.80 C 12.62 17.34 10.52 15.74 9.27 13.58 C 8.02 11.42 7.69 8.80 8.30 6.81 C 8.91 4.82 10.43 3.55 12.00 3.55 Z" />
+              </defs>
+              <use href="#v4TrefoilPath" stroke="url(#v4LogoGrad3C)" stroke-width="0.78" opacity="0.52" transform="translate(12 12) scale(1.08) translate(-12 -12)" />
+              <use href="#v4TrefoilPath" stroke="url(#v4LogoGrad3C)" stroke-width="1.25" opacity="0.96" transform="translate(12 12) scale(0.96) translate(-12 -12)" />
+              <use href="#v4TrefoilPath" stroke="url(#v4LogoGrad3C)" stroke-width="0.78" opacity="0.56" transform="translate(12 12) scale(0.84) translate(-12 -12)" />
             </svg>
           </div>
           <span class="brand-rail-hint">展开</span>
           <div class="brand-text-wrap">
             <div class="brand-title">AI圆桌</div>
-            <div class="brand-sub">1–6 席弹性研讨 · 工程交付</div>
+            <div class="brand-sub">多模态协同 · 工程交付</div>
           </div>
         </div>
         <div class="brand-actions">
@@ -64,7 +105,7 @@
       <div class="compact-rail-only">
         <button id="railNewSessionBtn" class="rail-icon-btn" title="新建圆桌会议 (⌘N)">
           <span class="rail-glyph rail-glyph-plus" aria-hidden="true">
-            <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
               <line x1="12" y1="5" x2="12" y2="19"></line>
               <line x1="5" y1="12" x2="19" y2="12"></line>
             </svg>
@@ -89,8 +130,16 @@
           </span>
           <span class="rail-btn-label">项目</span>
         </button>
+        <button id="railAttachQuickBtn" class="rail-icon-btn" title="上传图片截图或本地文件附件 (⌘U)">
+          <span class="rail-glyph" aria-hidden="true">
+            <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
+            </svg>
+          </span>
+          <span class="rail-btn-label">附件</span>
+        </button>
 
-        <button id="railSettingsBtn" class="rail-icon-btn rail-bottom-btn" title="打开分导航设置中心 (⌘,)">
+        <button id="railSettingsBtn" class="rail-icon-btn rail-bottom-btn" title="打开精简三分导航设置中心 (⌘,)">
           <span class="rail-glyph" aria-hidden="true">
             <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
               <circle cx="12" cy="12" r="3"></circle>
@@ -101,7 +150,7 @@
         </button>
       </div>
 
-      <!-- 展开态详细侧栏面板 -->
+      <!-- 展开态详细侧栏面板（已剥离重复模式选择器，专注工作区与历史会话管理） -->
       <div class="workspace-card expanded-sidebar-only" id="workspaceCard">
         <div class="ws-top">
           <span class="ws-label">
@@ -116,10 +165,8 @@
         <div id="workspaceBadge" class="ws-path" title="">尚未绑定本地项目目录</div>
       </div>
 
-      <div class="sidebar-section expanded-sidebar-only">
-        <div class="section-header">
-          <span>讨论策略与 1–6 席场景预设</span>
-        </div>
+      <!-- 兼容保留 DOM 节点供 app.js 双向同步，视觉收口至输入舱策略胶囊防重复 -->
+      <div class="sidebar-section expanded-sidebar-only v4-sidebar-hidden-compat">
         <select id="collabModeSelect" class="select-input">
           <option value="deep_deliberation">深度研讨（独立立论 → 质询答辩）</option>
           <option value="adversarial_review">正反辩证（立论 → 压力审计 → 修正）</option>
@@ -129,12 +176,12 @@
         </select>
         <div id="collabModeHint" class="mode-hint">独立立论 → 交叉质询 → 定向答辩 → 架构裁定</div>
         <div class="lineup-preset-grid" id="sidebarLineupPresets">
-          <button type="button" class="lineup-pill" data-scenario-preset="solo_focus" title="1席 · 单席全栈架构独立推演与交付">单席专注 (1席)</button>
-          <button type="button" class="lineup-pill" data-scenario-preset="duel_review" title="2席 · 全栈立论与反向风险审计双席博弈">双席辩证 (2席)</button>
-          <button type="button" class="lineup-pill active" data-scenario-preset="arch_review" title="3席 · 架构规划 / 风险审计 / 工程实现标准合议">标准三席 (3席)</button>
-          <button type="button" class="lineup-pill" data-scenario-preset="product_quad" title="4席 · 架构 + 产品交互 + 风险审计 + 工程实现">四席产品 (4席)</button>
-          <button type="button" class="lineup-pill" data-scenario-preset="sre_council_5" title="5席 · 增设性能与稳定性 SRE 专项评审">五席高可靠 (5席)</button>
-          <button type="button" class="lineup-pill" data-scenario-preset="full_jury_6" title="6席 · 规划/交互/审计/性能/工程/验证全景评审">六席全景 (6席)</button>
+          <button type="button" class="lineup-pill" data-scenario-preset="solo_focus">单席专注 (1席)</button>
+          <button type="button" class="lineup-pill" data-scenario-preset="duel_review">双席辩证 (2席)</button>
+          <button type="button" class="lineup-pill active" data-scenario-preset="arch_review">标准三席 (3席)</button>
+          <button type="button" class="lineup-pill" data-scenario-preset="product_quad">四席产品 (4席)</button>
+          <button type="button" class="lineup-pill" data-scenario-preset="sre_council_5">五席高可靠 (5席)</button>
+          <button type="button" class="lineup-pill" data-scenario-preset="full_jury_6">六席全景 (6席)</button>
         </div>
       </div>
 
@@ -153,17 +200,9 @@
         <summary class="sidebar-advanced-summary">
           <span class="summary-with-icon">
             <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <line x1="4" y1="21" x2="4" y2="14"></line>
-              <line x1="4" y1="10" x2="4" y2="3"></line>
-              <line x1="12" y1="21" x2="12" y2="12"></line>
-              <line x1="12" y1="8" x2="12" y2="3"></line>
-              <line x1="20" y1="21" x2="20" y2="16"></line>
-              <line x1="20" y1="12" x2="20" y2="3"></line>
-              <line x1="1" y1="14" x2="7" y2="14"></line>
-              <line x1="9" y1="8" x2="15" y2="8"></line>
-              <line x1="17" y1="16" x2="23" y2="16"></line>
+              <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
             </svg>
-            <span>本地引擎与运行策略</span>
+            <span>引擎状态与快捷探活</span>
           </span>
           <span class="fold-caret" aria-hidden="true">▾</span>
         </summary>
@@ -172,7 +211,7 @@
             <span>CLI 引擎状态</span>
             <div class="header-inline-btns">
               <button id="testCliBtn" class="mini-ghost-btn" title="并发发送轻量探活请求检验各席位 CLI 响应延迟">实测连通</button>
-              <button id="openSettingsBtn" class="mini-ghost-btn" title="打开分导航设置中心 (⌘,)">设置中心</button>
+              <button id="openSettingsBtn" class="mini-ghost-btn" title="打开设置中心 (⌘,)">设置中心</button>
             </div>
           </div>
           <div id="cliEngineCards" class="cli-cards"></div>
@@ -192,36 +231,40 @@
                 <line x1="4" y1="18" x2="20" y2="18"></line>
               </svg>
             </button>
-            <button id="headerWsChip" class="ws-header-chip ws-unbound" title="尚未绑定本地项目，点击选择本地项目目录">
-              <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M3.5 6.5a2 2 0 0 1 2-2h4.2l2 2.2h6.8a2 2 0 0 1 2 2v8.8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"></path>
-              </svg>
-              <span id="headerWsName">选择本地项目</span>
-            </button>
+            <div class="ws-header-group">
+              <button id="headerWsChip" class="ws-header-chip ws-unbound" title="尚未绑定本地项目，点击选择本地项目目录">
+                <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M3.5 6.5a2 2 0 0 1 2-2h4.2l2 2.2h6.8a2 2 0 0 1 2 2v8.8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"></path>
+                </svg>
+                <span id="headerWsName">不绑定项目 · 纯研讨</span>
+              </button>
+              <button type="button" id="headerUnbindWsBtn" class="ws-unbind-mini-btn hidden" title="切回不绑定项目 · 纯研讨模式">切回纯研讨</button>
+            </div>
             <span class="stage-pill hidden" id="stageStatusPill"></span>
+            <span class="epistemic-header-pill hidden" id="headerEpistemicBadge" title="当前参会阵容底层模型独立性状态"></span>
             <h1 id="currentTopicTitle" class="topic-heading" title="">新圆桌会议</h1>
           </div>
 
           <div class="stage-actions">
-            <!-- 四阶段流光连接进度条 -->
-            <div class="stage-stepper" id="stageStepper">
-              <div class="step-item" data-step="opening" title="① 独立初评">
-                <span class="step-num">①</span>
+            <!-- 四阶段流光连接进度条（未开局空态自动隐藏降噪） -->
+            <div class="stage-stepper hidden" id="stageStepper">
+              <div class="step-item" data-step="opening" title="1 · 独立初评">
+                <span class="step-num">1</span>
                 <span class="step-label">独立初评</span>
               </div>
               <div class="step-line" data-line-before="discussion"></div>
-              <div class="step-item" data-step="discussion" title="② 交叉质询">
-                <span class="step-num">②</span>
+              <div class="step-item" data-step="discussion" title="2 · 交叉质询">
+                <span class="step-num">2</span>
                 <span class="step-label">交叉质询</span>
               </div>
               <div class="step-line" data-line-before="consensus"></div>
-              <div class="step-item" data-step="consensus" title="③ 形成决议">
-                <span class="step-num">③</span>
+              <div class="step-item" data-step="consensus" title="3 · 形成决议">
+                <span class="step-num">3</span>
                 <span class="step-label">形成决议</span>
               </div>
               <div class="step-line" data-line-before="execution"></div>
-              <div class="step-item" data-step="execution" title="④ 执行交付">
-                <span class="step-num">④</span>
+              <div class="step-item" data-step="execution" title="4 · 执行交付">
+                <span class="step-num">4</span>
                 <span class="step-label">执行交付</span>
               </div>
             </div>
@@ -229,12 +272,12 @@
             <!-- 外观浮层菜单 -->
             <div class="appearance-menu-wrap" id="appearanceMenuWrap">
               <button type="button" id="appearanceBtn" class="icon-btn" title="切换主题、浅色色系与阅读字号" aria-expanded="false">
-                <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                  <circle cx="12" cy="12" r="9"></circle>
-                  <path d="M12 3a9 9 0 0 0 0 18V3z" opacity="0.35"></path>
+                <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="10" cy="12" r="6.2"></circle>
+                  <circle cx="14.5" cy="12" r="5.2"></circle>
                 </svg>
                 <span>外观</span>
-                <span class="caret-mini" aria-hidden="true">▾</span>
+                <svg class="caret-svg" viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg>
               </button>
               <div id="appearancePopover" class="appearance-popover hidden" role="menu">
                 <div class="app-pop-section">
@@ -249,7 +292,7 @@
                   <div class="app-palette-list" id="paletteOptionList">
                     <button type="button" class="app-palette-item active" data-palette-opt="pearl">
                       <span class="palette-swatch swatch-pearl"></span>
-                      <span>珍珠极昼</span>
+                      <span>珍珠雾紫</span>
                     </button>
                     <button type="button" class="app-palette-item" data-palette-opt="alabaster">
                       <span class="palette-swatch swatch-alabaster"></span>
@@ -287,11 +330,11 @@
           </div>
         </div>
 
-        <!-- 次顶栏 1–6 席弹性圆桌胶囊条：点击胶囊主体插入 @点名；点击 [职责标签 ▾] 弹出席位快捷配置 -->
+        <!-- 次顶栏 1–6 席弹性圆桌胶囊条（v4 专属语义矢量徽标，告别单字母圆点） -->
         <div class="roundtable-ring" id="roundtableRing">
           <div class="seat-card seat-carbon" id="seat-carbon" data-agent-seat="carbon">
             <div class="seat-avatar-wrap">
-              <div class="seat-avatar">C</div>
+              <div class="seat-avatar" data-seat-icon="carbon"></div>
               <div class="voice-bars"><span></span><span></span><span></span></div>
             </div>
             <div class="seat-meta">
@@ -310,7 +353,7 @@
 
           <div class="seat-card seat-grok" id="seat-grok" data-agent-seat="grok">
             <div class="seat-avatar-wrap">
-              <div class="seat-avatar">G</div>
+              <div class="seat-avatar" data-seat-icon="grok"></div>
               <div class="voice-bars"><span></span><span></span><span></span></div>
             </div>
             <div class="seat-meta">
@@ -329,7 +372,7 @@
 
           <div class="seat-card seat-astra" id="seat-astra" data-agent-seat="astra">
             <div class="seat-avatar-wrap">
-              <div class="seat-avatar">A</div>
+              <div class="seat-avatar" data-seat-icon="astra"></div>
               <div class="voice-bars"><span></span><span></span><span></span></div>
             </div>
             <div class="seat-meta">
@@ -348,7 +391,7 @@
 
           <div class="seat-card seat-vega seat-unmounted" id="seat-vega" data-agent-seat="vega">
             <div class="seat-avatar-wrap">
-              <div class="seat-avatar">V</div>
+              <div class="seat-avatar" data-seat-icon="vega"></div>
               <div class="voice-bars"><span></span><span></span><span></span></div>
             </div>
             <div class="seat-meta">
@@ -367,7 +410,7 @@
 
           <div class="seat-card seat-titan seat-unmounted" id="seat-titan" data-agent-seat="titan">
             <div class="seat-avatar-wrap">
-              <div class="seat-avatar">T</div>
+              <div class="seat-avatar" data-seat-icon="titan"></div>
               <div class="voice-bars"><span></span><span></span><span></span></div>
             </div>
             <div class="seat-meta">
@@ -386,7 +429,7 @@
 
           <div class="seat-card seat-prism seat-unmounted" id="seat-prism" data-agent-seat="prism">
             <div class="seat-avatar-wrap">
-              <div class="seat-avatar">P</div>
+              <div class="seat-avatar" data-seat-icon="prism"></div>
               <div class="voice-bars"><span></span><span></span><span></span></div>
             </div>
             <div class="seat-meta">
@@ -405,7 +448,7 @@
 
           <div class="seat-card seat-chair">
             <div class="seat-avatar-wrap">
-              <div class="seat-avatar">主</div>
+              <div class="seat-avatar" data-seat-icon="chair"></div>
             </div>
             <div class="seat-meta">
               <div class="seat-name-row">
@@ -416,7 +459,16 @@
             </div>
           </div>
 
-          <button type="button" id="ringLineupQuickBtn" class="ring-lineup-btn" title="快速增减 1–6 参会席位或切换阵容">
+          <button type="button" id="ringHeterogeneousBtn" class="ring-hetero-btn hidden" title="检测到本机已安装多个不同 CLI 驱动，一键按席位分配独立异构引擎">
+            <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="16 3 21 3 21 8"></polyline>
+              <line x1="4" y1="20" x2="21" y2="3"></line>
+              <polyline points="21 16 21 21 16 21"></polyline>
+              <line x1="15" y1="15" x2="21" y2="21"></line>
+            </svg>
+            <span>异构混编推荐</span>
+          </button>
+          <button type="button" id="ringLineupQuickBtn" class="ring-lineup-btn" title="快速增减 1–6 参会席位或打开配置中心">
             <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
               <circle cx="9" cy="7" r="3"></circle>
               <circle cx="17" cy="9" r="2.5"></circle>
@@ -431,125 +483,189 @@
       <!-- 实时研讨阅读流 -->
       <div class="chat-stream-wrap">
         <section class="chat-stream" id="chatStream">
-          <!-- 开局引导舱（Launchpad） -->
+          <!-- 单主入口目标导向开局舱（Scenario Intent Pack Facade：合并阵容与开局场景，剥离底层工程黑话） -->
           <div class="empty-guide" id="emptyGuide">
-            <div class="empty-launch-card">
+            <div class="empty-launch-card v4-launch-card">
               <div class="empty-top-bar">
-                <div class="empty-hero-badge" id="readySummaryBar">正在检测本地 CLI 环境…</div>
-                <button type="button" id="emptyBindWsBtn" class="empty-ws-btn" title="点击选择或切换本地项目工作区">
-                  <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M3.5 6.5a2 2 0 0 1 2-2h4.2l2 2.2h6.8a2 2 0 0 1 2 2v8.8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"></path>
-                  </svg>
-                  <span id="emptyWsName">点击绑定本地项目目录</span>
-                  <em class="empty-ws-action">切换</em>
-                </button>
+                <div class="empty-hero-badge" id="readySummaryBar">正在检测本地 CLI 模型环境…</div>
               </div>
 
               <div class="empty-title-group">
-                <h2>多引擎协同研讨与工程交付工作台</h2>
+                <h2>选择目标场景，开启多视角圆桌研讨</h2>
                 <p>
-                  支持 <strong>1 至 6 席弹性阵容</strong> 与单 CLI 多通道真并行调用；输入 <code>@文件路径</code> 或 <code>@路径:起始行-结束行</code> 注入真实源码，写盘前自动构建纯标准库字节级 CAS 快照保障一键原子回滚。
+                  按任务意图自动装配<strong>对抗角色、研讨拓扑与交付形态</strong>；支持直接粘贴截图 (⌘V)、拖拽文档或通过 <code>@文件路径:起-止</code> 引用项目源码。
                 </p>
               </div>
 
-              <!-- 1–6 席全场景预设方案（6 卡片规整网格） -->
+              <!-- 顶层唯一主入口：四大场景意图包 Facade -->
               <div class="launchpad-section">
-                <div class="launchpad-label">
-                  <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                    <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
-                    <polyline points="2 17 12 22 22 17"></polyline>
-                    <polyline points="2 12 12 17 22 12"></polyline>
-                  </svg>
-                  <span>1–6 席场景预设方案（一键切换参会规模与职责拓扑）</span>
+                <div class="launchpad-label v4-launchpad-row-head">
+                  <span class="v4-label-inline">
+                    <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">
+                      <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+                      <polyline points="2 17 12 22 22 17"></polyline>
+                      <polyline points="2 12 12 17 22 12"></polyline>
+                    </svg>
+                    <span>场景意图包（自动匹配推荐席位、辩证流程与交付出口）</span>
+                  </span>
                 </div>
-                <div class="scenario-preset-grid scenario-grid-6" id="launchpadScenarioGrid">
-                  <button type="button" class="scenario-preset-card" data-scenario-preset="solo_focus">
-                    <div class="scenario-head">
-                      <span class="scenario-name">单席专注</span>
-                      <span class="scenario-mode-tag">1 席 · 快速合议</span>
+                <div class="intent-pack-grid" id="scenarioIntentPackGrid">
+                  <button type="button" class="intent-pack-card active" data-scenario-pack="arch_code">
+                    <div class="intent-pack-top">
+                      <span class="v4-starter-icon icon-arch">
+                        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                          <polyline points="7 8 3 12 7 16"></polyline>
+                          <polyline points="17 8 21 12 17 16"></polyline>
+                          <line x1="13.5" y1="5" x2="10.5" y2="19"></line>
+                        </svg>
+                      </span>
+                      <div class="intent-pack-badges">
+                        <span class="scenario-mode-tag">3 席 · 深度研讨</span>
+                        <span class="intent-exit-tag">代码预演/写盘</span>
+                      </div>
                     </div>
-                    <div class="scenario-desc">首席全栈架构独立完成方案推演、边界自检与代码交付</div>
+                    <div class="intent-pack-title">工程研发与代码审查包</div>
+                    <div class="intent-pack-desc">规划立论 + 反向审计 + 工程实现；支持 @源码切片引用与终端安全写盘交付</div>
                   </button>
-                  <button type="button" class="scenario-preset-card" data-scenario-preset="duel_review">
-                    <div class="scenario-head">
-                      <span class="scenario-name">双席辩证</span>
-                      <span class="scenario-mode-tag">2 席 · 正反辩证</span>
+
+                  <button type="button" class="intent-pack-card" data-scenario-pack="tradeoff_debate">
+                    <div class="intent-pack-top">
+                      <span class="v4-starter-icon icon-audit">
+                        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                          <path d="M12 3v18"></path>
+                          <path d="M5 7l7-4 7 4"></path>
+                          <path d="M3 13l3-6 3 6a3.5 3.5 0 0 1-6 0z"></path>
+                          <path d="M15 13l3-6 3 6a3.5 3.5 0 0 1-6 0z"></path>
+                        </svg>
+                      </span>
+                      <div class="intent-pack-badges">
+                        <span class="scenario-mode-tag">3 席 · 红蓝辩证</span>
+                        <span class="intent-exit-tag">对比决策纪要</span>
+                      </div>
                     </div>
-                    <div class="scenario-desc">主方案全栈立论 + 审计官反向压力质询，低开销高密度验证</div>
+                    <div class="intent-pack-title">方案利弊红蓝辩证包</div>
+                    <div class="intent-pack-desc">正方建构 + 反方证伪 + 综合裁定；默认免绑项目纯研讨，收敛多维权衡决策矩阵</div>
                   </button>
-                  <button type="button" class="scenario-preset-card active" data-scenario-preset="arch_review">
-                    <div class="scenario-head">
-                      <span class="scenario-name">标准三席评审</span>
-                      <span class="scenario-mode-tag">3 席 · 深度研讨</span>
+
+                  <button type="button" class="intent-pack-card" data-scenario-pack="ux_multimodal">
+                    <div class="intent-pack-top">
+                      <span class="v4-starter-icon icon-ux">
+                        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                          <rect x="3" y="3" width="18" height="18" rx="3"></rect>
+                          <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                          <polyline points="21 15 16 10 5 21"></polyline>
+                        </svg>
+                      </span>
+                      <div class="intent-pack-badges">
+                        <span class="scenario-mode-tag">4 席 · 发散收敛</span>
+                        <span class="intent-exit-tag">体验走查清单</span>
+                      </div>
                     </div>
-                    <div class="scenario-desc">架构师 架构规划 · 审计官 风险审计 · 工程师 工程实现</div>
+                    <div class="intent-pack-title">产品体验与多模态走查包</div>
+                    <div class="intent-pack-desc">交互体感 + 架构边界 + 风险审计；聚焦界面截图对比与分级体验打磨清单交付</div>
                   </button>
-                  <button type="button" class="scenario-preset-card" data-scenario-preset="product_quad">
-                    <div class="scenario-head">
-                      <span class="scenario-name">四席产品全栈</span>
-                      <span class="scenario-mode-tag">4 席 · 发散收敛</span>
+
+                  <button type="button" class="intent-pack-card" data-scenario-pack="incident_doc">
+                    <div class="intent-pack-top">
+                      <span class="v4-starter-icon icon-feat">
+                        <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                          <polyline points="14 2 14 8 20 8"></polyline>
+                          <line x1="9" y1="13" x2="15" y2="13"></line>
+                          <line x1="9" y1="17" x2="13" y2="17"></line>
+                        </svg>
+                      </span>
+                      <div class="intent-pack-badges">
+                        <span class="scenario-mode-tag">2 席 · 快速合议</span>
+                        <span class="intent-exit-tag">排查/定稿导出</span>
+                      </div>
                     </div>
-                    <div class="scenario-desc">引入交互设计席位，协同打磨信息层级、技术边界与落地路径</div>
+                    <div class="intent-pack-title">故障排查与文稿打磨包</div>
+                    <div class="intent-pack-desc">自适应排查与定稿立场；快速收敛根因验证路径或结构化技术文稿复制导出</div>
                   </button>
-                  <button type="button" class="scenario-preset-card" data-scenario-preset="sre_council_5">
-                    <div class="scenario-head">
-                      <span class="scenario-name">五席高可靠委员会</span>
-                      <span class="scenario-mode-tag">5 席 · 深度研讨</span>
-                    </div>
-                    <div class="scenario-desc">增设性能专家席位，专项攻坚并发锁模型、事务与低延迟链路</div>
-                  </button>
-                  <button type="button" class="scenario-preset-card" data-scenario-preset="full_jury_6">
-                    <div class="scenario-head">
-                      <span class="scenario-name">六席全景评审</span>
-                      <span class="scenario-mode-tag">6 席 · 全量合议</span>
-                    </div>
-                    <div class="scenario-desc">规划 · 交互 · 审计 · 性能 · 工程 · 验证六维并发全景裁定</div>
-                  </button>
+                </div>
+
+                <!-- 纯文本结构化槽位胶囊（零弹窗打断，按需补充上下文槽位） -->
+                <div class="prompt-slot-bar" id="v4PromptSlotRow">
+                  <span class="prompt-slot-hint">填充结构槽位：</span>
+                  <button type="button" class="prompt-slot-pill" data-prompt-slot="\n- 背景与业务目标：">+ 背景目标</button>
+                  <button type="button" class="prompt-slot-pill" data-prompt-slot="\n- 关键约束与评判维度：">+ 约束与评判维度</button>
+                  <button type="button" class="prompt-slot-pill" data-prompt-slot="\n- 不可破坏红线与验收标准：">+ 红线与验收标准</button>
+                  <button type="button" class="prompt-slot-pill" data-prompt-slot="\n- 已附界面截图/日志关注焦点（可直接 ⌘V 粘贴至下方输入舱）：">+ 参考截图/日志焦点</button>
                 </div>
               </div>
 
-              <!-- 工程开局模板卡片 -->
-              <div class="launchpad-section">
-                <div class="launchpad-label">
-                  <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                    <polyline points="14 2 14 8 20 8"></polyline>
-                    <line x1="8" y1="13" x2="16" y2="13"></line>
-                    <line x1="8" y1="17" x2="13" y2="17"></line>
-                  </svg>
-                  <span>工程开局议题模板（点击填入下方输入框）</span>
+              <!-- 低频自定义席位规模抽屉：默认收起，保持首屏单一主视觉动线 -->
+              <details class="launchpad-custom-fold" id="launchpadCustomLineupFold">
+                <summary class="launchpad-custom-summary">
+                  <span>高级：手动微调 1–6 席参会阵容预设</span>
+                  <span class="fold-caret" aria-hidden="true">▾</span>
+                </summary>
+                <div class="launchpad-custom-body">
+                  <div class="launchpad-label v4-launchpad-row-head">
+                    <span>按席位数覆盖阵容</span>
+                    <button type="button" id="v4ToggleMorePresetsBtn" class="v4-more-presets-btn" aria-expanded="false">
+                      <span>展开 4–6 席高阶阵容</span>
+                      <em aria-hidden="true">▾</em>
+                    </button>
+                  </div>
+                  <div class="scenario-preset-grid scenario-grid-6" id="launchpadScenarioGrid">
+                    <button type="button" class="scenario-preset-card active" data-scenario-preset="arch_review">
+                      <div class="scenario-head">
+                        <span class="scenario-name"><i class="v4-scen-dot dot-triad"></i>标准三席评审</span>
+                        <span class="scenario-mode-tag">3 席 · 深度研讨</span>
+                      </div>
+                      <div class="scenario-desc">架构规划 · 风险审计 · 工程实现三视角闭环</div>
+                    </button>
+                    <button type="button" class="scenario-preset-card" data-scenario-preset="duel_review">
+                      <div class="scenario-head">
+                        <span class="scenario-name"><i class="v4-scen-dot dot-duel"></i>双席红蓝辩证</span>
+                        <span class="scenario-mode-tag">2 席 · 正反压测</span>
+                      </div>
+                      <div class="scenario-desc">主方案立论 + 反向压力审计，低开销高密度验证</div>
+                    </button>
+                    <button type="button" class="scenario-preset-card" data-scenario-preset="solo_focus">
+                      <div class="scenario-head">
+                        <span class="scenario-name"><i class="v4-scen-dot dot-solo"></i>单席专注推演</span>
+                        <span class="scenario-mode-tag">1 席 · 快速收敛</span>
+                      </div>
+                      <div class="scenario-desc">全栈主程独立完成方案推演、边界自检与任务拆解</div>
+                    </button>
+                    <button type="button" class="scenario-preset-card v4-extra-scenario hidden" data-scenario-preset="product_quad">
+                      <div class="scenario-head">
+                        <span class="scenario-name"><i class="v4-scen-dot dot-quad"></i>四席产品全栈</span>
+                        <span class="scenario-mode-tag">4 席 · 发散收敛</span>
+                      </div>
+                      <div class="scenario-desc">引入交互设计席位，协同打磨信息层级与落地路径</div>
+                    </button>
+                    <button type="button" class="scenario-preset-card v4-extra-scenario hidden" data-scenario-preset="sre_council_5">
+                      <div class="scenario-head">
+                        <span class="scenario-name"><i class="v4-scen-dot dot-five"></i>五席高可靠委员会</span>
+                        <span class="scenario-mode-tag">5 席 · 深度研讨</span>
+                      </div>
+                      <div class="scenario-desc">增设性能专家席位，专项攻坚并发锁模型与低延迟链路</div>
+                    </button>
+                    <button type="button" class="scenario-preset-card v4-extra-scenario hidden" data-scenario-preset="full_jury_6">
+                      <div class="scenario-head">
+                        <span class="scenario-name"><i class="v4-scen-dot dot-six"></i>六席全景评审</span>
+                        <span class="scenario-mode-tag">6 席 · 全量合议</span>
+                      </div>
+                      <div class="scenario-desc">规划 · 交互 · 审计 · 性能 · 工程 · 验证六维并发裁定</div>
+                    </button>
+                  </div>
                 </div>
-                <div class="starter-grid">
-                  <button type="button" class="starter-card" data-starter-topic="请评审当前工作区项目的核心架构与模块职责边界，指出高耦合痛点并给出低风险演进方案。">
-                    <span class="starter-tag">架构边界演进</span>
-                    <span class="starter-title">评估模块职责边界与分阶段低风险重构路线</span>
-                  </button>
-                  <button type="button" class="starter-card" data-starter-topic="请对当前项目关键链路进行压力审计，排查并发竞态、异常吞没与超时边界隐患并给出加固方案。">
-                    <span class="starter-tag">稳定性与边界审计</span>
-                    <span class="starter-title">排查并发竞态、超时边界与异常恢复盲区</span>
-                  </button>
-                  <button type="button" class="starter-card" data-starter-topic="计划在现有代码库新增一项核心业务能力，请拆解最小闭环范围、接口契约与分步验证清单。">
-                    <span class="starter-tag">特性设计与契约</span>
-                    <span class="starter-title">拆解新特性 MVP 范围、数据契约与实施步骤</span>
-                  </button>
-                  <button type="button" class="starter-card" data-starter-topic="请结合项目源码定位影响交互流畅度与可维护性的瓶颈点，输出文件级改进清单。">
-                    <span class="starter-tag">性能与代码质量</span>
-                    <span class="starter-title">定位关键性能瓶颈并制定文件级优化清单</span>
-                  </button>
-                </div>
-              </div>
+              </details>
 
-              <!-- 底部讨论策略与自动预演开关栏 -->
-              <div class="launchpad-strategy-bar">
+              <!-- 兼容保留节点（统一由下方输入舱「策略胶囊」集中控制，消除上下两排重复按钮条） -->
+              <div class="launchpad-strategy-bar v4-sidebar-hidden-compat">
                 <div class="strategy-pills-group" id="emptyModePills">
-                  <span class="launchpad-inline-label">讨论策略：</span>
                   <button type="button" class="empty-cfg-pill active" data-collab-opt="deep_deliberation">深度研讨</button>
                   <button type="button" class="empty-cfg-pill" data-collab-opt="adversarial_review">正反辩证</button>
                   <button type="button" class="empty-cfg-pill" data-collab-opt="divergent_convergent">发散收敛</button>
                   <button type="button" class="empty-cfg-pill" data-collab-opt="code_review">代码审查</button>
                   <button type="button" class="empty-cfg-pill" data-collab-opt="rapid_consensus">快速合议</button>
                 </div>
-                <button type="button" id="emptyAutoPreviewBtn" class="auto-preview-pill" title="讨论收敛后自动生成最终决议并以只读预演模式输出代码补丁">
+                <button type="button" id="emptyAutoPreviewBtn" class="auto-preview-pill">
                   <span class="auto-preview-check" aria-hidden="true"></span>
                   <span>自动执行预演</span>
                 </button>
@@ -562,68 +678,179 @@
         </section>
 
         <button id="scrollBottomBtn" class="scroll-bottom-pill hidden">
-          ↓ 查看最新发言
+          <svg class="v4-inline-svg" viewBox="0 0 24 24" width="13.5" height="13.5" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"></line><polyline points="6.5 13.5 12 19 17.5 13.5"></polyline></svg>
+          <span>查看最新发言</span>
         </button>
       </div>
 
-      <!-- 底部居中主持控场输入舱 -->
-      <footer class="chair-console" id="chairConsole">
+      <!-- 底部居中悬浮双层玻璃胶囊输入舱（Floating Multimodal Composer Dock v4） -->
+      <footer class="chair-console v4-chair-console" id="chairConsole">
         <div class="quick-cue-bar hidden" id="quickCueBar">
           <div class="cue-group-left" id="cueGroupLeft"></div>
           <div class="cue-busy-banner hidden" id="cueBusyBanner">
             <span class="busy-live-dot" aria-hidden="true"></span>
-            <span id="cueBusyText">研讨进行中，可直接输入插话或点击右侧停止</span>
+            <span id="cueBusyText">研讨进行中，可直接输入插话、粘贴截图或点击右侧停止</span>
           </div>
           <div class="cue-group-right" id="cueDecisionGroup">
             <button type="button" id="restartTopicBtn" class="cue-btn" title="清空当前会话旧发言，按当前策略与席位配置重新发起研讨">重开本议题</button>
             <button type="button" id="concludeBtn" class="cue-btn accent-gold" title="综合全量讨论与白板共识生成《会议最终决议》">形成决议</button>
             <button type="button" id="executeBtn" class="cue-btn accent-emerald" title="依据白板已确认共识与已勾选任务交由执行席位交付">交由 工程师 执行 →</button>
           </div>
-          <button type="button" id="stopFlowBtn" class="stop-prominent-btn hidden" title="立即中止当前正在运行的生成或执行任务">■ 停止运行</button>
+          <button type="button" id="stopFlowBtn" class="stop-prominent-btn hidden" title="立即中止当前正在运行的生成或执行任务"><svg class="v4-inline-svg" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6.2" y="6.2" width="11.6" height="11.6" rx="2.4"></rect></svg><span>停止运行</span></button>
         </div>
 
-        <div class="composer-box" id="composerBox">
-          <div class="composer-toolbar" id="composerToolbar">
-            <!-- 未发起议题阶段：讨论策略快捷栏 -->
-            <div class="pre-meeting-mode-bar" id="preMeetingModeBar">
-              <span class="cue-bar-label">讨论策略：</span>
-              <div class="composer-mode-seg" id="inlineModeSelect">
-                <button type="button" class="mode-seg-pill active" data-collab-opt="deep_deliberation">深度研讨</button>
-                <button type="button" class="mode-seg-pill" data-collab-opt="adversarial_review">正反辩证</button>
-                <button type="button" class="mode-seg-pill" data-collab-opt="divergent_convergent">发散收敛</button>
-                <button type="button" class="mode-seg-pill" data-collab-opt="code_review">代码审查</button>
-                <button type="button" class="mode-seg-pill" data-collab-opt="rapid_consensus">快速合议</button>
-              </div>
-              <button type="button" id="composerAutoPreviewBtn" class="auto-preview-pill compact" title="讨论收敛后自动触发决议与只读执行预演">
-                <span class="auto-preview-check" aria-hidden="true"></span>
-                <span>自动执行预演</span>
-              </button>
-              <span id="composerModeDesc" class="composer-mode-desc">独立立论 → 交叉质询 → 定向答辩 → 架构裁定</span>
-            </div>
-
-            <!-- 研讨进行/待命阶段：点名回应栏 -->
-            <div class="composer-left-tags hidden" id="activeMentionBar">
-              <span class="cue-bar-label" id="mentionBarLabel">定向点名：</span>
-              <div class="mention-chips" id="mentionChipsWrap"></div>
-            </div>
-
-            <button type="button" id="insertFileRefBtn" class="mention-btn file-ref-trigger" title="检索并引用当前绑定项目的源码文件（支持 @文件:起始行-结束行）">+ @引用源码</button>
+        <div class="composer-box v4-composer-dock" id="composerBox">
+          <!-- 第一层：多模态附件缩略图托盘 + @引用源码胶囊 + 研讨中快捷 @点名条 -->
+          <div id="v4AttachmentTray" class="v4-attachment-tray hidden" aria-live="polite"></div>
+          <div id="attachedFilesBar" class="attached-files-bar hidden"></div>
+          <div class="composer-left-tags hidden" id="activeMentionBar">
+            <span class="cue-bar-label" id="mentionBarLabel">定向点名：</span>
+            <div class="mention-chips" id="mentionChipsWrap"></div>
           </div>
 
-          <div id="attachedFilesBar" class="attached-files-bar hidden"></div>
-
-          <div class="composer-row">
+          <!-- 第二层：无内框通透输入画布（告别呆板单行长条框） -->
+          <div class="composer-row v4-composer-canvas">
             <div class="composer-input-frame">
               <div id="atSuggestMenu" class="at-suggest-menu hidden" role="listbox" aria-label="源码文件与席位补全"></div>
               <textarea
                 id="topicInput"
                 rows="1"
-                placeholder="输入技术议题开启研讨，输入 @ 引用项目源码或 @文件:起始行-结束行 切片"
+                placeholder="描述议题、粘贴截图 (⌘V)、拖拽文件，或输入 @ 引用项目源码…"
               ></textarea>
             </div>
-            <div class="composer-btns">
-              <span class="composer-key-hint">Enter 发送 · Shift+Enter 换行</span>
-              <button type="button" id="primaryActionBtn" class="primary-send-btn">开始研讨</button>
+          </div>
+
+          <!-- 第三层：一体灵动操作轨（左侧多模态入口 + 策略速调胶囊，右侧流光胶囊发送键） -->
+          <div class="v4-composer-action-rail" id="composerToolbar">
+            <div class="v4-rail-left">
+              <!-- [+] 多模态菜单锚点 -->
+              <div class="v4-attach-menu-anchor">
+                <button type="button" id="v4PlusAttachBtn" class="v4-circle-plus-btn" title="添加图片截图、本地文档或引用源码 (⌘U)" aria-expanded="false">
+                  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="12" y1="5" x2="12" y2="19"></line>
+                    <line x1="5" y1="12" x2="19" y2="12"></line>
+                  </svg>
+                </button>
+                <div id="v4AttachPopover" class="v4-floating-popover v4-attach-popover hidden" role="menu">
+                  <button type="button" class="v4-pop-item" data-v4-attach-cmd="image">
+                    <span class="v4-pop-item-icon tint-violet">
+                      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="3" y="3" width="18" height="18" rx="3"></rect>
+                        <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                        <polyline points="21 15 16 10 5 21"></polyline>
+                      </svg>
+                    </span>
+                    <span class="v4-pop-item-text">
+                      <strong>上传图片或界面截图</strong>
+                      <em>PNG / JPG / WebP / GIF · 亦支持 ⌘V 粘贴</em>
+                    </span>
+                  </button>
+                  <button type="button" class="v4-pop-item" data-v4-attach-cmd="file">
+                    <span class="v4-pop-item-icon tint-blue">
+                      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                        <polyline points="14 2 14 8 20 8"></polyline>
+                      </svg>
+                    </span>
+                    <span class="v4-pop-item-text">
+                      <strong>添加本地文档、日志或代码</strong>
+                      <em>PDF / Markdown / JSON / 日志 / 外部源码</em>
+                    </span>
+                  </button>
+                  <button type="button" class="v4-pop-item" data-v4-attach-cmd="at-code">
+                    <span class="v4-pop-item-icon tint-emerald">
+                      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="7 8 3 12 7 16"></polyline>
+                        <polyline points="17 8 21 12 17 16"></polyline>
+                        <line x1="13.5" y1="5" x2="10.5" y2="19"></line>
+                      </svg>
+                    </span>
+                    <span class="v4-pop-item-text">
+                      <strong>引用当前工作区源码 (@文件)</strong>
+                      <em>支持行号区间切片 @path:start-end</em>
+                    </span>
+                  </button>
+                </div>
+              </div>
+
+              <!-- 高频直达芯片：图片 / 文件 / @源码 -->
+              <button type="button" id="v4QuickImageBtn" class="v4-tool-chip" title="上传图片或设计截图（支持直接 ⌘V 粘贴剪贴板截图）">
+                <svg viewBox="0 0 24 24" width="13.5" height="13.5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="3" width="18" height="18" rx="3"></rect>
+                  <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                  <polyline points="21 15 16 10 5 21"></polyline>
+                </svg>
+                <span>图片</span>
+              </button>
+              <button type="button" id="v4QuickDocBtn" class="v4-tool-chip" title="上传本地文档、PDF、日志或代码文件 (⌘U)">
+                <svg viewBox="0 0 24 24" width="13.5" height="13.5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
+                </svg>
+                <span>文件</span>
+              </button>
+              <button type="button" id="insertFileRefBtn" class="v4-tool-chip file-ref-trigger" title="检索并引用当前绑定项目的源码文件（支持 @文件:起始行-结束行）">
+                <svg viewBox="0 0 24 24" width="13.5" height="13.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="4"></circle>
+                  <path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-3.92 7.94"></path>
+                </svg>
+                <span>引用源码</span>
+              </button>
+
+              <span class="v4-rail-divider" aria-hidden="true"></span>
+
+              <!-- 研讨策略一体速调胶囊（合并全应用三处重复模式选择器） -->
+              <div class="v4-mode-popover-anchor">
+                <button type="button" id="v4ModeTriggerPill" class="v4-strategy-capsule" aria-expanded="false" title="点击切换讨论策略、参会规模或开启自动执行预演">
+                  <svg class="v4-spark-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+                    <polygon points="12 2 14.8 9.2 22 12 14.8 14.8 12 22 9.2 14.8 2 12 9.2 9.2 12 2"></polygon>
+                  </svg>
+                  <span id="v4StrategySummaryText">深度研讨 · 3 席</span>
+                  <span id="v4AutoExecDot" class="v4-auto-dot hidden" title="已开启自动执行预演"></span>
+                  <span class="caret-mini" aria-hidden="true">▾</span>
+                </button>
+
+                <div id="v4ModePopover" class="v4-floating-popover v4-strategy-popover hidden">
+                  <div class="pre-meeting-mode-bar" id="preMeetingModeBar">
+                    <div class="v4-pop-sec">
+                      <div class="v4-pop-sec-head">
+                        <span>讨论拓扑策略</span>
+                        <span id="composerModeDesc" class="composer-mode-desc">独立立论 → 交叉质询 → 定向答辩 → 架构裁定</span>
+                      </div>
+                      <div class="composer-mode-seg v4-pop-mode-grid" id="inlineModeSelect">
+                        <button type="button" class="mode-seg-pill active" data-collab-opt="deep_deliberation">深度研讨</button>
+                        <button type="button" class="mode-seg-pill" data-collab-opt="adversarial_review">正反辩证</button>
+                        <button type="button" class="mode-seg-pill" data-collab-opt="divergent_convergent">发散收敛</button>
+                        <button type="button" class="mode-seg-pill" data-collab-opt="code_review">代码审查</button>
+                        <button type="button" class="mode-seg-pill" data-collab-opt="rapid_consensus">快速合议</button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="v4-pop-sec">
+                    <div class="v4-pop-sec-head">
+                      <span>快捷参会阵容</span>
+                    </div>
+                    <div class="v4-pop-seat-Row">
+                      <button type="button" class="v4-mini-preset-btn" data-scenario-preset="solo_focus">1 席极速</button>
+                      <button type="button" class="v4-mini-preset-btn" data-scenario-preset="duel_review">2 席辩证</button>
+                      <button type="button" class="v4-mini-preset-btn active" data-scenario-preset="arch_review">3 席标准</button>
+                    </div>
+                  </div>
+
+                  <div class="v4-pop-footer-row">
+                    <button type="button" id="composerAutoPreviewBtn" class="auto-preview-pill compact" title="讨论收敛后自动触发决议与只读执行预演">
+                      <span class="auto-preview-check" aria-hidden="true"></span>
+                      <span>自动执行预演</span>
+                    </button>
+                    <button type="button" id="v4OpenFullSettingsLink" class="text-action-btn">更多席位与模型配置 →</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="v4-rail-right">
+              <span class="composer-key-hint">⌘V 粘贴图片 · Enter 发送</span>
+              <button type="button" id="primaryActionBtn" class="primary-send-btn v4-send-capsule">开始研讨</button>
             </div>
           </div>
         </div>
@@ -665,10 +892,24 @@
           </div>
         </div>
 
+        <div id="wbEpistemicBanner" class="wb-epistemic-banner hidden" role="status"></div>
         <div id="wbConflictBanner" class="wb-conflict-banner hidden" role="alert"></div>
 
-        <!-- 顶部精炼议题卡片 -->
-        <div class="wb-card wb-topic-card">
+        <!-- 显式缺席席位披露账本（仅当存在未参评/跳过/异常席位时展现） -->
+        <div class="wb-card wb-zone-absent hidden" id="wbCardAbsent">
+          <div class="wb-card-header">
+            <span class="wb-card-title">
+              <span class="wb-zone-indicator zone-rose"></span>
+              <span>未参评 / 缺席席位</span>
+              <em id="wbAbsentCount" class="wb-sec-count">0</em>
+            </span>
+            <button type="button" id="wbAckAbsentBtn" class="wb-add-btn hidden" title="确认已知悉异常缺席席位影响，解锁执行准入">确认知悉缺席</button>
+          </div>
+          <ul id="wbAbsentList" class="wb-absent-list"></ul>
+        </div>
+
+        <!-- 顶部精炼议题卡片（开局后自动锁定只读防篡改） -->
+        <div class="wb-card wb-topic-card" id="wbTopicCard">
           <div class="wb-card-header">
             <span class="wb-card-title">
               <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -676,34 +917,35 @@
                 <circle cx="12" cy="12" r="4"></circle>
               </svg>
               <span>当前研讨议题</span>
+              <em id="wbTopicLockBadge" class="wb-lock-pill hidden" title="会议已启动，原始议题已锁定只读；后续诉求请走追问或添加主持约束">已锁定只读</em>
             </span>
-            <button type="button" class="wb-add-btn" data-wb-add="chair_constraints">+ 添加约束</button>
+            <button type="button" class="wb-add-btn" data-wb-add="chair_constraints">+ 主持约束</button>
           </div>
           <div id="wbTopicText" class="wb-topic-text">未设置议题</div>
           <div class="wb-inline-editor hidden" id="wb-editor-chair_constraints">
-            <input type="text" class="wb-add-input" placeholder="输入主持硬约束，回车锁定至共识区…" />
+            <input type="text" class="wb-add-input" placeholder="输入主持指定约束，回车带署名锁定…" />
           </div>
         </div>
 
-        <!-- 第一区：已确认共识与约束 -->
+        <!-- 第一区：已确认共识与主持指定约束 -->
         <div class="wb-card wb-zone-decision" id="wbCardDecision">
           <div class="wb-card-header">
             <span class="wb-card-title">
               <span class="wb-zone-indicator zone-indigo"></span>
-              <span>已确认共识与约束</span>
+              <span id="wbDecisionZoneTitle">已确认共识与约束</span>
               <em id="wbDecisionCount" class="wb-sec-count">0</em>
             </span>
             <button type="button" class="wb-add-btn" data-wb-add="decision">+ 添加</button>
           </div>
           <div class="wb-inline-editor hidden" id="wb-editor-decision">
-            <input type="text" class="wb-add-input" placeholder="新增共识结论或架构约束，回车保存…" />
+            <input type="text" class="wb-add-input" placeholder="新增主持指定约束或架构定论，回车保存…" />
           </div>
           <ul id="wbDecisionList" class="wb-card-pool empty-hint">
-            <li class="wb-empty-tip">主持约束与多驱动确认的架构共识将在此置顶锁定，后续轮次严格遵循</li>
+            <li class="wb-empty-tip">异构质询闭环共识与 [主持指定约束] 在此锁定，后续轮次严格遵循</li>
           </ul>
         </div>
 
-        <!-- 第二区：待决争议与风险项 -->
+        <!-- 第二区：待决争议、初评建议与风险项 -->
         <div class="wb-card wb-zone-risk" id="wbCardRisk">
           <div class="wb-card-header">
             <span class="wb-card-title">
@@ -717,35 +959,55 @@
             <input type="text" class="wb-add-input" placeholder="补充边界风险或待裁决分歧，回车保存…" />
           </div>
           <ul id="wbRiskList" class="wb-card-pool empty-hint">
-            <li class="wb-empty-tip">悬浮条目可发起「定向讨论」聚焦裁决，或点击「采纳为共识」移入第一区</li>
+            <li class="wb-empty-tip">支持一键发起「双席再辩 1 轮」，或以「主持指定约束」拍板锁定</li>
           </ul>
         </div>
 
-        <!-- 第三区：待执行任务清单 -->
+        <!-- 负面清单归档区：已确认放弃与证伪淘汰方案（有淘汰项时自动浮现，默认折叠不占屏） -->
+        <details class="wb-card wb-zone-abandoned hidden" id="wbCardAbandoned">
+          <summary class="wb-abandoned-summary">
+            <span class="wb-card-title">
+              <span class="wb-zone-indicator zone-slate"></span>
+              <span>已淘汰废案防回流清单</span>
+              <em id="wbAbandonedCount" class="wb-sec-count">0</em>
+            </span>
+            <span class="fold-caret" aria-hidden="true">▾</span>
+          </summary>
+          <ul id="wbAbandonedList" class="wb-abandoned-list"></ul>
+        </details>
+
+        <!-- 第三区：待执行交付任务清单（默认不勾选，零勾选硬拦截） -->
         <div class="wb-card wb-zone-action" id="wbCardAction">
           <div class="wb-card-header">
             <span class="wb-card-title">
               <span class="wb-zone-indicator zone-emerald"></span>
-              <span>待执行任务清单</span>
-              <em id="wbActionCount" class="wb-sec-count">0/0 项待执行</em>
+              <span id="wbActionZoneTitle">待执行任务清单</span>
+              <em id="wbActionCount" class="wb-sec-count">0/0 项已勾选</em>
             </span>
             <button type="button" class="wb-add-btn" data-wb-add="action">+ 添加</button>
           </div>
           <div class="wb-inline-editor hidden" id="wb-editor-action">
-            <input type="text" class="wb-add-input" placeholder="新增可执行工程任务，回车保存…" />
+            <input type="text" class="wb-add-input" placeholder="新增待执行交付项（默认未勾选，核对后勾选生效）…" />
           </div>
           <ul id="wbActionList" class="wb-card-pool empty-hint">
-            <li class="wb-empty-tip">勾选需在本轮交付的任务项（取消勾选将排除在本次代码修改范围之外）</li>
+            <li class="wb-empty-tip">新增任务默认不勾选；请逐项核对并勾选需在本轮执行的条目</li>
           </ul>
           <div class="wb-action-footer">
-            <button type="button" id="wbToExecBtn" class="wb-exec-jump-btn">前往执行终端交付已选任务 →</button>
+            <button type="button" id="wbToExecBtn" class="wb-exec-jump-btn" disabled>尚无已勾选任务</button>
+            <div id="wbAdaptiveExportBar" class="wb-adaptive-export-bar hidden">
+              <button type="button" id="wbQuickCopyArtifactBtn" class="mini-outline-btn">复制结构化交付清单</button>
+              <button type="button" id="wbQuickExportArtifactBtn" class="primary-exec-btn">导出 .md 决策纪要</button>
+            </div>
           </div>
         </div>
       </div>
 
-      <!-- 页签二：执行终端、CAS 快照护栏与 Diff 预览 -->
+      <!-- 页签二：执行终端、写盘确认横幅与 Diff 预览 -->
       <div class="wb-pane" id="pane-terminal">
         <div id="execGuardBanner" class="exec-guard-banner hidden" role="alert"></div>
+        <div id="execWriteSafetyBanner" class="exec-write-safety-banner hidden" role="note">
+          <strong>写前安全快照护栏已就绪：</strong>写入本地工作区前将自动获取跨进程排他锁并生成字节级 CAS 快照清单（上限 128 MiB），异常中断或校验未通过支持一键原子回滚。
+        </div>
 
         <div class="exec-mode-box">
           <div class="exec-mode-header">
@@ -769,8 +1031,8 @@
           </div>
           <div class="exec-action-row">
             <button type="button" id="runExecFromTabBtn" class="primary-exec-btn">启动 工程师 执行</button>
-            <button type="button" id="ackSnapshotBtn" class="mini-outline-btn hidden" title="确认保留上一轮写入改动，解锁新一轮写入准入">✓ 确认保留上次改动</button>
-            <button type="button" id="stopExecFromTabBtn" class="stop-exec-btn hidden" title="立即中止当前执行进程组">■ 停止执行</button>
+            <button type="button" id="ackSnapshotBtn" class="mini-outline-btn hidden" title="确认保留上一轮写入改动，解锁新一轮写入准入"><svg class="v4-inline-svg" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"></circle><polyline points="8.4 12.2 11 14.8 15.8 9.6"></polyline></svg><span>确认保留上次改动</span></button>
+            <button type="button" id="stopExecFromTabBtn" class="stop-exec-btn hidden" title="立即中止当前执行进程组"><svg class="v4-inline-svg" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6.2" y="6.2" width="11.6" height="11.6" rx="2.4"></rect></svg><span>停止执行</span></button>
           </div>
         </div>
 
@@ -793,7 +1055,7 @@
           <div class="diff-header">
             <span>变更预览 (Diff) <em id="diffStatBadge" class="diff-stat"></em></span>
             <div class="term-actions">
-              <button type="button" id="rollbackExecBtn" class="term-mini-btn rollback-warn-btn hidden" title="按写前 CAS 字节清单原子回滚本次工作区写入">↺ 回滚写入</button>
+              <button type="button" id="rollbackExecBtn" class="term-mini-btn rollback-warn-btn hidden" title="按写前 CAS 字节清单原子回滚本次工作区写入"><svg class="v4-inline-svg" viewBox="0 0 24 24" width="12.5" height="12.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 9 4 4 9 4"></polyline><path d="M4.5 9A8 8 0 1 1 6.2 17.5"></path></svg><span>回滚写入</span></button>
               <button type="button" id="copyDiffBtn" class="term-mini-btn">复制补丁</button>
             </div>
           </div>
@@ -812,15 +1074,25 @@
     <div class="seat-pop-toggles" id="seatPopoverQuickActions"></div>
   </div>
 
-  <!-- 分导航「系统运行策略与多席位配置中心」 -->
+  <!-- 精简三分导航「多席位与运行策略配置中心」（v4 合并 5 栏为 3 栏，模型芯片 + 档位胶囊替代长条框） -->
   <div class="modal-backdrop hidden" id="settingsModal">
     <div class="modal-card modal-settings-center">
       <div class="modal-header">
-        <div>
-          <h3>系统运行策略与多席位配置中心</h3>
-          <div class="modal-sub">支持 1–6 席弹性编排、单 CLI 多通道真并行隔离调用、CAS 无 Git 原子回滚与有限时限防挂死护栏</div>
+        <div class="v4-modal-title-wrap">
+          <span class="v4-modal-badge-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="4" width="8" height="7" rx="2"></rect>
+              <rect x="13" y="4" width="8" height="7" rx="2"></rect>
+              <rect x="3" y="13" width="8" height="7" rx="2"></rect>
+              <rect x="13" y="13" width="8" height="7" rx="2"></rect>
+            </svg>
+          </span>
+          <div>
+            <h3>多席位与运行策略配置中心</h3>
+            <div class="modal-sub">首屏聚焦当前启用席位、模型快选芯片与推理档位胶囊；低频别名与自定义路径按需展开</div>
+          </div>
         </div>
-        <button type="button" id="closeSettingsBtn" class="icon-btn" aria-label="关闭">✕</button>
+        <button type="button" id="closeSettingsBtn" class="icon-btn" aria-label="关闭"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="6" y1="6" x2="18" y2="18"></line><line x1="18" y1="6" x2="6" y2="18"></line></svg></button>
       </div>
 
       <datalist id="agyModelPresets">
@@ -839,22 +1111,9 @@
       </datalist>
 
       <div class="settings-shell">
-        <!-- 左侧五项分导航栏 -->
+        <!-- 左侧精简三项分类导航（保留 lineup/workspace 隐藏兼容按钮供旧脚本无损跳转） -->
         <nav class="settings-nav" id="settingsNav" aria-label="设置分类导航">
-          <button type="button" class="settings-nav-btn active" data-settings-tab="lineup">
-            <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="9" cy="7" r="3"></circle>
-              <circle cx="17" cy="8" r="2.5"></circle>
-              <path d="M3 19a6 6 0 0 1 12 0"></path>
-              <path d="M15 19a4.5 4.5 0 0 1 6-3.8"></path>
-            </svg>
-            <div class="nav-btn-text">
-              <span>阵容与称呼</span>
-              <em>1–6 席规模与命名</em>
-            </div>
-          </button>
-
-          <button type="button" class="settings-nav-btn" data-settings-tab="seats">
+          <button type="button" class="settings-nav-btn active" data-settings-tab="seats">
             <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
               <rect x="3" y="4" width="8" height="7" rx="2"></rect>
               <rect x="13" y="4" width="8" height="7" rx="2"></rect>
@@ -863,27 +1122,17 @@
             </svg>
             <div class="nav-btn-text">
               <span>席位与模型</span>
-              <em>驱动、职责与档位</em>
+              <em>参会阵容、模型芯片与档位</em>
             </div>
           </button>
 
           <button type="button" class="settings-nav-btn" data-settings-tab="concurrency">
             <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polyline>
-            </svg>
-            <div class="nav-btn-text">
-              <span>并发与时限</span>
-              <em>单 CLI 并行与超时</em>
-            </div>
-          </button>
-
-          <button type="button" class="settings-nav-btn" data-settings-tab="workspace">
-            <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
               <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
             </svg>
             <div class="nav-btn-text">
-              <span>安全与工作区</span>
-              <em>CAS 快照与验证钩子</em>
+              <span>并发与安全护栏</span>
+              <em>并行通道、时限与工作区</em>
             </div>
           </button>
 
@@ -892,30 +1141,37 @@
               <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
             </svg>
             <div class="nav-btn-text">
-              <span>驱动与诊断</span>
-              <em>路径、热加载与探活</em>
+              <span>驱动与环境诊断</span>
+              <em>引擎探活与自定义路径</em>
             </div>
           </button>
+
+          <button type="button" class="settings-nav-btn v4-sidebar-hidden-compat" data-settings-tab="lineup">阵容兼容</button>
+          <button type="button" class="settings-nav-btn v4-sidebar-hidden-compat" data-settings-tab="workspace">工作区兼容</button>
         </nav>
 
         <!-- 右侧独立分页面板 -->
         <div class="modal-body settings-content-area">
-          <!-- 分页 1：阵容与称呼 -->
-          <section class="settings-pane active" id="settings-pane-lineup">
+          <!-- 兼容空槽（由 v4_ui.js 自动重定向至融合后的首屏分组） -->
+          <section class="settings-pane hidden" id="settings-pane-lineup"></section>
+          <section class="settings-pane hidden" id="settings-pane-workspace"></section>
+
+          <!-- 分页 1（默认激活）：席位与模型（融合 1–6 席快速开关 + 称呼折叠抽屉 + 模型芯片卡片） -->
+          <section class="settings-pane active" id="settings-pane-seats">
             <div class="modal-section-card">
               <div class="modal-sec-head">
-                <span class="modal-sec-title">参会席位规模与一键场景阵容（1–6 席）</span>
+                <span class="modal-sec-title">参会阵容规模与席位开关（1–6 席）</span>
                 <span class="modal-sec-hint" id="cfgEnabledSeatSummary">当前启用 3 席</span>
               </div>
-              <div class="modal-lineup-quick-grid" id="modalScenarioQuickGrid">
-                <button type="button" class="lineup-quick-chip" data-modal-lineup="solo_focus">1 席 · 单席专注</button>
-                <button type="button" class="lineup-quick-chip" data-modal-lineup="duel_review">2 席 · 双席辩证</button>
-                <button type="button" class="lineup-quick-chip" data-modal-lineup="classic_triad">3 席 · 标准合议</button>
-                <button type="button" class="lineup-quick-chip" data-modal-lineup="product_quad">4 席 · 产品全栈</button>
-                <button type="button" class="lineup-quick-chip" data-modal-lineup="sre_council_5">5 席 · 高可靠委员会</button>
-                <button type="button" class="lineup-quick-chip" data-modal-lineup="full_jury_6">6 席 · 全景评审</button>
+              <div class="modal-lineup-quick-grid v4-preset-strip" id="modalScenarioQuickGrid">
+                <button type="button" class="lineup-quick-chip" data-modal-lineup="solo_focus">1 席专注</button>
+                <button type="button" class="lineup-quick-chip" data-modal-lineup="duel_review">2 席辩证</button>
+                <button type="button" class="lineup-quick-chip" data-modal-lineup="classic_triad">3 席标准</button>
+                <button type="button" class="lineup-quick-chip" data-modal-lineup="product_quad">4 席产品</button>
+                <button type="button" class="lineup-quick-chip" data-modal-lineup="sre_council_5">5 席高可靠</button>
+                <button type="button" class="lineup-quick-chip" data-modal-lineup="full_jury_6">6 席全景</button>
               </div>
-              <div class="seat-enable-matrix" id="cfgSeatEnableMatrix">
+              <div class="seat-enable-matrix v4-seat-pill-matrix" id="cfgSeatEnableMatrix">
                 <label class="seat-matrix-toggle"><input type="checkbox" data-cfg-seat-enable="carbon" checked /><span>席位一 · <b data-seat-slot-name="carbon">架构师</b></span></label>
                 <label class="seat-matrix-toggle"><input type="checkbox" data-cfg-seat-enable="grok" checked /><span>席位二 · <b data-seat-slot-name="grok">审计官</b></span></label>
                 <label class="seat-matrix-toggle"><input type="checkbox" data-cfg-seat-enable="astra" checked /><span>席位三 · <b data-seat-slot-name="astra">工程师</b></span></label>
@@ -923,66 +1179,70 @@
                 <label class="seat-matrix-toggle"><input type="checkbox" data-cfg-seat-enable="titan" /><span>席位五 · <b data-seat-slot-name="titan">性能专家</b></span></label>
                 <label class="seat-matrix-toggle"><input type="checkbox" data-cfg-seat-enable="prism" /><span>席位六 · <b data-seat-slot-name="prism">质量验证</b></span></label>
               </div>
+
+              <!-- 低频「成员称呼预设与自定义席位名」折叠收口，减少首屏输入密度 -->
+              <details class="sidebar-advanced-fold v4-clean-fold">
+                <summary class="sidebar-advanced-summary">
+                  <span>个性化成员称呼方案与自定义席位别名（可选）</span>
+                  <span class="fold-caret" aria-hidden="true">▾</span>
+                </summary>
+                <div class="sidebar-advanced-body">
+                  <div class="roster-preset-row">
+                    <label>成员称呼预设方案</label>
+                    <select id="cfgRosterPresetSelect" class="select-input">
+                      <option value="role_experts" selected>专业职能称呼（架构师 / 审计官 / 工程师 / 交互设计 / 性能专家 / 质量验证）</option>
+                      <option value="council_alpha">中立席位代号（Alpha / Beta / Gamma / Delta / Epsilon / Zeta）</option>
+                      <option value="product_studio">产品研发委员会（产品总监 / 红队审计 / 研发主程 / 体验设计 / 稳定性架构 / 测试主管）</option>
+                      <option value="auto_driver">跟随底层引擎（自动映射 CLI · 职责）</option>
+                      <option value="classic">经典工程代号（Carbon / Grok / Astra / Vega / Titan / Prism）</option>
+                    </select>
+                  </div>
+                  <div class="roster-cfg-grid roster-cfg-grid-6">
+                    <div>
+                      <label>席位一自定义名</label>
+                      <input type="text" id="cfgCarbonName" class="text-input" maxlength="20" placeholder="留空跟预设（架构师）" />
+                    </div>
+                    <div>
+                      <label>席位二自定义名</label>
+                      <input type="text" id="cfgGrokName" class="text-input" maxlength="20" placeholder="留空跟预设（审计官）" />
+                    </div>
+                    <div>
+                      <label>席位三自定义名</label>
+                      <input type="text" id="cfgAstraName" class="text-input" maxlength="20" placeholder="留空跟预设（工程师）" />
+                    </div>
+                    <div>
+                      <label>席位四自定义名</label>
+                      <input type="text" id="cfgVegaName" class="text-input" maxlength="20" placeholder="留空跟预设（交互设计）" />
+                    </div>
+                    <div>
+                      <label>席位五自定义名</label>
+                      <input type="text" id="cfgTitanName" class="text-input" maxlength="20" placeholder="留空跟预设（性能专家）" />
+                    </div>
+                    <div>
+                      <label>席位六自定义名</label>
+                      <input type="text" id="cfgPrismName" class="text-input" maxlength="20" placeholder="留空跟预设（质量验证）" />
+                    </div>
+                  </div>
+                </div>
+              </details>
             </div>
 
-            <div class="modal-section-card">
-              <div class="modal-sec-head">
-                <span class="modal-sec-title">会议成员称呼方案与自定义名称</span>
-                <span class="modal-sec-hint">同步作用于顶栏席位环、讨论流、白板归属与 @点名</span>
-              </div>
-              <div class="roster-preset-row">
-                <label>成员称呼预设方案</label>
-                <select id="cfgRosterPresetSelect" class="select-input">
-                  <option value="role_experts" selected>专业职能称呼（架构师 / 审计官 / 工程师 / 交互设计 / 性能专家 / 质量验证）</option>
-                  <option value="council_alpha">中立席位代号（Alpha / Beta / Gamma / Delta / Epsilon / Zeta）</option>
-                  <option value="product_studio">产品研发委员会（产品总监 / 红队审计 / 研发主程 / 体验设计 / 稳定性架构 / 测试主管）</option>
-                  <option value="auto_driver">跟随底层引擎（自动映射 CLI · 职责）</option>
-                  <option value="classic">经典工程代号（Carbon / Grok / Astra / Vega / Titan / Prism）</option>
-                </select>
-              </div>
-              <div class="roster-cfg-grid roster-cfg-grid-6">
-                <div>
-                  <label>席位一自定义名</label>
-                  <input type="text" id="cfgCarbonName" class="text-input" maxlength="20" placeholder="留空跟预设（架构师）" />
-                </div>
-                <div>
-                  <label>席位二自定义名</label>
-                  <input type="text" id="cfgGrokName" class="text-input" maxlength="20" placeholder="留空跟预设（审计官）" />
-                </div>
-                <div>
-                  <label>席位三自定义名</label>
-                  <input type="text" id="cfgAstraName" class="text-input" maxlength="20" placeholder="留空跟预设（工程师）" />
-                </div>
-                <div>
-                  <label>席位四自定义名</label>
-                  <input type="text" id="cfgVegaName" class="text-input" maxlength="20" placeholder="留空跟预设（交互设计）" />
-                </div>
-                <div>
-                  <label>席位五自定义名</label>
-                  <input type="text" id="cfgTitanName" class="text-input" maxlength="20" placeholder="留空跟预设（性能专家）" />
-                </div>
-                <div>
-                  <label>席位六自定义名</label>
-                  <input type="text" id="cfgPrismName" class="text-input" maxlength="20" placeholder="留空跟预设（质量验证）" />
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <!-- 分页 2：席位与模型 -->
-          <section class="settings-pane" id="settings-pane-seats">
             <div class="seats-filter-bar">
-              <span class="modal-sec-hint">严格按所选推理档位调用 CLI（绝不静默降档）</span>
+              <span class="modal-sec-hint">默认仅展示已启用参会席位 · 点击芯片即选主力模型与合法推理档位</span>
               <label class="cfg-switch-label compact">
-                <input type="checkbox" id="cfgShowAllSixSeats" checked />
-                <span>显示全部 6 个席位配置卡</span>
+                <input type="checkbox" id="cfgShowAllSixSeats" />
+                <span>展开全部 6 个席位配置卡</span>
               </label>
             </div>
+
             <div class="agent-cfg-grid" id="modalAgentCfgGrid">
               <!-- 席位 1: Carbon -->
               <div class="agent-cfg-box cfg-carbon" data-cfg-seat-card="carbon">
                 <div class="cfg-box-head">
-                  <h4 id="cfgHeadCarbon">架构师（席位一）</h4>
+                  <div class="v4-cfg-head-left">
+                    <span class="v4-cfg-seat-badge badge-carbon" data-seat-icon="carbon"></span>
+                    <h4 id="cfgHeadCarbon">架构师（席位一）</h4>
+                  </div>
                   <span id="cfgStatusCarbon" class="driver-pill">检测中</span>
                 </div>
                 <div class="cfg-row-2">
@@ -1009,18 +1269,20 @@
                   </div>
                 </div>
                 <div class="cfg-row-2">
-                  <div>
-                    <label>指定模型</label>
-                    <input type="text" id="cfgCarbonModel" list="agyModelPresets" class="text-input" placeholder="如 gemini-4-carbon" />
+                  <div class="v4-model-picker-col">
+                    <label>
+                      <span>主力模型快选</span>
+                      <span class="v4-custom-model-toggle" data-v4-toggle-custom="Carbon"><svg class="v4-inline-svg" viewBox="0 0 24 24" width="11.5" height="11.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 19.5l1.4-4.8L15.2 5.4a1.8 1.8 0 0 1 2.5 2.5L8.4 17.2z"></path></svg><span>自定义模型名</span></span>
+                    </label>
+                    <div class="v4-model-chip-bar" id="v4ModelChipsCarbon"></div>
+                    <input type="text" id="cfgCarbonModel" list="agyModelPresets" class="text-input v4-compact-model-input hidden" placeholder="输入模型 ID（如 gemini-4-carbon）" />
                   </div>
-                  <div class="cfg-effort-pair">
-                    <div>
-                      <label>讨论档位 <span id="cfgCarbonEffortHint" class="cfg-effort-hint"></span></label>
-                      <select id="cfgCarbonEffort" class="select-input"><option value="high" selected>high</option></select>
-                    </div>
-                    <div>
-                      <label>执行档位</label>
-                      <select id="cfgCarbonExecEffort" class="select-input"><option value="high" selected>high</option></select>
+                  <div class="cfg-effort-pair v4-effort-col">
+                    <div class="v4-disc-effort-wrap">
+                      <label><span>推理档位</span><span id="cfgCarbonEffortHint" class="cfg-effort-hint"></span></label>
+                      <div class="v4-effort-seg" id="v4EffortSegCarbon"></div>
+                      <select id="cfgCarbonEffort" class="select-input hidden"><option value="high" selected>high</option></select>
+                      <select id="cfgCarbonExecEffort" class="select-input hidden"><option value="high" selected>high</option></select>
                     </div>
                   </div>
                 </div>
@@ -1029,7 +1291,10 @@
               <!-- 席位 2: Grok -->
               <div class="agent-cfg-box cfg-grok" data-cfg-seat-card="grok">
                 <div class="cfg-box-head">
-                  <h4 id="cfgHeadGrok">审计官（席位二）</h4>
+                  <div class="v4-cfg-head-left">
+                    <span class="v4-cfg-seat-badge badge-grok" data-seat-icon="grok"></span>
+                    <h4 id="cfgHeadGrok">审计官（席位二）</h4>
+                  </div>
                   <span id="cfgStatusGrok" class="driver-pill">检测中</span>
                 </div>
                 <div class="cfg-row-2">
@@ -1056,18 +1321,20 @@
                   </div>
                 </div>
                 <div class="cfg-row-2">
-                  <div>
-                    <label>指定模型</label>
-                    <input type="text" id="cfgGrokModel" list="grokModelPresets" class="text-input" placeholder="如 grok-4.7" />
+                  <div class="v4-model-picker-col">
+                    <label>
+                      <span>主力模型快选</span>
+                      <span class="v4-custom-model-toggle" data-v4-toggle-custom="Grok"><svg class="v4-inline-svg" viewBox="0 0 24 24" width="11.5" height="11.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 19.5l1.4-4.8L15.2 5.4a1.8 1.8 0 0 1 2.5 2.5L8.4 17.2z"></path></svg><span>自定义模型名</span></span>
+                    </label>
+                    <div class="v4-model-chip-bar" id="v4ModelChipsGrok"></div>
+                    <input type="text" id="cfgGrokModel" list="grokModelPresets" class="text-input v4-compact-model-input hidden" placeholder="输入模型 ID（如 grok-4.7）" />
                   </div>
-                  <div class="cfg-effort-pair">
-                    <div>
-                      <label>讨论档位 <span id="cfgGrokEffortHint" class="cfg-effort-hint"></span></label>
-                      <select id="cfgGrokEffort" class="select-input"><option value="xhigh" selected>xhigh</option></select>
-                    </div>
-                    <div>
-                      <label>执行档位</label>
-                      <select id="cfgGrokExecEffort" class="select-input"><option value="xhigh" selected>xhigh</option></select>
+                  <div class="cfg-effort-pair v4-effort-col">
+                    <div class="v4-disc-effort-wrap">
+                      <label><span>推理档位</span><span id="cfgGrokEffortHint" class="cfg-effort-hint"></span></label>
+                      <div class="v4-effort-seg" id="v4EffortSegGrok"></div>
+                      <select id="cfgGrokEffort" class="select-input hidden"><option value="xhigh" selected>xhigh</option></select>
+                      <select id="cfgGrokExecEffort" class="select-input hidden"><option value="xhigh" selected>xhigh</option></select>
                     </div>
                   </div>
                 </div>
@@ -1076,7 +1343,10 @@
               <!-- 席位 3: Astra -->
               <div class="agent-cfg-box cfg-astra" data-cfg-seat-card="astra">
                 <div class="cfg-box-head">
-                  <h4 id="cfgHeadAstra">工程师（席位三）</h4>
+                  <div class="v4-cfg-head-left">
+                    <span class="v4-cfg-seat-badge badge-astra" data-seat-icon="astra"></span>
+                    <h4 id="cfgHeadAstra">工程师（席位三）</h4>
+                  </div>
                   <span id="cfgStatusAstra" class="driver-pill">检测中</span>
                 </div>
                 <div class="cfg-row-2">
@@ -1103,27 +1373,32 @@
                   </div>
                 </div>
                 <div class="cfg-row-2">
-                  <div>
-                    <label>指定模型</label>
-                    <input type="text" id="cfgAstraModel" list="codexModelPresets" class="text-input" placeholder="如 gpt-6-astra" />
+                  <div class="v4-model-picker-col">
+                    <label>
+                      <span>主力模型快选</span>
+                      <span class="v4-custom-model-toggle" data-v4-toggle-custom="Astra"><svg class="v4-inline-svg" viewBox="0 0 24 24" width="11.5" height="11.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 19.5l1.4-4.8L15.2 5.4a1.8 1.8 0 0 1 2.5 2.5L8.4 17.2z"></path></svg><span>自定义模型名</span></span>
+                    </label>
+                    <div class="v4-model-chip-bar" id="v4ModelChipsAstra"></div>
+                    <input type="text" id="cfgAstraModel" list="codexModelPresets" class="text-input v4-compact-model-input hidden" placeholder="输入模型 ID（如 gpt-6-astra）" />
                   </div>
-                  <div class="cfg-effort-pair">
-                    <div>
-                      <label>讨论档位 <span id="cfgAstraEffortHint" class="cfg-effort-hint"></span></label>
-                      <select id="cfgAstraEffort" class="select-input"><option value="max" selected>max</option></select>
-                    </div>
-                    <div>
-                      <label>执行档位</label>
-                      <select id="cfgAstraExecEffort" class="select-input"><option value="max" selected>max</option></select>
+                  <div class="cfg-effort-pair v4-effort-col">
+                    <div class="v4-disc-effort-wrap">
+                      <label><span>推理档位</span><span id="cfgAstraEffortHint" class="cfg-effort-hint"></span></label>
+                      <div class="v4-effort-seg" id="v4EffortSegAstra"></div>
+                      <select id="cfgAstraEffort" class="select-input hidden"><option value="max" selected>max</option></select>
+                      <select id="cfgAstraExecEffort" class="select-input hidden"><option value="max" selected>max</option></select>
                     </div>
                   </div>
                 </div>
               </div>
 
-              <!-- 席位 4: Vega -->
-              <div class="agent-cfg-box cfg-vega" data-cfg-seat-card="vega">
+              <!-- 席位 4: Vega（未启用时默认折叠隐藏） -->
+              <div class="agent-cfg-box cfg-vega hidden" data-cfg-seat-card="vega">
                 <div class="cfg-box-head">
-                  <h4 id="cfgHeadVega">交互设计（席位四）</h4>
+                  <div class="v4-cfg-head-left">
+                    <span class="v4-cfg-seat-badge badge-vega" data-seat-icon="vega"></span>
+                    <h4 id="cfgHeadVega">交互设计（席位四）</h4>
+                  </div>
                   <span id="cfgStatusVega" class="driver-pill">检测中</span>
                 </div>
                 <div class="cfg-row-2">
@@ -1150,27 +1425,32 @@
                   </div>
                 </div>
                 <div class="cfg-row-2">
-                  <div>
-                    <label>指定模型</label>
-                    <input type="text" id="cfgVegaModel" list="agyModelPresets" class="text-input" placeholder="留空跟随驱动默认模型" />
+                  <div class="v4-model-picker-col">
+                    <label>
+                      <span>主力模型快选</span>
+                      <span class="v4-custom-model-toggle" data-v4-toggle-custom="Vega"><svg class="v4-inline-svg" viewBox="0 0 24 24" width="11.5" height="11.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 19.5l1.4-4.8L15.2 5.4a1.8 1.8 0 0 1 2.5 2.5L8.4 17.2z"></path></svg><span>自定义模型名</span></span>
+                    </label>
+                    <div class="v4-model-chip-bar" id="v4ModelChipsVega"></div>
+                    <input type="text" id="cfgVegaModel" list="agyModelPresets" class="text-input v4-compact-model-input hidden" placeholder="留空跟随驱动默认模型" />
                   </div>
-                  <div class="cfg-effort-pair">
-                    <div>
-                      <label>讨论档位 <span id="cfgVegaEffortHint" class="cfg-effort-hint"></span></label>
-                      <select id="cfgVegaEffort" class="select-input"><option value="high" selected>high</option></select>
-                    </div>
-                    <div>
-                      <label>执行档位</label>
-                      <select id="cfgVegaExecEffort" class="select-input"><option value="high" selected>high</option></select>
+                  <div class="cfg-effort-pair v4-effort-col">
+                    <div class="v4-disc-effort-wrap">
+                      <label><span>推理档位</span><span id="cfgVegaEffortHint" class="cfg-effort-hint"></span></label>
+                      <div class="v4-effort-seg" id="v4EffortSegVega"></div>
+                      <select id="cfgVegaEffort" class="select-input hidden"><option value="high" selected>high</option></select>
+                      <select id="cfgVegaExecEffort" class="select-input hidden"><option value="high" selected>high</option></select>
                     </div>
                   </div>
                 </div>
               </div>
 
-              <!-- 席位 5: Titan -->
-              <div class="agent-cfg-box cfg-titan" data-cfg-seat-card="titan">
+              <!-- 席位 5: Titan（未启用时默认折叠隐藏） -->
+              <div class="agent-cfg-box cfg-titan hidden" data-cfg-seat-card="titan">
                 <div class="cfg-box-head">
-                  <h4 id="cfgHeadTitan">性能专家（席位五）</h4>
+                  <div class="v4-cfg-head-left">
+                    <span class="v4-cfg-seat-badge badge-titan" data-seat-icon="titan"></span>
+                    <h4 id="cfgHeadTitan">性能专家（席位五）</h4>
+                  </div>
                   <span id="cfgStatusTitan" class="driver-pill">检测中</span>
                 </div>
                 <div class="cfg-row-2">
@@ -1197,27 +1477,32 @@
                   </div>
                 </div>
                 <div class="cfg-row-2">
-                  <div>
-                    <label>指定模型</label>
-                    <input type="text" id="cfgTitanModel" list="codexModelPresets" class="text-input" placeholder="留空跟随驱动默认模型" />
+                  <div class="v4-model-picker-col">
+                    <label>
+                      <span>主力模型快选</span>
+                      <span class="v4-custom-model-toggle" data-v4-toggle-custom="Titan"><svg class="v4-inline-svg" viewBox="0 0 24 24" width="11.5" height="11.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 19.5l1.4-4.8L15.2 5.4a1.8 1.8 0 0 1 2.5 2.5L8.4 17.2z"></path></svg><span>自定义模型名</span></span>
+                    </label>
+                    <div class="v4-model-chip-bar" id="v4ModelChipsTitan"></div>
+                    <input type="text" id="cfgTitanModel" list="codexModelPresets" class="text-input v4-compact-model-input hidden" placeholder="留空跟随驱动默认模型" />
                   </div>
-                  <div class="cfg-effort-pair">
-                    <div>
-                      <label>讨论档位 <span id="cfgTitanEffortHint" class="cfg-effort-hint"></span></label>
-                      <select id="cfgTitanEffort" class="select-input"><option value="high" selected>high</option></select>
-                    </div>
-                    <div>
-                      <label>执行档位</label>
-                      <select id="cfgTitanExecEffort" class="select-input"><option value="high" selected>high</option></select>
+                  <div class="cfg-effort-pair v4-effort-col">
+                    <div class="v4-disc-effort-wrap">
+                      <label><span>推理档位</span><span id="cfgTitanEffortHint" class="cfg-effort-hint"></span></label>
+                      <div class="v4-effort-seg" id="v4EffortSegTitan"></div>
+                      <select id="cfgTitanEffort" class="select-input hidden"><option value="high" selected>high</option></select>
+                      <select id="cfgTitanExecEffort" class="select-input hidden"><option value="high" selected>high</option></select>
                     </div>
                   </div>
                 </div>
               </div>
 
-              <!-- 席位 6: Prism -->
-              <div class="agent-cfg-box cfg-prism" data-cfg-seat-card="prism">
+              <!-- 席位 6: Prism（未启用时默认折叠隐藏） -->
+              <div class="agent-cfg-box cfg-prism hidden" data-cfg-seat-card="prism">
                 <div class="cfg-box-head">
-                  <h4 id="cfgHeadPrism">质量验证（席位六）</h4>
+                  <div class="v4-cfg-head-left">
+                    <span class="v4-cfg-seat-badge badge-prism" data-seat-icon="prism"></span>
+                    <h4 id="cfgHeadPrism">质量验证（席位六）</h4>
+                  </div>
                   <span id="cfgStatusPrism" class="driver-pill">检测中</span>
                 </div>
                 <div class="cfg-row-2">
@@ -1244,18 +1529,20 @@
                   </div>
                 </div>
                 <div class="cfg-row-2">
-                  <div>
-                    <label>指定模型</label>
-                    <input type="text" id="cfgPrismModel" list="grokModelPresets" class="text-input" placeholder="留空跟随驱动默认模型" />
+                  <div class="v4-model-picker-col">
+                    <label>
+                      <span>主力模型快选</span>
+                      <span class="v4-custom-model-toggle" data-v4-toggle-custom="Prism"><svg class="v4-inline-svg" viewBox="0 0 24 24" width="11.5" height="11.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 19.5l1.4-4.8L15.2 5.4a1.8 1.8 0 0 1 2.5 2.5L8.4 17.2z"></path></svg><span>自定义模型名</span></span>
+                    </label>
+                    <div class="v4-model-chip-bar" id="v4ModelChipsPrism"></div>
+                    <input type="text" id="cfgPrismModel" list="grokModelPresets" class="text-input v4-compact-model-input hidden" placeholder="留空跟随驱动默认模型" />
                   </div>
-                  <div class="cfg-effort-pair">
-                    <div>
-                      <label>讨论档位 <span id="cfgPrismEffortHint" class="cfg-effort-hint"></span></label>
-                      <select id="cfgPrismEffort" class="select-input"><option value="high" selected>high</option></select>
-                    </div>
-                    <div>
-                      <label>执行档位</label>
-                      <select id="cfgPrismExecEffort" class="select-input"><option value="high" selected>high</option></select>
+                  <div class="cfg-effort-pair v4-effort-col">
+                    <div class="v4-disc-effort-wrap">
+                      <label><span>推理档位</span><span id="cfgPrismEffortHint" class="cfg-effort-hint"></span></label>
+                      <div class="v4-effort-seg" id="v4EffortSegPrism"></div>
+                      <select id="cfgPrismEffort" class="select-input hidden"><option value="high" selected>high</option></select>
+                      <select id="cfgPrismExecEffort" class="select-input hidden"><option value="high" selected>high</option></select>
                     </div>
                   </div>
                 </div>
@@ -1263,23 +1550,38 @@
             </div>
           </section>
 
-          <!-- 分页 3：并发与时限 -->
+          <!-- 分页 2：并发与安全护栏（融合单 CLI 真并行引擎池 + 时限护栏 + 工作区绑定与验证钩子） -->
           <section class="settings-pane" id="settings-pane-concurrency">
             <div class="modal-section-card">
               <div class="modal-sec-head">
+                <span class="modal-sec-title">本地项目工作区目录 (<code>cwd</code>) 与自动验证钩子</span>
+                <span class="modal-sec-hint">写前自动生成无 Git 依赖 CAS 快照 · 支持一键原子回滚</span>
+              </div>
+              <div class="input-with-btn">
+                <input type="text" id="cfgWorkspaceDir" class="text-input" placeholder="/Users/yourname/project" />
+                <button type="button" id="browseWorkspaceBtn" class="mini-outline-btn">选择文件夹…</button>
+              </div>
+              <div style="margin-top: 10px;">
+                <label class="field-block-label">执行后只读验证命令（可选，失败时自动高亮提示一键回滚）</label>
+                <input type="text" id="cfgPostExecVerifyCmd" class="text-input" placeholder="例如：pytest -q 或 python3 scripts/check_cli.py" />
+              </div>
+            </div>
+
+            <div class="modal-section-card">
+              <div class="modal-sec-head">
                 <span class="modal-sec-title">单 CLI 多次真并行调用引擎池</span>
-                <span class="modal-sec-hint">独立 <code>TMPDIR</code> 隔离防锁冲突 · 保留 <code>HOME</code> 认证凭据 · 80ms 错峰发车</span>
+                <span class="modal-sec-hint">独立 <code>TMPDIR</code> 隔离防锁冲突 · 保留登录态 · 80ms 错峰发车</span>
               </div>
               <div class="single-engine-top">
                 <label class="cfg-switch-label">
                   <input type="checkbox" id="cfgSingleCliFallback" checked />
-                  <span>启用单引擎多角色自动代答（当某席位 CLI 未安装时，自动借用已就绪引擎无状态并行/串行代答）</span>
+                  <span>启用单引擎多角色自动代答（当某席位 CLI 未安装时，自动借用就绪引擎并行/串行代答）</span>
                 </label>
               </div>
               <div class="single-cli-triad-bar">
                 <div class="triad-bar-info">
-                  <strong>单 CLI 多席位真并行编排：</strong>
-                  <span>仅需单个可用 CLI（如 <code>agy</code> 或 <code>codex</code>），即可按 1–6 路真并发驱动多席正交视角立论与质询；首包前遇瞬时 <code>429</code> 自动退避重试一次。</span>
+                  <strong>一键统一引擎与并发度：</strong>
+                  <span>仅需单个可用 CLI（如 <code>agy</code> 或 <code>codex</code>），即可按 1–6 路真并发驱动多席独立立论与质询。</span>
                 </div>
                 <div class="triad-bar-actions">
                   <select id="singleCliTriadDriver" class="select-input triad-driver-select" title="选择用于统一驱动全部席位的底层 CLI">
@@ -1327,88 +1629,57 @@
             </div>
           </section>
 
-          <!-- 分页 4：安全与工作区 -->
-          <section class="settings-pane" id="settings-pane-workspace">
-            <div class="modal-section-card">
-              <div class="modal-sec-head">
-                <span class="modal-sec-title">本地项目工作区目录 (<code>cwd</code>)</span>
-                <span class="modal-sec-hint">非空闲会话禁止切目录 · 自动拦截系统与私有备份目录</span>
-              </div>
-              <div class="input-with-btn">
-                <input type="text" id="cfgWorkspaceDir" class="text-input" placeholder="/Users/yourname/project" />
-                <button type="button" id="browseWorkspaceBtn" class="mini-outline-btn">选择文件夹…</button>
-              </div>
-            </div>
-
-            <div class="modal-section-card">
-              <div class="modal-sec-head">
-                <span class="modal-sec-title">执行后只读自动验证钩子（P2 交付闭环）</span>
-                <span class="modal-sec-hint">写入完成后自动运行校验，失败时高亮提示一键回滚</span>
-              </div>
-              <div>
-                <label class="field-block-label">验证命令（可选，留空不启用；在绑定工作区根目录只读超时保护下执行）</label>
-                <input type="text" id="cfgPostExecVerifyCmd" class="text-input" placeholder="例如：pytest -q 或 python3 scripts/check_cli.py" />
-              </div>
-            </div>
-
-            <div class="modal-section-card security-summary-card">
-              <div class="modal-sec-head">
-                <span class="modal-sec-title">已启用的架构级安全契约</span>
-              </div>
-              <ul class="security-contract-list">
-                <li><strong>控制面鉴权：</strong>全链路内存态 <code>X-Roundtable-Token</code> + <code>Host</code> 端口精确校验，零 CORS 暴露。</li>
-                <li><strong>写前 CAS 字节证明：</strong>纯标准库 <code>lstat + O_NOFOLLOW + sha256 + fsync</code> 备份已跟踪及忽略文件（上限 128 MiB），不依赖 Git。</li>
-                <li><strong>单飞锁与孤儿围栏：</strong>跨进程非阻塞 <code>flock(LOCK_NB)</code> + 生命线管道 EOF 进程组自毁，杜绝僵尸写盘。</li>
-              </ul>
-            </div>
-          </section>
-
-          <!-- 分页 5：驱动与诊断 -->
+          <!-- 分页 3：驱动与环境诊断（运行态信息置顶，低频自定义二进制路径折叠收口） -->
           <section class="settings-pane" id="settings-pane-diagnostics">
             <div class="modal-section-card">
               <div class="modal-sec-head">
-                <span class="modal-sec-title">自定义 CLI 可执行路径 (<code>custom_binary</code>)</span>
-                <span class="modal-sec-hint">留空自动探测系统 PATH 与常见桌面客户端内置路径</span>
-              </div>
-              <div class="cfg-row-3">
-                <div>
-                  <label>席位一 (Carbon) 路径</label>
-                  <input type="text" id="cfgCarbonBin" class="text-input" placeholder="留空自动探测" />
-                </div>
-                <div>
-                  <label>席位二 (Grok) 路径</label>
-                  <input type="text" id="cfgGrokBin" class="text-input" placeholder="留空自动探测" />
-                </div>
-                <div>
-                  <label>席位三 (Astra) 路径</label>
-                  <input type="text" id="cfgAstraBin" class="text-input" placeholder="留空自动探测（支持 .app）" />
-                </div>
-                <div>
-                  <label>席位四 (Vega) 路径</label>
-                  <input type="text" id="cfgVegaBin" class="text-input" placeholder="留空自动探测" />
-                </div>
-                <div>
-                  <label>席位五 (Titan) 路径</label>
-                  <input type="text" id="cfgTitanBin" class="text-input" placeholder="留空自动探测" />
-                </div>
-                <div>
-                  <label>席位六 (Prism) 路径</label>
-                  <input type="text" id="cfgPrismBin" class="text-input" placeholder="留空自动探测" />
-                </div>
-              </div>
-            </div>
-
-            <div class="modal-section-card">
-              <div class="modal-sec-head">
-                <span class="modal-sec-title">运行态环境与声明式驱动热加载诊断</span>
+                <span class="modal-sec-title">运行态环境、进程隔离与写前快照诊断</span>
                 <span id="diagSqliteBadge" class="driver-pill live">SQLite WAL</span>
               </div>
               <div class="diag-kv-grid" id="diagRuntimeInfo">
                 <div><span>运行源码根路径：</span><code id="diagRuntimeCodeRoot">读取中…</code></div>
                 <div><span>会话控制面 Boot ID：</span><code id="diagBootId">读取中…</code></div>
+                <div><span>并发调用沙箱机制：</span><code id="diagIsolationSpec">独立 TMPDIR 隔离 · 进程组围栏收割</code></div>
+                <div><span>写盘安全防护基线：</span><code>非阻塞 flock + 字节级 CAS 安全快照（≤128 MiB）</code></div>
+                <div><span>多模态附件隔离仓：</span><code>~/.ai-roundtable/attachments/</code></div>
                 <div><span>热加载驱动扩展清单：</span><code>~/.ai-roundtable/drivers.json</code></div>
               </div>
             </div>
+
+            <details class="sidebar-advanced-fold v4-clean-fold">
+              <summary class="sidebar-advanced-summary">
+                <span>高级：手动指定 CLI 可执行文件绝对路径（默认自动探测，无需填写）</span>
+                <span class="fold-caret" aria-hidden="true">▾</span>
+              </summary>
+              <div class="sidebar-advanced-body">
+                <div class="cfg-row-3">
+                  <div>
+                    <label>席位一 (Carbon) 路径</label>
+                    <input type="text" id="cfgCarbonBin" class="text-input" placeholder="留空自动探测" />
+                  </div>
+                  <div>
+                    <label>席位二 (Grok) 路径</label>
+                    <input type="text" id="cfgGrokBin" class="text-input" placeholder="留空自动探测" />
+                  </div>
+                  <div>
+                    <label>席位三 (Astra) 路径</label>
+                    <input type="text" id="cfgAstraBin" class="text-input" placeholder="留空自动探测（支持 .app）" />
+                  </div>
+                  <div>
+                    <label>席位四 (Vega) 路径</label>
+                    <input type="text" id="cfgVegaBin" class="text-input" placeholder="留空自动探测" />
+                  </div>
+                  <div>
+                    <label>席位五 (Titan) 路径</label>
+                    <input type="text" id="cfgTitanBin" class="text-input" placeholder="留空自动探测" />
+                  </div>
+                  <div>
+                    <label>席位六 (Prism) 路径</label>
+                    <input type="text" id="cfgPrismBin" class="text-input" placeholder="留空自动探测" />
+                  </div>
+                </div>
+              </div>
+            </details>
           </section>
         </div>
       </div>
@@ -1423,9 +1694,21 @@
     </div>
   </div>
 
+  <!-- 图片高清预览灯箱（Lightbox） -->
+  <div id="v4LightboxModal" class="v4-lightbox-backdrop hidden" role="dialog" aria-modal="true" aria-label="图片附件大图预览">
+    <div class="v4-lightbox-inner">
+      <div class="v4-lightbox-top">
+        <span id="v4LightboxCaption" class="v4-lightbox-caption">图片预览</span>
+        <button type="button" id="v4LightboxCloseBtn" class="v4-lightbox-close" aria-label="关闭预览"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="6" y1="6" x2="18" y2="18"></line><line x1="18" y1="6" x2="6" y2="18"></line></svg></button>
+      </div>
+      <img id="v4LightboxImg" class="v4-lightbox-img" src="" alt="图片附件大图预览" />
+    </div>
+  </div>
+
   <!-- 全局轻提示容器 -->
   <div id="toastContainer" class="toast-container"></div>
 
   <script type="module" src="/app.js"></script>
+  <script type="module" src="/v4_ui.js"></script>
 </body>
 </html>

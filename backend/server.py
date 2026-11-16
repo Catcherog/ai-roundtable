@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-AI圆桌 — 异步 HTTP + 流式 SSE 安全控制面服务端（v3 P0 全链路加固版）
+AI圆桌 — 异步 HTTP + 流式 SSE 安全控制面服务端（v4 多模态附件与 P0 全链路加固版）
 
 核心安全防线：
-1. 协议前置限额：请求行 <= 4 KiB，Header 行数 <= 64、单行 <= 8 KiB；Content-Length 严格非负十进制整数且 <= 1 MiB（超限前置 413）。
+1. 协议前置限额：请求行 <= 4 KiB，Header 行数 <= 64、单行 <= 8 KiB；常规 JSON 接口严格 <= 1 MiB（超限前置 413），
+   仅已通过 `X-Roundtable-Token` 鉴权的会话附件上传端点 `/api/sessions/{sid}/attachments` 允许 <= 16 MiB Base64 载荷。
 2. 同源与 Host 强校验：Host 头与监听 `host:port` 字节级精确匹配，非同源 Origin 一律 403，彻底移除全部 CORS 响应头与 500 堆栈回显。
-3. 全链路 `X-Roundtable-Token` 内存鉴权：单点拦截全部 `/api/*`（含流式 SSE 与原生忙态探针），配合 Web 端 `#bootstrap` 单次兑换码核销。
+3. 全链路 `X-Roundtable-Token` 内存鉴权：单点拦截全部 `/api/*`（含流式 SSE、原生忙态探针与多模态附件流），配合 Web 端 `#bootstrap` 单次兑换码核销。
 4. 高危旁路收口：`pick-folder` 禁传 `direct_path` 且仅更新默认新建目录；会话切目录统一收口至 `/api/sessions/{sid}/workspace`；
    `export` 纯内存生成字节流响应不落服务端磁盘；`allow_workspace_write` 严格校验 JSON 布尔类型。
 """
@@ -19,10 +20,10 @@ import hmac
 import json
 import mimetypes
 import os
+import re
 import secrets
 import subprocess
 import sys
-import time
 import traceback
 import urllib.parse
 from pathlib import Path
@@ -32,6 +33,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from backend.attachments import RASTER_IMAGE_MIMES  # noqa: E402
 from backend.orchestrator import (  # noqa: E402
     ExecutionAdmissionConflictError,
     RoundtableOrchestrator,
@@ -39,10 +41,13 @@ from backend.orchestrator import (  # noqa: E402
 
 FRONTEND_DIR = (ROOT_DIR / "frontend").resolve()
 
-MAX_REQUEST_LINE_BYTES = 4 * 1024       # 4 KiB
-MAX_HEADER_LINE_BYTES = 8 * 1024        # 8 KiB
+MAX_REQUEST_LINE_BYTES = 4 * 1024  # 4 KiB
+MAX_HEADER_LINE_BYTES = 8 * 1024  # 8 KiB
 MAX_HEADER_COUNT = 64
-MAX_BODY_BYTES = 1 * 1024 * 1024        # 1 MiB
+MAX_BODY_BYTES = 1 * 1024 * 1024  # 1 MiB（常规控制面接口前置限额）
+MAX_ATTACHMENT_BODY_BYTES = 16 * 1024 * 1024  # 16 MiB（仅限已鉴权会话附件上传端点）
+
+_ATTACHMENT_UPLOAD_PATH_RE = re.compile(r"^/api/sessions/[A-Za-z0-9_-]{2,64}/attachments$")
 
 HTTP_STATUS_TEXT = {
     200: "OK",
@@ -114,6 +119,7 @@ class AsyncHTTPServer:
             boot_id=self.boot_id,
             runtime_code_root=str(ROOT_DIR),
         )
+        self.attachments = self.orchestrator.attachments
 
     def _verify_token(self, headers: Dict[str, str]) -> bool:
         provided = headers.get("x-roundtable-token", "")
@@ -188,7 +194,14 @@ class AsyncHTTPServer:
                 await self._send_json(writer, 405, {"error": "已禁用 CORS 预检方法"})
                 return
 
-            # 3. Content-Length 仅接受非负十进制整数且 <= 1 MiB（在 readexactly 前直接返回 413）
+            # 3. Content-Length 前置校验（常规接口 <= 1 MiB；已鉴权附件上传接口 <= 16 MiB）
+            is_att_upload = bool(method == "POST" and _ATTACHMENT_UPLOAD_PATH_RE.fullmatch(path))
+            if is_att_upload:
+                if "token" in query_params or "access_token" in query_params or not self._verify_token(headers):
+                    await self._send_json(writer, 401, {"error": "缺少或无效的 X-Roundtable-Token 凭据"})
+                    return
+
+            effective_max_body = MAX_ATTACHMENT_BODY_BYTES if is_att_upload else MAX_BODY_BYTES
             raw_cl = headers.get("content-length")
             content_len = 0
             if raw_cl is not None:
@@ -196,13 +209,15 @@ class AsyncHTTPServer:
                     await self._send_json(writer, 400, {"error": "Content-Length 必须为非负十进制整数"})
                     return
                 content_len = int(raw_cl)
-                if content_len > MAX_BODY_BYTES:
-                    await self._send_json(writer, 413, {"error": "请求体超过 1 MiB 上限"})
+                if content_len > effective_max_body:
+                    limit_label = "16 MiB" if is_att_upload else "1 MiB"
+                    await self._send_json(writer, 413, {"error": f"请求体超过 {limit_label} 上限"})
                     return
 
             body_bytes = b""
             if content_len > 0:
-                body_bytes = await asyncio.wait_for(reader.readexactly(content_len), timeout=15.0)
+                read_timeout = 35.0 if is_att_upload else 15.0
+                body_bytes = await asyncio.wait_for(reader.readexactly(content_len), timeout=read_timeout)
 
             if path.startswith("/api/"):
                 await self._route_api(method, path, query_params, headers, body_bytes, writer)
@@ -477,6 +492,8 @@ class AsyncHTTPServer:
                 title=str(data.get("title", "新会议")),
                 collab_mode=str(data.get("collab_mode", "deep_deliberation")),
                 auto_preview_exec=bool(raw_auto) if raw_auto is not None else None,
+                scenario_pack=str(data.get("scenario_pack") or "").strip().lower() or None,
+                artifact_type=str(data.get("artifact_type") or "").strip().lower() or None,
             )
             await self._send_json(
                 writer,
@@ -490,8 +507,10 @@ class AsyncHTTPServer:
             sid = segs[2]
             action = segs[3] if len(segs) >= 4 else ""
             sub_action = segs[4] if len(segs) >= 5 else ""
+            third_action = segs[5] if len(segs) >= 6 else ""
 
             if method == "DELETE" and action == "":
+                self.attachments.delete_session_attachments(sid)
                 next_sid = await self.orchestrator.delete_session(sid)
                 if not next_sid:
                     await self._send_json(writer, 404, {"error": f"未找到会议会话 {sid}"})
@@ -512,8 +531,74 @@ class AsyncHTTPServer:
                 await self._send_json(writer, 404, {"error": f"未找到会议会话 {sid}"})
                 return
 
+            # v4 多模态附件路由：列表 / 上传 / 安全二进制读取 / 删除
+            if action == "attachments":
+                if method == "GET" and sub_action == "":
+                    items = await asyncio.to_thread(self.attachments.list_attachments, sid)
+                    await self._send_json(writer, 200, {"ok": True, "attachments": items})
+                    return
+
+                if method == "POST" and sub_action == "":
+                    att_req, jerr = self._parse_json_strict(body_bytes)
+                    if jerr is not None or att_req is None:
+                        await self._send_json(writer, 400, {"error": jerr or "附件请求 JSON 非法"})
+                        return
+                    fname = str(att_req.get("filename") or "attachment").strip()
+                    dmime = str(att_req.get("mime_type") or "").strip()
+                    b64 = str(att_req.get("data_base64") or "").strip()
+                    try:
+                        saved = await asyncio.to_thread(
+                            self.attachments.save_base64_attachment,
+                            sid,
+                            filename=fname,
+                            data_base64=b64,
+                            declared_mime=dmime,
+                        )
+                        if self.orchestrator.get_session(sid) is not sess:
+                            await asyncio.to_thread(self.attachments.delete_session_attachments, sid)
+                            await self._send_json(writer, 404, {"error": "会话已删除"})
+                            return
+                    except ValueError as ve:
+                        await self._send_json(writer, 400, {"error": str(ve)})
+                        return
+                    await self._send_json(writer, 201, {"ok": True, "attachment": saved})
+                    return
+
+                if method == "GET" and sub_action and third_action in ("", "raw"):
+                    meta, raw_b = await asyncio.to_thread(self.attachments.get_attachment_bytes, sid, sub_action)
+                    if meta is None or raw_b is None:
+                        await self._send_json(writer, 404, {"error": "附件不存在或已被移除"})
+                        return
+                    if third_action == "":
+                        await self._send_json(writer, 200, {"ok": True, "attachment": meta})
+                        return
+                    mtype = str(meta.get("mime_type") or "application/octet-stream")
+                    extra = {
+                        "Content-Security-Policy": "default-src 'none'; img-src 'self' data: blob:; sandbox",
+                    }
+                    if mtype not in RASTER_IMAGE_MIMES:
+                        enc_name = urllib.parse.quote(str(meta.get("name") or "attachment"))
+                        extra["Content-Disposition"] = f"attachment; filename*=UTF-8''{enc_name}"
+                    await self._send_bytes(writer, 200, raw_b, content_type=mtype, extra_headers=extra)
+                    return
+
+                if method == "DELETE" and sub_action:
+                    removed = await asyncio.to_thread(self.attachments.delete_attachment, sid, sub_action)
+                    if not removed:
+                        await self._send_json(writer, 404, {"error": "未找到目标附件"})
+                        return
+                    sess_atts = sess.whiteboard.get("session_attachments")
+                    if isinstance(sess_atts, list):
+                        sess.whiteboard["session_attachments"] = [
+                            x for x in sess_atts if isinstance(x, dict) and x.get("id") != sub_action
+                        ]
+                    await self._send_json(writer, 200, {"ok": True, "deleted_id": sub_action})
+                    return
+
             if method == "GET" and action == "":
-                await self._send_json(writer, 200, {"boot_id": self.boot_id, "session": sess.to_snapshot()})
+                snap = sess.to_snapshot()
+                snap["available_attachments"] = await asyncio.to_thread(self.attachments.list_attachments, sid)
+                await self._send_json(writer, 200, {"boot_id": self.boot_id, "session": snap})
                 return
 
             if method == "GET" and action == "stream":
@@ -539,6 +624,17 @@ class AsyncHTTPServer:
                             {"error": "export 接口已收口为服务端内存生成下载流，禁止客户端直传 markdown 写盘"},
                         )
                         return
+                if not sess.has_exportable_content():
+                    await self._send_json(
+                        writer,
+                        409,
+                        {
+                            "ok": False,
+                            "error": "当前会话尚无有效发言或白板条目，禁止导出空白纪要",
+                            "reason": "empty_session_export",
+                        },
+                    )
+                    return
                 md_bytes, filename = self.orchestrator.build_session_export_bytes(sess)
                 encoded_fn = urllib.parse.quote(filename)
                 await self._send_bytes(
@@ -570,9 +666,28 @@ class AsyncHTTPServer:
                 return
 
             if method == "POST" and action == "start":
+                raw_att_ids = payload.get("attachment_ids")
+                att_ids = [str(x).strip() for x in raw_att_ids if str(x).strip()] if isinstance(raw_att_ids, list) else []
+                resolved_atts = self.attachments.resolve_attachments(sid, att_ids) if att_ids else []
                 topic = str(payload.get("topic", "")).strip() or sess.topic
+                if not topic and resolved_atts:
+                    names_preview = "、".join(a["name"] for a in resolved_atts[:3])
+                    topic = f"请结合附件（{names_preview}）开展协同评审并给出工程落地方案。"
                 if not topic:
                     await self._send_json(writer, 400, {"error": "议题内容不能为空"})
+                    return
+                ref_errs = self.orchestrator.validate_message_file_references(sess, topic)
+                if ref_errs:
+                    await self._send_json(
+                        writer,
+                        400,
+                        {
+                            "ok": False,
+                            "error": "引用文件快照读取校验未通过：" + "；".join(ref_errs),
+                            "reason": "invalid_file_reference",
+                            "invalid_refs": ref_errs,
+                        },
+                    )
                     return
                 collab_mode = payload.get("collab_mode")
                 raw_auto_exec = payload.get("auto_preview_exec")
@@ -580,9 +695,10 @@ class AsyncHTTPServer:
                 seat_personas = payload.get("seat_personas")
                 seat_efforts = payload.get("seat_efforts")
                 executor_agent = str(payload.get("executor_agent", "")).strip().lower() or None
+                scenario_pack = str(payload.get("scenario_pack", "")).strip().lower() or None
+                artifact_type = str(payload.get("artifact_type", "")).strip().lower() or None
                 reset_history = bool(payload.get("reset_history", False))
-                await self.orchestrator.start_topic_meeting(
-                    sess,
+                start_kwargs = dict(
                     topic=topic,
                     collab_mode=collab_mode,
                     auto_preview_exec=bool(raw_auto_exec) if raw_auto_exec is not None else None,
@@ -590,17 +706,39 @@ class AsyncHTTPServer:
                     seat_personas=seat_personas if isinstance(seat_personas, dict) else None,
                     seat_efforts=seat_efforts if isinstance(seat_efforts, dict) else None,
                     executor_agent=executor_agent,
+                    scenario_pack=scenario_pack,
+                    artifact_type=artifact_type,
                     reset_history=reset_history,
                 )
+                await self.orchestrator.start_topic_meeting(sess, attachments=resolved_atts, **start_kwargs)
                 await self._send_json(writer, 200, {"ok": True, "session": sess.to_snapshot()})
                 return
 
             if method == "POST" and action in ("interrupt", "followup"):
+                raw_att_ids = payload.get("attachment_ids")
+                att_ids = [str(x).strip() for x in raw_att_ids if str(x).strip()] if isinstance(raw_att_ids, list) else []
+                resolved_atts = self.attachments.resolve_attachments(sid, att_ids) if att_ids else []
                 msg = str(payload.get("message", "")).strip()
+                if not msg and resolved_atts:
+                    names_preview = "、".join(a["name"] for a in resolved_atts[:3])
+                    msg = f"补充上传了附件（{names_preview}），请结合最新附件内容继续分析。"
                 if not msg:
                     await self._send_json(writer, 400, {"error": "发言内容不能为空"})
                     return
-                await self.orchestrator.chair_interrupt(sess, message=msg)
+                ref_errs = self.orchestrator.validate_message_file_references(sess, msg)
+                if ref_errs:
+                    await self._send_json(
+                        writer,
+                        400,
+                        {
+                            "ok": False,
+                            "error": "引用文件快照读取校验未通过：" + "；".join(ref_errs),
+                            "reason": "invalid_file_reference",
+                            "invalid_refs": ref_errs,
+                        },
+                    )
+                    return
+                await self.orchestrator.chair_interrupt(sess, message=msg, attachments=resolved_atts)
                 await self._send_json(writer, 200, {"ok": True})
                 return
 
@@ -629,6 +767,9 @@ class AsyncHTTPServer:
                 collab_mode = payload.get("collab_mode")
                 raw_auto_exec = payload.get("auto_preview_exec")
                 executor_agent = str(payload.get("executor_agent", "")).strip().lower() or None
+                scenario_pack = str(payload.get("scenario_pack", "")).strip().lower() or None
+                artifact_type = str(payload.get("artifact_type", "")).strip().lower() or None
+                recommend_het = bool(payload.get("recommend_heterogeneous", False))
                 if enabled is not None and not isinstance(enabled, list):
                     await self._send_json(writer, 400, {"error": "参会席位列表格式无效"})
                     return
@@ -641,7 +782,13 @@ class AsyncHTTPServer:
                         seat_efforts=seat_efforts if isinstance(seat_efforts, dict) else None,
                         collab_mode=str(collab_mode) if collab_mode is not None else None,
                         auto_preview_exec=bool(raw_auto_exec) if raw_auto_exec is not None else None,
+                        scenario_pack=scenario_pack,
+                        artifact_type=artifact_type,
+                        recommend_heterogeneous=recommend_het,
                     )
+                except ExecutionAdmissionConflictError as conf_exc:
+                    await self._send_json(writer, conf_exc.status_code, conf_exc.to_dict())
+                    return
                 except ValueError as ve:
                     await self._send_json(writer, 400, {"error": str(ve)})
                     return
@@ -649,8 +796,24 @@ class AsyncHTTPServer:
                 return
 
             if method in ("POST", "PATCH") and action == "whiteboard":
-                wb = await self.orchestrator.update_whiteboard_manual(sess, payload)
+                try:
+                    wb = await self.orchestrator.update_whiteboard_manual(sess, payload)
+                except ExecutionAdmissionConflictError as conf_exc:
+                    await self._send_json(writer, conf_exc.status_code, conf_exc.to_dict())
+                    return
                 await self._send_json(writer, 200, {"ok": True, "whiteboard": wb})
+                return
+
+            if method == "POST" and action == "redebate":
+                try:
+                    rd_res = await self.orchestrator.redebate_disagreement(sess, payload)
+                except ExecutionAdmissionConflictError as conf_exc:
+                    await self._send_json(writer, conf_exc.status_code, conf_exc.to_dict())
+                    return
+                except ValueError as ve:
+                    await self._send_json(writer, 400, {"error": str(ve)})
+                    return
+                await self._send_json(writer, 200, rd_res)
                 return
 
             if method == "POST" and action == "cue":
@@ -696,12 +859,14 @@ class AsyncHTTPServer:
                 allow_write = payload["allow_workspace_write"]
                 executor_id = str(payload.get("executor_id", "")).strip().lower() or None
                 verify_cmd = str(payload.get("verify_command", "")).strip() or None
+                acknowledge_absent = bool(payload.get("acknowledge_absent", False))
                 try:
                     admitted = await self.orchestrator.admit_and_start_execution(
                         sess,
                         allow_workspace_write=allow_write,
                         executor_id=executor_id,
                         verify_command=verify_cmd,
+                        acknowledge_absent=acknowledge_absent,
                     )
                 except ExecutionAdmissionConflictError as conf_exc:
                     await self._send_json(writer, conf_exc.status_code, conf_exc.to_dict())
@@ -797,7 +962,7 @@ async def run_async_server(host: str, port: int, workspace_dir: str, *, notify_p
     asyncio.create_task(app.orchestrator.runner.prewarm())
     status = app.orchestrator.get_system_status()
     print("=" * 68, flush=True)
-    print(f"AI圆桌服务已启动: http://{host}:{port} (boot_id={app.boot_id[:8]})", flush=True)
+    print(f"AI圆桌 v4 服务已启动: http://{host}:{port} (boot_id={app.boot_id[:8]})", flush=True)
     print(f"运行源码根路径: {status.get('runtime_code_root', '')}", flush=True)
     print(f"默认工作目录: {status['workspace_dir']}", flush=True)
     for aid, info in status["agents"].items():

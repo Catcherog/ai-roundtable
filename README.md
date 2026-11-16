@@ -8,6 +8,8 @@
 
 **[下载 Windows x64](https://github.com/Catcherog/ai-roundtable/releases/latest/download/AI-Roundtable-Windows-x64.zip)** · **[下载 macOS Apple 芯片版](https://github.com/Catcherog/ai-roundtable/releases/latest/download/AI-Roundtable-macOS-arm64.zip)** · [使用手册](docs/guide.zh-CN.md) · [版本与校验值](https://github.com/Catcherog/ai-roundtable/releases/latest)
 
+> 主分支包含附件与决议功能的后续源码更新；上方下载链接目前仍指向已发布的 v3.1.1 安装包。
+
 ![实际会议。左侧是三个席位对平票规则的发言，右侧白板记录已采纳的约束和仍有争议的问题。](docs/images/roundtable-session.png)
 
 ## 一场会议如何得到可执行的结果

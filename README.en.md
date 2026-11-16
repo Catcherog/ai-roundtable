@@ -8,6 +8,8 @@ Give one question to 1–6 AI seats on Windows or macOS. Ask an architect to pro
 
 **[Download for Windows x64](https://github.com/Catcherog/ai-roundtable/releases/latest/download/AI-Roundtable-Windows-x64.zip)** · **[Download for Apple silicon](https://github.com/Catcherog/ai-roundtable/releases/latest/download/AI-Roundtable-macOS-arm64.zip)** · [Release notes and checksums](https://github.com/Catcherog/ai-roundtable/releases/latest)
 
+> The main branch includes later source updates for attachments and resolutions; the download links above still point to the published v3.1.1 packages.
+
 ![Recorded meeting in the Chinese interface. Three seats discuss a tie-breaking rule on the left. Accepted constraints and open risks appear on the whiteboard on the right.](docs/images/roundtable-session.png)
 
 ## What a meeting produces

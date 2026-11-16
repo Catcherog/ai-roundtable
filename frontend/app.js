@@ -373,7 +373,7 @@ const state = {
   seatConfigRev: 0,
   userScrolledUp: false,
   activeTab: "whiteboard",
-  activeSettingsTab: "lineup",
+  activeSettingsTab: "seats",
   showAllSeatsInRing: false,
   cliTestResults: {},
   pingLatencyBySeat: {},
@@ -402,6 +402,11 @@ const state = {
     fetchTimer: null,
   },
   attachedFilesCache: new Map(),
+  topicLocked: false,
+  scenarioPack: "arch_code",
+  artifactType: "code_patch",
+  presetSwitching: false,
+  userToggledRightPane: false,
 };
 
 const el = (id) => document.getElementById(id);
@@ -610,15 +615,97 @@ function setLeftCollapsed(collapsed) {
   localStorage.setItem(STORAGE_KEYS.leftExpanded, collapsed ? "0" : "1");
 }
 
-function setRightCollapsed(collapsed) {
+const CLIENT_SCENARIO_PACKS = {
+  arch_code: {
+    key: "arch_code",
+    label: "工程研发与代码审查包",
+    preset: "arch_review",
+    collab_mode: "deep_deliberation",
+    artifact_type: "code_patch",
+    enabled_agents: ["carbon", "grok", "astra"],
+    seat_personas: { carbon: "planner", grok: "red_team", astra: "implementer" },
+    executor_agent: "astra",
+    requires_workspace: true,
+    prefer_unbound_workspace: false,
+  },
+  tradeoff_debate: {
+    key: "tradeoff_debate",
+    label: "方案利弊红蓝辩证包",
+    preset: "arch_review",
+    collab_mode: "adversarial_review",
+    artifact_type: "decision_matrix",
+    enabled_agents: ["carbon", "grok", "astra"],
+    seat_personas: { carbon: "planner", grok: "red_team", astra: "fullstack_solo" },
+    executor_agent: "astra",
+    requires_workspace: false,
+    prefer_unbound_workspace: true,
+  },
+  ux_multimodal: {
+    key: "ux_multimodal",
+    label: "产品体验与多模态走查包",
+    preset: "product_quad",
+    collab_mode: "divergent_convergent",
+    artifact_type: "ux_checklist",
+    enabled_agents: ["vega", "carbon", "grok", "astra"],
+    seat_personas: { vega: "product_ux", carbon: "planner", grok: "red_team", astra: "implementer" },
+    executor_agent: "astra",
+    requires_workspace: false,
+    prefer_unbound_workspace: false,
+  },
+  incident_doc: {
+    key: "incident_doc",
+    label: "故障排查与文稿打磨包",
+    preset: "duel_review",
+    collab_mode: "rapid_consensus",
+    artifact_type: "doc_export",
+    enabled_agents: ["grok", "astra"],
+    seat_personas: { grok: "perf_sre", astra: "qa_audit" },
+    executor_agent: "astra",
+    requires_workspace: false,
+    prefer_unbound_workspace: false,
+  },
+};
+
+function getCheckedActionCount() {
+  const items = state.whiteboard?.items;
+  if (!Array.isArray(items)) return 0;
+  return items.filter((it) => it && it.kind === "action" && it.checked === true).length;
+}
+
+function hasExportableSessionContent() {
+  const hasMsgs = Boolean(
+    state.messages &&
+      Array.from(state.messages.values()).some((m) => m && !m.skipped && String(m.content || "").trim())
+  );
+  const hasItems = Boolean(state.whiteboard?.items?.length);
+  const hasAbandoned = Boolean(state.whiteboard?.abandoned_proposals?.length);
+  return Boolean(hasMsgs || hasItems || hasAbandoned);
+}
+
+function setRightCollapsed(collapsed, manualByUser = false) {
   const shell = el("appShell");
   const btn = el("toggleRightBtn");
   if (!shell) return;
-  shell.classList.toggle("right-collapsed", Boolean(collapsed));
-  localStorage.setItem(STORAGE_KEYS.rightHidden, collapsed ? "1" : "0");
-  if (btn) {
-    btn.classList.toggle("active-pane", !collapsed);
+  const nextCollapsed = Boolean(collapsed);
+  if (manualByUser) {
+    state.userToggledRightPane = true;
+    localStorage.setItem(STORAGE_KEYS.rightHidden, nextCollapsed ? "1" : "0");
   }
+  shell.classList.toggle("right-collapsed", nextCollapsed);
+  if (btn) {
+    btn.classList.toggle("active-pane", !nextCollapsed);
+  }
+}
+
+function syncAdaptiveRightCollapse() {
+  if (state.userToggledRightPane) return;
+  const isIdleBlank =
+    (state.stage || "idle") === "idle" &&
+    !String(state.topic || state.whiteboard?.topic || "").trim() &&
+    (!state.messages || state.messages.size === 0) &&
+    !(state.whiteboard?.items?.length) &&
+    !(state.whiteboard?.abandoned_proposals?.length);
+  setRightCollapsed(isIdleBlank, false);
 }
 
 function switchWorkbenchTab(tabName) {
@@ -643,7 +730,7 @@ function switchWorkbenchTab(tabName) {
   }
 }
 
-/* ==================== 讨论策略、自动执行预演与场景预设同步 ==================== */
+/* ==================== 讨论策略、自动执行预演与场景预设事务同步 ==================== */
 
 function syncCollabModeUI(modeKey, autoExec = state.autoPreviewExec) {
   const normalized = normalizeCollabModeAndAutoExec(modeKey, autoExec);
@@ -740,7 +827,7 @@ function syncDynamicRosterNames() {
       const nameSpan = seatCard.querySelector(".seat-name");
       if (nameSpan) nameSpan.textContent = resolved;
       const av = seatCard.querySelector(".seat-avatar");
-      if (av) av.textContent = AUTHOR_BADGE_META[aid].short;
+      if (av && !av.querySelector("svg")) av.textContent = AUTHOR_BADGE_META[aid].short;
       seatCard.title = `点击胶囊点名 @${resolved}；点击职责标签配置角色、名称与推理档位`;
       const roleBtn = el(`seat-role-${aid}`);
       if (roleBtn) roleBtn.title = `配置 ${resolved} 角色职责、显示名称、推理档位与参会状态`;
@@ -789,6 +876,43 @@ function syncScenarioPresetHighlight() {
   document.querySelectorAll("[data-scenario-preset]").forEach((btn) => {
     btn.classList.toggle("active", Boolean(activeKey) && btn.dataset.scenarioPreset === activeKey);
   });
+  document.querySelectorAll("[data-scenario-pack]").forEach((card) => {
+    const pk = card.dataset.scenarioPack;
+    const isAct = Boolean(state.scenarioPack) && pk === state.scenarioPack;
+    card.classList.toggle("active", isAct);
+    card.setAttribute("aria-pressed", isAct ? "true" : "false");
+  });
+}
+
+function captureLineupSnapshot() {
+  return {
+    collabMode: state.collabMode,
+    autoPreviewExec: state.autoPreviewExec,
+    enabledAgents: [...state.enabledAgents],
+    seatPersonas: { ...state.seatPersonas },
+    seatEfforts: { ...state.seatEfforts },
+    executorAgent: state.executorAgent,
+    scenarioPack: state.scenarioPack,
+    artifactType: state.artifactType,
+  };
+}
+
+function restoreLineupSnapshot(snap) {
+  if (!snap) return;
+  state.collabMode = snap.collabMode;
+  state.autoPreviewExec = snap.autoPreviewExec;
+  state.enabledAgents = [...snap.enabledAgents];
+  state.seatPersonas = { ...snap.seatPersonas };
+  state.seatEfforts = { ...snap.seatEfforts };
+  state.executorAgent = snap.executorAgent;
+  state.scenarioPack = snap.scenarioPack;
+  state.artifactType = snap.artifactType;
+  syncCollabModeUI(state.collabMode, state.autoPreviewExec);
+  renderAllSeats();
+  renderQuickCueButtons();
+  renderExecutorControls();
+  syncScenarioPresetHighlight();
+  if (state.whiteboard) renderWhiteboard(state.whiteboard, true, false);
 }
 
 async function persistSessionSeatsPatch(patch) {
@@ -804,6 +928,8 @@ async function persistSessionSeatsPatch(patch) {
   if (res.seat_personas) state.seatPersonas = { ...state.seatPersonas, ...res.seat_personas };
   if (res.seat_efforts) state.seatEfforts = { ...res.seatEfforts };
   if (res.executor_agent) state.executorAgent = res.executor_agent;
+  if (typeof res.scenario_pack === "string" && res.scenario_pack) state.scenarioPack = res.scenario_pack;
+  if (typeof res.artifact_type === "string" && res.artifact_type) state.artifactType = res.artifact_type;
   if (res.collab_mode) {
     syncCollabModeUI(res.collab_mode, res.auto_preview_exec);
   } else if (typeof res.auto_preview_exec === "boolean") {
@@ -816,12 +942,89 @@ async function persistSessionSeatsPatch(patch) {
   renderQuickCueButtons();
   renderExecutorControls();
   syncScenarioPresetHighlight();
+  if (state.whiteboard) renderWhiteboard(state.whiteboard, true, false);
   return res;
+}
+
+async function applyScenarioPack(packKey) {
+  const srvPacks = state.system?.scenario_packs || {};
+  const pack = {
+    ...(CLIENT_SCENARIO_PACKS[packKey] || {}),
+    ...(srvPacks[packKey] || {}),
+  };
+  if (!pack || !pack.collab_mode) return false;
+  if (state.presetSwitching) return false;
+  if (state.isBusy || ["opening_parallel", "cross_talk", "chair_interrupt", "executing"].includes(state.stage)) {
+    showToast("当前回合正在运行中，请待本轮收敛或停止后再切换场景意图包", "warn", 2400);
+    return false;
+  }
+
+  const prevSnap = captureLineupSnapshot();
+  state.presetSwitching = true;
+  try {
+    const nextEnabled = Array.isArray(pack.enabled_agents) && pack.enabled_agents.length
+      ? [...pack.enabled_agents]
+      : ["carbon", "grok", "astra"];
+    const nextPersonas = { ...state.seatPersonas, ...(pack.seat_personas || {}) };
+    const nextExec = pack.executor_agent || (nextEnabled.includes("astra") ? "astra" : nextEnabled[0]);
+    const nextArt = pack.artifact_type || "code_patch";
+
+    if (state.currentSessionId) {
+      await persistSessionSeatsPatch({
+        scenario_pack: packKey,
+        artifact_type: nextArt,
+        collab_mode: pack.collab_mode,
+        enabled_agents: nextEnabled,
+        seat_personas: nextPersonas,
+        executor_agent: nextExec,
+      });
+    } else {
+      state.scenarioPack = packKey;
+      state.artifactType = nextArt;
+      state.enabledAgents = nextEnabled;
+      state.seatPersonas = nextPersonas;
+      state.executorAgent = nextExec;
+      syncCollabModeUI(pack.collab_mode, state.autoPreviewExec);
+      renderAllSeats();
+      renderQuickCueButtons();
+      renderExecutorControls();
+      syncScenarioPresetHighlight();
+    }
+
+    state.scenarioPack = packKey;
+    state.artifactType = state.artifactType || nextArt;
+    syncScenarioPresetHighlight();
+
+    const isIdleUnstarted =
+      (state.stage || "idle") === "idle" &&
+      (!state.messages || state.messages.size === 0) &&
+      !String(state.topic || "").trim();
+    if ((pack.prefer_unbound_workspace || packKey === "tradeoff_debate") && isIdleUnstarted && effectiveWorkspacePath()) {
+      await switchCurrentSessionWorkspace("");
+    }
+    if (state.whiteboard) renderWhiteboard(state.whiteboard, true, false);
+    showToast(`已切换场景意图包：${pack.label || packKey}`, "ok", 2200);
+    return true;
+  } catch (err) {
+    restoreLineupSnapshot(prevSnap);
+    showToast(err.message || "切换场景意图包失败，已回滚原阵容", "err", 2800);
+    return false;
+  } finally {
+    state.presetSwitching = false;
+  }
 }
 
 async function applyScenarioPreset(presetKey) {
   const spec = SCENARIO_PRESETS[presetKey];
-  if (!spec) return;
+  if (!spec) return false;
+  if (state.presetSwitching) return false;
+  if (state.isBusy || ["opening_parallel", "cross_talk", "chair_interrupt", "executing"].includes(state.stage)) {
+    showToast("当前研讨或执行正在运行中，请待收敛后再切换预设阵容", "warn", 2400);
+    return false;
+  }
+
+  const prevSnap = captureLineupSnapshot();
+  state.presetSwitching = true;
 
   let nextEnabled = [];
   let nextPersonas = { ...state.seatPersonas };
@@ -834,35 +1037,101 @@ async function applyScenarioPreset(presetKey) {
     nextExec = soloAid;
   } else {
     nextEnabled = [...spec.enabled_agents];
-    nextPersonas = { ...spec.seat_personas };
+    nextPersonas = { ...state.seatPersonas, ...spec.seat_personas };
     nextExec = spec.executor_agent || "astra";
   }
 
-  syncCollabModeUI(spec.collab_mode, state.autoPreviewExec);
-  state.enabledAgents = nextEnabled;
-  state.seatPersonas = nextPersonas;
-  state.executorAgent = nextExec;
-  renderAllSeats();
-  renderQuickCueButtons();
-  renderExecutorControls();
-  syncScenarioPresetHighlight();
-
-  if (state.currentSessionId) {
-    try {
+  try {
+    if (state.currentSessionId) {
       await persistSessionSeatsPatch({
         collab_mode: spec.collab_mode,
         enabled_agents: nextEnabled,
         seat_personas: nextPersonas,
         executor_agent: nextExec,
       });
-      showToast(`已切换场景预设：${spec.label}（${COLLAB_MODES[spec.collab_mode].label}）`, "ok", 2200);
-    } catch (err) {
-      showToast(err.message || "更新场景预设失败", "err");
+    } else {
+      syncCollabModeUI(spec.collab_mode, state.autoPreviewExec);
+      state.enabledAgents = nextEnabled;
+      state.seatPersonas = nextPersonas;
+      state.executorAgent = nextExec;
+      renderAllSeats();
+      renderQuickCueButtons();
+      renderExecutorControls();
+      syncScenarioPresetHighlight();
     }
+    showToast(`已切换场景预设：${spec.label}（${COLLAB_MODES[spec.collab_mode]?.label || spec.collab_mode}）`, "ok", 2200);
+    return true;
+  } catch (err) {
+    restoreLineupSnapshot(prevSnap);
+    showToast(err.message || "更新场景预设失败，已回滚原阵容", "err", 2800);
+    return false;
+  } finally {
+    state.presetSwitching = false;
   }
 }
 
-/* ==================== 模型推理档位能力与全局时限策略 ==================== */
+async function applyHeterogeneousRecommendation() {
+  if (state.presetSwitching) return false;
+  if (state.isBusy || ["opening_parallel", "cross_talk", "chair_interrupt", "executing"].includes(state.stage)) {
+    showToast("当前研讨正在运行中，请待收敛后再切换异构混编阵容", "warn", 2400);
+    return false;
+  }
+
+  const prevSnap = captureLineupSnapshot();
+  state.presetSwitching = true;
+
+  try {
+    if (state.currentSessionId) {
+      await persistSessionSeatsPatch({
+        recommend_heterogeneous: true,
+      });
+    } else {
+      const rec = state.system?.heterogeneous_recommendation;
+      const sysAgents = state.system?.agents || {};
+      let nextEnabled = [];
+      let nextPersonas = { ...state.seatPersonas };
+
+      if (rec && Array.isArray(rec.enabled_agents) && rec.enabled_agents.length >= 2) {
+        nextEnabled = [...rec.enabled_agents];
+        if (rec.seat_personas) nextPersonas = { ...nextPersonas, ...rec.seat_personas };
+      } else {
+        const seenFamilies = new Set();
+        for (const aid of AGENT_ORDER) {
+          const info = sysAgents[aid] || {};
+          if (!info.binary_detected) continue;
+          const fam = String(info.binary_realpath || info.binary_path || info.effective_driver || aid);
+          if (!seenFamilies.has(fam)) {
+            seenFamilies.add(fam);
+            nextEnabled.push(aid);
+          }
+          if (nextEnabled.length >= 3) break;
+        }
+        if (nextEnabled.length < 2) {
+          nextEnabled = ["carbon", "grok", "astra"];
+        }
+      }
+      state.enabledAgents = nextEnabled;
+      state.seatPersonas = nextPersonas;
+      state.executorAgent = nextEnabled.includes("astra") ? "astra" : nextEnabled[0];
+      renderAllSeats();
+      renderQuickCueButtons();
+      renderExecutorControls();
+      syncScenarioPresetHighlight();
+    }
+    showToast(
+      `已启用异构混编推荐阵容（${state.enabledAgents.map((a) => AGENT_NAMES[a] || a).join(" · ")}）`,
+      "ok",
+      2400
+    );
+    return true;
+  } catch (err) {
+    restoreLineupSnapshot(prevSnap);
+    showToast(err.message || "应用异构混编阵容失败，已回滚原阵容", "err", 2800);
+    return false;
+  } finally {
+    state.presetSwitching = false;
+  }
+}
 
 function getEffortSpecForModel(driverKey, modelName, seatId = "") {
   const effDrv =
@@ -1273,24 +1542,27 @@ function resolveKineticVisualSpec(activityRaw, phaseRaw) {
   if (/源码|检索|扫描|读取|索引|上下文|注入/.test(txt)) {
     return {
       mode: "scanning",
-      phaseTag: "上下文扫描",
+      phaseTag: "上下文检索",
       html: `<span class="kinetic-stage" data-kinetic-mode="scanning" aria-hidden="true"><span class="k-scan-bars"><i></i><i></i><i></i><i></i></span></span>`,
     };
   }
   if (/决议|收敛|汇总|归档|快照|回滚|验证/.test(txt)) {
     return {
       mode: "synthesizing",
-      phaseTag: "共识汇聚",
-      html: `<span class="kinetic-stage" data-kinetic-mode="synthesizing" aria-hidden="true"><span class="k-synth-wrap"><span class="k-synth-halo"></span><span class="k-synth-diamond"></span></span></span>`,
+      phaseTag: "共识收敛",
+      html: `<span class="kinetic-stage" data-kinetic-mode="synthesizing" aria-hidden="true"><span class="k-synth-wrap"><span class="k-synth-halo"></span><span class="k-synth-inner-ring"></span></span></span>`,
     };
   }
   return {
     mode: "thinking",
-    phaseTag: /质询|答辩|辩证/.test(txt) ? "交叉思辨" : "星轨推演",
+    phaseTag: /质询|答辩|辩证/.test(txt) ? "交叉核验" : "深度推演",
     html:
       `<span class="kinetic-stage" data-kinetic-mode="thinking" aria-hidden="true">` +
-      `<span class="k-orbit-core"></span>` +
-      `<span class="k-orbit-ring"><i class="k-orbit-node n1"></i><i class="k-orbit-node n2"></i><i class="k-orbit-node n3"></i></span>` +
+      `<svg class="k-linear-trefoil" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round">` +
+      `<circle class="k-ring r1" cx="12" cy="8.9" r="5.1"></circle>` +
+      `<circle class="k-ring r2" cx="9.4" cy="13.5" r="5.1"></circle>` +
+      `<circle class="k-ring r3" cx="14.6" cy="13.5" r="5.1"></circle>` +
+      `</svg>` +
       `</span>`,
   };
 }
@@ -1401,8 +1673,12 @@ function createOrUpdateMessageCard(msgInput, options = {}) {
     ? `<span class="msg-target-chip">→ @${escapeHtml(AGENT_NAMES[msg.target] || msg.target)}</span>`
     : "";
 
+  const hasContent = Boolean((msg.content || "").trim());
+  const isThinkingOnly = Boolean(msg.streaming) && !hasContent;
+
   const badgeSemCls = resolveSemanticBadgeClass(msg);
-  const badgeHtml = msg.badge
+  const suppressRedundantThinkingBadge = isThinkingOnly && msg.badge === "思考中";
+  const badgeHtml = msg.badge && !suppressRedundantThinkingBadge
     ? `<span class="msg-badge-chip ${badgeSemCls}">${escapeHtml(msg.badge)}</span>`
     : "";
 
@@ -1412,10 +1688,10 @@ function createOrUpdateMessageCard(msgInput, options = {}) {
       : "";
 
   const isAgentMsg = AGENT_ORDER.includes(speakerKey);
-  const canIngestWb = !msg.streaming && !isError && !isSkipped && (isAgentMsg || isResolution) && (msg.content || "").trim();
+  const canIngestWb = !msg.streaming && !isError && !isSkipped && (isAgentMsg || isResolution) && hasContent;
 
   const hoverBtns = [];
-  if (isResolution && !msg.streaming && (msg.content || "").trim()) {
+  if (isResolution && !msg.streaming && hasContent) {
     hoverBtns.push(
       `<button type="button" class="msg-sync-wb-btn" data-msg-act="sync-resolution" title="提取最终决议中的共识、风险与任务项同步至右侧会议白板">同步决议至白板</button>`
     );
@@ -1428,7 +1704,7 @@ function createOrUpdateMessageCard(msgInput, options = {}) {
       `<button type="button" class="msg-act-btn" data-msg-act="mention">@${escapeHtml(AGENT_NAMES[speakerKey])}</button>`
     );
   }
-  if (!msg.streaming && (msg.content || "").trim()) {
+  if (!msg.streaming && hasContent) {
     hoverBtns.push(`<button type="button" class="msg-act-btn" data-msg-act="copy">复制</button>`);
     if ((msg.content || "").length > 360) {
       hoverBtns.push(
@@ -1436,9 +1712,6 @@ function createOrUpdateMessageCard(msgInput, options = {}) {
       );
     }
   }
-
-  const hasContent = Boolean((msg.content || "").trim());
-  const isThinkingOnly = Boolean(msg.streaming) && !hasContent;
 
   let bodyInnerHtml = "";
   if (isThinkingOnly) {
@@ -1468,6 +1741,67 @@ function createOrUpdateMessageCard(msgInput, options = {}) {
       `</div>`;
   }
 
+  let resolutionAuditHtml = "";
+  if (isResolution && !msg.streaming && hasContent) {
+    const rMeta = msg.resolution_meta || state.whiteboard?.resolution_meta || {};
+    const epBadge =
+      rMeta.epistemic_badge ||
+      state.whiteboard?.epistemic_badge ||
+      (state.enabledAgents.length <= 1 ? "[单席推演草稿]" : "");
+    const roundsArr = Array.isArray(rMeta.covered_rounds)
+      ? rMeta.covered_rounds
+      : rMeta.covered_rounds
+      ? [String(rMeta.covered_rounds)]
+      : [];
+    const wbItemsNow = state.whiteboard?.items || [];
+    const retainedCnt =
+      rMeta.retained_count ??
+      rMeta.adopted_count ??
+      wbItemsNow.filter((it) => it.kind === "decision").length;
+    const abandonedCnt =
+      rMeta.abandoned_count ?? (state.whiteboard?.abandoned_proposals?.length || 0);
+    const actionCnt =
+      rMeta.action_count ?? wbItemsNow.filter((it) => it.kind === "action").length;
+
+    resolutionAuditHtml =
+      `<div class="resolution-audit-strip">` +
+        (epBadge ? `<span class="audit-metric-pill">${escapeHtml(epBadge)}</span>` : "") +
+        (roundsArr.length
+          ? `<span class="audit-metric-pill">覆盖阶段：${escapeHtml(roundsArr.join(" · "))}</span>`
+          : "") +
+        `<span class="audit-metric-pill is-retained">采纳成果 ${Number(retainedCnt)}</span>` +
+        `<span class="audit-metric-pill is-abandoned">隔离弃案 ${Number(abandonedCnt)}</span>` +
+        `<span class="audit-metric-pill">交付清单 ${Number(actionCnt)}</span>` +
+      `</div>`;
+  }
+
+  let roundSummaryBarHtml = "";
+  const roundSummaries = state.whiteboard?.round_summaries;
+  if (Array.isArray(roundSummaries) && msg.id) {
+    const matchedRs = roundSummaries.find((rs) => rs && rs.after_msg_id === msg.id);
+    if (matchedRs) {
+      const rsLabel = matchedRs.round_label || matchedRs.phase_label || "回合演进摘要";
+      const rsText =
+        matchedRs.summary ||
+        matchedRs.text ||
+        (Array.isArray(matchedRs.highlights) ? matchedRs.highlights.join("；") : "");
+      const openDisCnt = Number(
+        matchedRs.open_disagreements ?? matchedRs.disagreement_count ?? 0
+      );
+      const shiftCnt = Number(
+        matchedRs.revised_count ??
+          (Array.isArray(matchedRs.stance_shifts) ? matchedRs.stance_shifts.length : 0)
+      );
+      roundSummaryBarHtml =
+        `<div class="round-disagreement-bar">` +
+          `<span class="round-bar-tag">${escapeHtml(rsLabel)}</span>` +
+          `<span class="round-bar-summary">${escapeHtml(
+            rsText || `待决分歧 ${openDisCnt} 项 · 立场演进 ${shiftCnt} 项`
+          )}</span>` +
+        `</div>`;
+    }
+  }
+
   card.innerHTML =
     (isResolution ? `<div class="msg-resolution-crown" aria-hidden="true"></div>` : "") +
     `<div class="msg-header">` +
@@ -1492,9 +1826,11 @@ function createOrUpdateMessageCard(msgInput, options = {}) {
         (msg.timestamp ? `<span>${escapeHtml(msg.timestamp)}</span>` : "") +
       `</div>` +
     `</div>` +
+    resolutionAuditHtml +
     `<div class="msg-body${msg.streaming && hasContent ? " streaming" : ""}${isThinkingOnly ? " thinking-only" : ""}">` +
       bodyInnerHtml +
     `</div>` +
+    roundSummaryBarHtml +
     errorPanelHtml;
 
   bindCardInteractiveEvents(card, msg);
@@ -1757,6 +2093,12 @@ function normalizeClientWhiteboard(rawWb) {
           : "decision";
         const rawAuthor = String(it.author || it.source_seat || "chair").toLowerCase();
         const author = AUTHOR_BADGE_META[rawAuthor] ? rawAuthor : "chair";
+        const defaultTier =
+          author === "chair"
+            ? "chair_directive"
+            : kind === "decision"
+            ? "multi_seat_consensus"
+            : "provisional_suggestion";
         return {
           id: String(it.id || `wb_cli_${idx}`),
           kind,
@@ -1764,8 +2106,14 @@ function normalizeClientWhiteboard(rawWb) {
           author,
           source_msg_id: String(it.source_msg_id || ""),
           pinned: Boolean(it.pinned),
-          checked: it.checked !== undefined ? Boolean(it.checked) : true,
+          checked: kind === "action" ? Boolean(it.checked === true) : it.checked !== undefined ? Boolean(it.checked) : true,
           ver: Math.max(1, Number(it.ver || it.version || 1)),
+          origin_tier: String(it.origin_tier || defaultTier),
+          provisional_decision: Boolean(it.provisional_decision),
+          adopted_by: String(it.adopted_by || ""),
+          adopted_at: String(it.adopted_at || ""),
+          disagreement_id: String(it.disagreement_id || ""),
+          rebutted: Boolean(it.rebutted),
         };
       });
   } else {
@@ -1789,14 +2137,32 @@ function normalizeClientWhiteboard(rawWb) {
           author,
           source_msg_id: "",
           pinned,
-          checked: true,
+          checked: kind === "action" ? false : true,
           ver: 1,
+          origin_tier: author === "chair" ? "chair_directive" : "provisional_suggestion",
+          provisional_decision: false,
+          adopted_by: "",
+          adopted_at: "",
+          disagreement_id: "",
+          rebutted: false,
         });
       }
     }
   }
 
   wb.items = items;
+  wb.absent_seats = Array.isArray(wb.absent_seats) ? wb.absent_seats : [];
+  wb.absent_acknowledged = Boolean(wb.absent_acknowledged);
+  wb.disagreements = Array.isArray(wb.disagreements) ? wb.disagreements : [];
+  wb.abandoned_proposals = Array.isArray(wb.abandoned_proposals) ? wb.abandoned_proposals : [];
+  wb.round_summaries = Array.isArray(wb.round_summaries) ? wb.round_summaries : [];
+  wb.resolution_meta = wb.resolution_meta && typeof wb.resolution_meta === "object" ? wb.resolution_meta : null;
+  wb.epistemic_badge = String(wb.epistemic_badge || "");
+  wb.driver_family_count = Number(wb.driver_family_count ?? 0);
+  wb.topic_locked = Boolean(wb.topic_locked);
+  if (wb.artifact_type) {
+    wb.artifact_type = String(wb.artifact_type);
+  }
   wb.exec_logs = Array.isArray(wb.exec_logs) ? wb.exec_logs : [];
   wb.exec_diff = String(wb.exec_diff || "");
   wb.can_rollback = Boolean(wb.can_rollback);
@@ -1842,7 +2208,7 @@ function showWbConflictBanner(message, draftText, retryForceFn) {
   });
 }
 
-async function postWhiteboardMutation(payload, draftTextForConflict = "") {
+async function postWhiteboardMutation(payload, draftTextForConflict = "", options = {}) {
   if (!state.currentSessionId) return null;
   try {
     const res = await apiFetch(`/api/sessions/${state.currentSessionId}/whiteboard`, {
@@ -1866,27 +2232,108 @@ async function postWhiteboardMutation(payload, draftTextForConflict = "") {
     }
     return wb;
   } catch (err) {
+    if (options.rethrow) throw err;
     showToast(err.message || "更新会议白板失败", "err");
     return null;
   }
 }
 
-async function discussRiskItem(item) {
-  if (!item || !item.text || !state.currentSessionId) return;
-  const prompt = `请围绕以下待决争议与风险项展开定向讨论，对比可行方案的工程代价并给出明确裁决结论：${item.text}`;
+async function triggerRiskRedebate(item) {
+  if (!item || !state.currentSessionId) return;
+  if (state.isBusy) {
+    showToast("当前研讨正在运行中，请待收敛后再发起双席再辩", "warn", 2200);
+    return;
+  }
+  const activeSeats = Array.isArray(state.enabledAgents) && state.enabledAgents.length
+    ? state.enabledAgents
+    : ["carbon", "grok"];
+  const challenger =
+    item.author && item.author !== "chair" && activeSeats.includes(item.author)
+      ? item.author
+      : activeSeats.includes("grok")
+      ? "grok"
+      : activeSeats[0] || "grok";
+  const defender =
+    activeSeats.find((aid) => aid !== challenger) ||
+    (challenger === "carbon" ? "grok" : "carbon");
   try {
-    if (!state.topic) {
-      await startOrInterruptWithText(prompt);
-    } else {
-      await apiFetch(`/api/sessions/${state.currentSessionId}/followup`, {
-        method: "POST",
-        body: JSON.stringify({ message: prompt }),
-      });
-      showToast("已围绕该争议项发起圆桌定向讨论", "ok", 2200);
+    await apiFetch(`/api/sessions/${state.currentSessionId}/redebate`, {
+      method: "POST",
+      body: JSON.stringify({
+        item_id: item.id,
+        disagreement_id: item.disagreement_id || "",
+        claim: item.text,
+        challenger,
+        defender,
+      }),
+    });
+    showToast(`已启动双席 1 轮定向再辩（${AGENT_NAMES[challenger] || challenger} vs ${AGENT_NAMES[defender] || defender}）`, "ok", 2400);
+  } catch (err) {
+    showToast(err.message || "启动双席再辩失败", "err");
+  }
+}
+
+async function adoptRiskWithGovernance(item) {
+  if (!item || !state.currentSessionId) return;
+  state.wbKnownItemIds.delete(`${item.id}:decision`);
+  const wbNow = state.whiteboard || {};
+  const heteroReady =
+    Boolean(item.rebutted) &&
+    (Number(wbNow.driver_family_count || 0) >= 2 || item.origin_tier === "multi_seat_consensus");
+
+  try {
+    const wb = await postWhiteboardMutation(
+      {
+        op: "adopt_decision",
+        item_id: item.id,
+        ...(heteroReady ? {} : { as_chair_directive: true, adopted_by: "chair" }),
+      },
+      "",
+      { rethrow: true }
+    );
+    if (wb) {
+      pulseWbTabBadge();
+      showToast(
+        heteroReady ? "已核验采纳至多席共识池" : "已按 [主持指定约束] 署名锁定至第一区",
+        "ok",
+        2000
+      );
     }
   } catch (err) {
-    showToast(err.message || "发起定向讨论失败", "err");
+    const errReason =
+      err?.payload?.reason || err?.payload?.code || err?.payload?.error_code || "";
+    if (err?.status === 409 || errReason === "unverified_consensus_adoption") {
+      const wb = await postWhiteboardMutation({
+        op: "adopt_decision",
+        item_id: item.id,
+        as_chair_directive: true,
+        adopted_by: "chair",
+      });
+      if (wb) {
+        pulseWbTabBadge();
+        showToast("未满足异构反驳闭环，已转为 [主持指定约束] 锁定", "ok", 2400);
+      }
+      return;
+    }
+    showToast(err.message || "采纳条目失败", "err");
   }
+}
+
+function resolveOriginPillMeta(item) {
+  const tier = String(item.origin_tier || "").toLowerCase();
+  if (tier === "chair_directive" || item.author === "chair") {
+    const sig =
+      item.adopted_by && item.adopted_by !== "chair" ? ` · ${item.adopted_by}` : "";
+    return { label: `[主持指定约束]${sig}`, cls: "tier-chair" };
+  }
+  if (
+    tier === "multi_seat_consensus" ||
+    tier === "verified_heterogeneous" ||
+    tier === "heterogeneous_consensus"
+  ) {
+    return { label: "异构交叉共识", cls: "tier-hetero" };
+  }
+  return { label: "初评待核验", cls: "tier-draft" };
 }
 
 function buildWbPoolItemElement(item, zoneKind, animateEnter) {
@@ -1894,7 +2341,7 @@ function buildWbPoolItemElement(item, zoneKind, animateEnter) {
   const isAction = zoneKind === "action";
   const isRisk = zoneKind === "risk";
   const isDecision = zoneKind === "decision";
-  const isChecked = item.checked !== false;
+  const isChecked = item.checked === true;
 
   li.className = [
     "wb-pool-item",
@@ -1908,28 +2355,37 @@ function buildWbPoolItemElement(item, zoneKind, animateEnter) {
   li.dataset.itemId = item.id;
 
   const authorMeta = AUTHOR_BADGE_META[item.author] || AUTHOR_BADGE_META.chair;
+  const originMeta = resolveOriginPillMeta(item);
   const srcTip = item.source_msg_id
     ? `来自 ${authorMeta.name} · 点击滚回左侧原发言并聚光高亮`
-    : `来源：${authorMeta.name}`;
+    : `来源：${authorMeta.name}${item.adopted_at ? ` · ${item.adopted_at}` : ""}`;
+
+  const heteroVerified =
+    Boolean(item.rebutted) &&
+    (Number(state.whiteboard?.driver_family_count || 0) >= 2 || item.origin_tier === "multi_seat_consensus");
 
   let actionsHtml = "";
   if (isDecision) {
     actionsHtml =
       `<button type="button" class="wb-card-act pin-btn${item.pinned ? " active" : ""}" data-wb-act="pin" title="${
-        item.pinned ? "取消置顶" : "置顶锁定该共识"
+        item.pinned ? "取消置顶" : "置顶锁定该约束"
       }">${item.pinned ? "已置顶" : "置顶"}</button>` +
       `<button type="button" class="wb-card-act" data-wb-act="edit" title="行内编辑">编辑</button>` +
-      `<button type="button" class="wb-card-act del-btn" data-wb-act="del" title="移除条目">✕</button>`;
+      `<button type="button" class="wb-card-act del-btn" data-wb-act="del" title="移除条目">移除</button>`;
   } else if (isRisk) {
     actionsHtml =
-      `<button type="button" class="wb-act-pill discuss-btn" data-wb-act="discuss" title="围绕该争议项发起圆桌定向讨论裁决">定向讨论</button>` +
-      `<button type="button" class="wb-act-pill adopt-btn" data-wb-act="adopt" title="将该条目采纳移入第一区「已确认共识与约束」">采纳为共识</button>` +
+      `<button type="button" class="wb-act-pill discuss-btn" data-wb-act="redebate" title="召集正反双席围绕该分歧点定向再辩 1 轮">双席再辩 1 轮</button>` +
+      `<button type="button" class="wb-act-pill adopt-btn" data-wb-act="adopt" title="${
+        heteroVerified ? "已完成异构核验，采纳移入多席共识池" : "未完成异构反驳闭环，以 [主持指定约束] 署名锁定至第一区"
+      }">${heteroVerified ? "采纳为共识" : "主持拍板锁定"}</button>` +
+      `<button type="button" class="wb-card-act" data-wb-act="abandon" title="标记为已证伪弃案并移入负面清单">弃案</button>` +
       `<button type="button" class="wb-card-act" data-wb-act="edit" title="行内编辑">编辑</button>` +
-      `<button type="button" class="wb-card-act del-btn" data-wb-act="del" title="移除条目">✕</button>`;
+      `<button type="button" class="wb-card-act del-btn" data-wb-act="del" title="移除条目">移除</button>`;
   } else {
     actionsHtml =
       `<button type="button" class="wb-card-act" data-wb-act="edit" title="行内编辑">编辑</button>` +
-      `<button type="button" class="wb-card-act del-btn" data-wb-act="del" title="移除条目">✕</button>`;
+      `<button type="button" class="wb-card-act" data-wb-act="abandon" title="移入弃案负面清单">弃案</button>` +
+      `<button type="button" class="wb-card-act del-btn" data-wb-act="del" title="移除条目">移除</button>`;
   }
 
   li.innerHTML =
@@ -1937,17 +2393,20 @@ function buildWbPoolItemElement(item, zoneKind, animateEnter) {
       (isAction
         ? `<button type="button" class="wb-task-check${isChecked ? " checked" : ""}" data-wb-act="check" aria-pressed="${
             isChecked ? "true" : "false"
-          }" title="${isChecked ? "已纳入本轮执行范围（点击取消勾选排除）" : "已排除在本次执行范围之外（点击重新纳入）"}">${
-            isChecked ? "✓" : ""
+          }" title="${isChecked ? "已勾选纳入本轮执行交付范围（点击取消勾选）" : "默认未勾选（点击勾选纳入本次执行范围）"}">${
+            isChecked ? '<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="3.2 8.4 6.6 11.8 12.8 4.6"></polyline></svg>' : ""
           }</button>`
         : "") +
       `<div class="wb-pool-text" title="单击直接编辑内容">${escapeHtml(item.text)}</div>` +
     `</div>` +
     `<div class="wb-pool-meta">` +
-      `<button type="button" class="wb-seat-mini-badge ${authorMeta.cls}" data-wb-act="source" title="${escapeHtml(srcTip)}">` +
-        `<span class="mini-seat-dot">${escapeHtml(authorMeta.short)}</span>` +
-        `<span>${escapeHtml(authorMeta.name)}</span>` +
-      `</button>` +
+      `<div class="wb-meta-left" style="display:inline-flex;align-items:center;gap:5px;flex-wrap:wrap;">` +
+        `<button type="button" class="wb-seat-mini-badge ${authorMeta.cls}" data-wb-act="source" title="${escapeHtml(srcTip)}">` +
+          `<span class="mini-seat-dot">${escapeHtml(authorMeta.short)}</span>` +
+          `<span>${escapeHtml(authorMeta.name)}</span>` +
+        `</button>` +
+        `<span class="wb-origin-pill ${originMeta.cls}">${escapeHtml(originMeta.label)}</span>` +
+      `</div>` +
       `<div class="wb-pool-actions">${actionsHtml}</div>` +
     `</div>`;
 
@@ -1974,17 +2433,16 @@ function buildWbPoolItemElement(item, zoneKind, animateEnter) {
           checked: !isChecked,
         });
       } else if (act === "adopt") {
-        state.wbKnownItemIds.delete(`${item.id}:decision`);
-        const updated = await postWhiteboardMutation({
-          op: "adopt_decision",
+        await adoptRiskWithGovernance(item);
+      } else if (act === "redebate") {
+        await triggerRiskRedebate(item);
+      } else if (act === "abandon") {
+        const wb = await postWhiteboardMutation({
+          op: "abandon_item",
           item_id: item.id,
+          reason: "会议白板人工证伪归档",
         });
-        if (updated) {
-          pulseWbTabBadge();
-          showToast("已采纳至「已确认共识与约束」", "ok", 1800);
-        }
-      } else if (act === "discuss") {
-        await discussRiskItem(item);
+        if (wb) showToast("已隔离至「弃案与证伪方案」负面清单", "info", 2000);
       } else if (act === "edit") {
         startInlineWbItemEdit(li, item);
       } else if (act === "del") {
@@ -2005,7 +2463,7 @@ function startInlineWbItemEdit(liEl, item) {
   liEl.classList.add("editing");
   liEl.innerHTML =
     `<div class="wb-edit-box">` +
-      `<textarea class="wb-edit-input" rows="2">${escapeHtml(item.text)}</textarea>` +
+      `<textarea id="wb-editor-${escapeHtml(item.id)}" class="wb-edit-input" rows="2">${escapeHtml(item.text)}</textarea>` +
       `<div class="wb-edit-toolbar">` +
         `<span class="wb-edit-ver">v${item.ver} · Enter 保存 / Esc 取消</span>` +
         `<div class="wb-edit-btns">` +
@@ -2064,12 +2522,16 @@ function startInlineWbItemEdit(liEl, item) {
 }
 
 function startInlineTopicEdit() {
+  if (state.topicLocked || state.stage !== "idle" || state.messages.size > 0) {
+    showToast("议题在开局后已锁定不可篡改，请通过底部追问或插话补充新约束", "warn", 2400);
+    return;
+  }
   const topicBox = el("wbTopicText");
   if (!topicBox || topicBox.querySelector("#wbTopicEditInput")) return;
   const currentFullTopic = state.whiteboard?.topic || state.topic || "";
   topicBox.innerHTML =
     `<div class="wb-edit-box">` +
-      `<textarea id="wbTopicEditInput" class="wb-edit-input" rows="2" placeholder="输入或修订当前会议完整议题…">${escapeHtml(
+      `<textarea id="wbTopicEditInput" class="wb-edit-input wb-topic-edit-input" rows="2" placeholder="输入开局前的会议完整议题…">${escapeHtml(
         currentFullTopic
       )}</textarea>` +
       `<div class="wb-edit-toolbar">` +
@@ -2117,9 +2579,29 @@ function startInlineTopicEdit() {
   }
 }
 
+function computeActiveDriverFamilyCount() {
+  const wbCount = Number(state.whiteboard?.driver_family_count || 0);
+  if (wbCount > 0) return wbCount;
+  const sysAgents = state.system?.agents || {};
+  const families = new Set();
+  for (const aid of state.enabledAgents || []) {
+    const st = state.seatStates?.[aid] || {};
+    const info = sysAgents[aid] || {};
+    if (st.binary_ready || info.binary_detected) {
+      const fk = st.driver_family_key || info.driver_family_key || info.binary_realpath || info.binary_path || st.effective_driver || info.effective_driver || aid;
+      families.add(String(fk));
+    }
+  }
+  return families.size;
+}
+
 function renderWhiteboard(rawWb, forceRender = false, isInitialSnapshot = false) {
   const wb = normalizeClientWhiteboard(rawWb);
   state.whiteboard = wb;
+  state.topicLocked = Boolean(wb.topic_locked || state.stage !== "idle" || state.messages.size > 0);
+  if (wb.artifact_type) {
+    state.artifactType = wb.artifact_type;
+  }
 
   if (wb.consensus_status && el("wbConsensusTag")) {
     el("wbConsensusTag").textContent = wb.consensus_status;
@@ -2132,7 +2614,9 @@ function renderWhiteboard(rawWb, forceRender = false, isInitialSnapshot = false)
   ];
   const riskItems = allItems.filter((it) => it.kind === "risk");
   const actionItems = allItems.filter((it) => it.kind === "action");
-  const checkedActionCount = actionItems.filter((it) => it.checked !== false).length;
+  const checkedActionCount = actionItems.filter((it) => it.checked === true).length;
+  const abandonedItems = Array.isArray(wb.abandoned_proposals) ? wb.abandoned_proposals : [];
+  const absentSeats = Array.isArray(wb.absent_seats) ? wb.absent_seats : [];
 
   const totalCount = allItems.length;
   if (el("wbCountBadge")) {
@@ -2143,7 +2627,65 @@ function renderWhiteboard(rawWb, forceRender = false, isInitialSnapshot = false)
   }
   state.lastWbTotalCount = totalCount;
 
-  // 同步执行终端日志、Diff 与回滚按钮
+  // 1. 认知防伪横幅 (#wbEpistemicBanner)
+  const enabledCnt = (state.enabledAgents || []).length;
+  const familyCnt = computeActiveDriverFamilyCount();
+  const epistemicBadge =
+    wb.epistemic_badge ||
+    (enabledCnt <= 1
+      ? "[单席推演草稿]"
+      : familyCnt < 2
+      ? "[同源模型多视角推演 · 误差相关]"
+      : "[异构多引擎独立推演]");
+  const epBanner = el("wbEpistemicBanner");
+  if (epBanner) {
+    const hasMeetingContext = Boolean(state.topic || wb.topic || allItems.length || state.messages.size > 0);
+    epBanner.classList.toggle("hidden", !hasMeetingContext);
+    epBanner.classList.toggle("is-warn", enabledCnt <= 1 || familyCnt < 2);
+    epBanner.classList.toggle("is-verified", enabledCnt >= 2 && familyCnt >= 2);
+    epBanner.textContent =
+      enabledCnt <= 1
+        ? `${epistemicBadge} 当前仅单席推演，白板结论仅作草稿或主持指定约束`
+        : familyCnt < 2
+        ? `${epistemicBadge} 参会席位共享同一底层驱动，未交叉核验项需主持拍板锁定`
+        : `${epistemicBadge} 跨驱动族首轮盲评隔离与交叉反驳已启用`;
+  }
+
+  // 2. 未参评/缺席席位披露卡 (#wbCardAbsent / #wbAbsentCount / #wbAbsentList / #wbAckAbsentBtn)
+  const absentCard = el("wbCardAbsent");
+  const absentCountEl = el("wbAbsentCount");
+  const absentListEl = el("wbAbsentList");
+  const ackAbsentBtn = el("wbAckAbsentBtn");
+  if (absentCard) {
+    absentCard.classList.toggle("hidden", absentSeats.length === 0);
+  }
+  if (absentCountEl) {
+    absentCountEl.textContent = String(absentSeats.length);
+  }
+  if (absentListEl) {
+    absentListEl.innerHTML = "";
+    for (const ab of absentSeats) {
+      const aid = typeof ab === "string" ? ab : ab?.agent_id || ab?.seat || "";
+      const seatName = (typeof ab === "object" && ab?.name) || AGENT_NAMES[aid] || aid || "席位";
+      const reason =
+        (typeof ab === "object" && (ab?.reason || ab?.error)) || "本轮异常中断或超时缺席";
+      const li = document.createElement("li");
+      li.className = "wb-absent-item";
+      li.innerHTML =
+        `<span><strong>${escapeHtml(seatName)}</strong> · ${escapeHtml(reason)}</span>` +
+        `<span>${wb.absent_acknowledged || ab?.acknowledged ? "已确认" : "待确认"}</span>`;
+      absentListEl.appendChild(li);
+    }
+  }
+  if (ackAbsentBtn) {
+    const allAcked = Boolean(
+      wb.absent_acknowledged ||
+        (absentSeats.length > 0 && absentSeats.every((x) => typeof x === "object" && x?.acknowledged))
+    );
+    ackAbsentBtn.classList.toggle("hidden", absentSeats.length === 0 || allAcked);
+  }
+
+  // 3. 同步执行终端日志、Diff 与回滚按钮
   if (Array.isArray(wb.exec_logs) && wb.exec_logs.length > 0 && el("astraTermLogs")) {
     el("astraTermLogs").textContent = wb.exec_logs.join("\n");
     el("astraTermLogs").scrollTop = el("astraTermLogs").scrollHeight;
@@ -2176,18 +2718,48 @@ function renderWhiteboard(rawWb, forceRender = false, isInitialSnapshot = false)
     return;
   }
 
+  // 4. 议题与锁定徽章 (#wbTopicLockBadge)
+  const lockBadge = el("wbTopicLockBadge");
+  if (lockBadge) {
+    lockBadge.classList.toggle("hidden", !state.topicLocked);
+  }
   const topicEl = el("wbTopicText");
   if (topicEl) {
     const fullTopic = wb.topic || state.topic || "";
-    topicEl.textContent = fullTopic || "未设置议题（发起研讨后自动锁定，单击可编辑）";
-    topicEl.classList.toggle("editable", true);
-    topicEl.title = fullTopic ? "单击内联编辑完整议题" : "单击设置议题";
+    topicEl.textContent = fullTopic || "未设置议题（开局前单击可预设，发起研讨后自动锁定）";
+    topicEl.classList.toggle("editable", !state.topicLocked);
+    topicEl.title = state.topicLocked
+      ? "会议已开局锁定议题，请通过追问或插话补充新约束"
+      : fullTopic
+      ? "单击内联编辑开局议题"
+      : "单击设置初始议题";
+  }
+
+  // 5. 动态分区标题 (#wbDecisionZoneTitle / #wbActionZoneTitle)
+  const decTitleEl = el("wbDecisionZoneTitle");
+  if (decTitleEl) {
+    decTitleEl.textContent =
+      enabledCnt <= 1
+        ? "主持指定约束"
+        : familyCnt < 2
+        ? "已锁定结论与主持约束"
+        : "已确认共识与约束";
+  }
+  const actTitleEl = el("wbActionZoneTitle");
+  if (actTitleEl) {
+    const artTitleMap = {
+      code_patch: "待勾选执行任务清单",
+      decision_matrix: "方案对比与决策行动项",
+      ux_checklist: "体验走查整改清单",
+      doc_export: "排查核验与文稿定稿项",
+    };
+    actTitleEl.textContent = artTitleMap[state.artifactType] || "待勾选执行任务清单";
   }
 
   if (el("wbDecisionCount")) el("wbDecisionCount").textContent = String(decisionItems.length);
   if (el("wbRiskCount")) el("wbRiskCount").textContent = String(riskItems.length);
   if (el("wbActionCount")) {
-    el("wbActionCount").textContent = `${checkedActionCount}/${actionItems.length} 项待执行`;
+    el("wbActionCount").textContent = `${checkedActionCount}/${actionItems.length} 已勾选`;
   }
 
   const renderZoneList = (listId, zoneItems, zoneKind, emptyText) => {
@@ -2222,32 +2794,96 @@ function renderWhiteboard(rawWb, forceRender = false, isInitialSnapshot = false)
     "wbDecisionList",
     decisionItems,
     "decision",
-    "主持约束与各方确认的架构共识将在此置顶锁定，后续轮次严格遵循"
+    "主持硬约束与经核验锁定的结论将在此置顶，后续轮次严格遵循"
   );
   renderZoneList(
     "wbRiskList",
     riskItems,
     "risk",
-    "悬浮条目可发起「定向讨论」聚焦裁决，或点击「采纳为共识」移入第一区"
+    "可对分歧项发起「双席再辩 1 轮」、「主持拍板锁定」或移入「弃案」"
   );
   renderZoneList(
     "wbActionList",
     actionItems,
     "action",
-    "勾选需在本轮交付的任务项（取消勾选将排除在本次代码修改范围之外）"
+    "新增任务默认不勾选；请显式勾选需在本轮交付的任务项后再触发执行"
   );
+
+  // 6. 弃案与证伪淘汰方案负面清单 (#wbCardAbandoned / #wbAbandonedCount / #wbAbandonedList)
+  const abCard = el("wbCardAbandoned");
+  const abCount = el("wbAbandonedCount");
+  const abList = el("wbAbandonedList");
+  if (abCard) {
+    abCard.classList.toggle("hidden", abandonedItems.length === 0);
+  }
+  if (abCount) {
+    abCount.textContent = String(abandonedItems.length);
+  }
+  if (abList) {
+    abList.innerHTML = "";
+    abandonedItems.forEach((ab, idx) => {
+      const abId = (typeof ab === "object" && ab?.id) || `ab_${idx}`;
+      const abText =
+        typeof ab === "string"
+          ? ab
+          : ab?.text || ab?.proposal || ab?.summary || "";
+      const abReason = typeof ab === "object" ? ab?.reason || "" : "";
+      const abReplaced = typeof ab === "object" ? ab?.replaced_by || "" : "";
+      const li = document.createElement("li");
+      li.className = "wb-abandoned-item";
+      li.innerHTML =
+        `<div>` +
+          `<span class="wb-abandoned-title">${escapeHtml(abText)}</span>` +
+          (abReason || abReplaced
+            ? `<span class="wb-abandoned-reason">${escapeHtml(
+                [abReason ? `原因：${abReason}` : "", abReplaced ? `替代终态：${abReplaced}` : ""]
+                  .filter(Boolean)
+                  .join(" · ")
+              )}</span>`
+            : "") +
+        `</div>` +
+        `<button type="button" class="wb-card-act del-btn" title="从负面清单移除">移除</button>`;
+      li.querySelector("button")?.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        await postWhiteboardMutation({
+          op: "remove_abandoned",
+          abandoned_id: abId,
+          item_id: abId,
+        });
+      });
+      abList.appendChild(li);
+    });
+  }
+
+  // 7. 按 state.artifactType 自适应切换执行终端与文稿导出栏，并落实零勾选/空纪要门禁
+  const isDocArtifact = Boolean(state.artifactType && state.artifactType !== "code_patch");
+  const adaptBar = el("wbAdaptiveExportBar");
+  if (adaptBar) {
+    adaptBar.classList.toggle("hidden", !isDocArtifact);
+  }
 
   const jumpBtn = el("wbToExecBtn");
   if (jumpBtn) {
     const execName = AGENT_NAMES[state.executorAgent] || "工程师";
+    jumpBtn.classList.toggle("hidden", isDocArtifact);
+    jumpBtn.disabled = checkedActionCount < 1;
     jumpBtn.textContent =
-      actionItems.length > 0
-        ? `前往执行终端由 ${execName} 交付已选任务 (${checkedActionCount}/${actionItems.length}) →`
-        : `前往执行终端交由 ${execName} 交付 →`;
+      checkedActionCount < 1
+        ? `请先勾选至少 1 项待执行任务 (0/${actionItems.length})`
+        : `前往执行终端由 ${execName} 交付已选任务 (${checkedActionCount}/${actionItems.length})`;
   }
+
+  const canExport = hasExportableSessionContent();
+  ["copyMdBtn", "exportMdBtn", "dedupeWbBtn", "wbQuickCopyArtifactBtn", "wbQuickExportArtifactBtn"].forEach((btnId) => {
+    const b = el(btnId);
+    if (b) b.disabled = !canExport;
+  });
+
+  renderExecutorControls();
+  syncAdaptiveRightCollapse();
 }
 
-/* ==================== 会议纪要 Markdown 规范四节排版导出 ==================== */
+/* ==================== 会议纪要 Markdown 规范排版导出（含防伪标记、缺席账本与弃案负面清单） ==================== */
 
 function buildMinutesMarkdown() {
   const wb = normalizeClientWhiteboard(state.whiteboard || {});
@@ -2255,46 +2891,85 @@ function buildMinutesMarkdown() {
   const decisions = items.filter((i) => i.kind === "decision");
   const risks = items.filter((i) => i.kind === "risk");
   const actions = items.filter((i) => i.kind === "action");
+  const abandoned = Array.isArray(wb.abandoned_proposals) ? wb.abandoned_proposals : [];
+  const absentSeats = Array.isArray(wb.absent_seats) ? wb.absent_seats : [];
   const title = wb.topic_title || state.topic || "AI圆桌会议纪要";
   const modeSpec = COLLAB_MODES[state.collabMode] || COLLAB_MODES.deep_deliberation;
-  const ws = effectiveWorkspacePath() || "未绑定本地目录";
+  const ws = effectiveWorkspacePath() || "不绑定项目 · 纯研讨";
+  const enabledCnt = (state.enabledAgents || []).length;
+  const familyCnt = computeActiveDriverFamilyCount();
+  const epBadge =
+    wb.epistemic_badge ||
+    (enabledCnt <= 1
+      ? "[单席推演草稿]"
+      : familyCnt < 2
+      ? "[同源模型多视角推演 · 误差相关]"
+      : "[异构多引擎独立推演]");
+
+  const absentSection = absentSeats.length
+    ? [
+        "",
+        "## 未参评/缺席席位",
+        ...absentSeats.map((ab) => {
+          const aid = typeof ab === "string" ? ab : ab?.agent_id || ab?.seat || "";
+          const nm = (typeof ab === "object" && ab?.name) || AGENT_NAMES[aid] || aid;
+          const rs = (typeof ab === "object" && (ab?.reason || ab?.error)) || "异常缺席";
+          return `- **${nm}**：${rs}`;
+        }),
+      ]
+    : [];
 
   const lines = [
     `# ${title}`,
     "",
+    `- **认知防伪标记**：${epBadge}`,
     `- **讨论策略**：${modeSpec.label}（${modeSpec.hint}）`,
     `- **项目工作区**：\`${ws}\``,
     `- **会议状态**：${wb.consensus_status || STAGE_LABELS[state.stage] || "待命"}`,
     wb.topic && wb.topic !== title ? `- **完整议题**：${wb.topic}` : "",
+    ...absentSection,
     "",
-    "## 一、已确认共识与约束",
+    "## 一、已确认共识与主持约束",
     ...(decisions.length
-      ? decisions.map(
-          (it) =>
-            `- ${it.pinned ? "**[置顶约束]** " : ""}${it.text} *(${
-              AUTHOR_BADGE_META[it.author]?.name || it.author
-            })*`
-        )
+      ? decisions.map((it) => {
+          const isChairDir = it.origin_tier === "chair_directive" || it.author === "chair";
+          const prefix = isChairDir
+            ? "**[主持指定约束]** "
+            : it.pinned
+            ? "**[置顶共识]** "
+            : "";
+          return `- ${prefix}${it.text} *(${AUTHOR_BADGE_META[it.author]?.name || it.author})*`;
+        })
       : ["- 暂无已确认共识记录"]),
     "",
-    "## 二、风险审计与边界防线",
+    "## 二、待决分歧与风险边界",
     ...(risks.length
       ? risks.map((it) => `- ${it.text} *(${AUTHOR_BADGE_META[it.author]?.name || it.author})*`)
       : ["- 暂无待决争议或风险项"]),
     "",
-    "## 三、执行任务清单",
+    "## 三、待执行交付任务清单",
     ...(actions.length
       ? actions.map(
           (it) =>
-            `- [${it.checked !== false ? "x" : " "}] ${it.text} *(${
+            `- [${it.checked === true ? "x" : " "}] ${it.text} *(${
               AUTHOR_BADGE_META[it.author]?.name || it.author
             })*`
         )
       : ["- [ ] 暂无待执行任务项"]),
     "",
-    "## 四、完整研讨记录",
+    "## 四、已确认放弃与证伪淘汰方案",
+    ...(abandoned.length
+      ? abandoned.map((ab) => {
+          const txt = typeof ab === "string" ? ab : ab?.text || ab?.proposal || ab?.summary || "";
+          const rsn = typeof ab === "object" && ab?.reason ? ` —— 弃用原因：${ab.reason}` : "";
+          const rep = typeof ab === "object" && ab?.replaced_by ? `（替代终态：${ab.replaced_by}）` : "";
+          return `- ~~${txt}~~${rsn}${rep}`;
+        })
+      : ["- 无已证伪或放弃的历史方案"]),
     "",
-  ].filter((x) => x !== null);
+    "## 五、完整研讨记录",
+    "",
+  ].filter((x) => x !== "");
 
   for (const msg of state.messages.values()) {
     if (!msg.content || msg.skipped) continue;
@@ -2332,6 +3007,10 @@ async function copyTextToClipboard(text, okMsg = "已复制到剪贴板") {
 
 async function exportMinutesMarkdownFile() {
   if (!state.currentSessionId) return;
+  if (!hasExportableSessionContent()) {
+    showToast("当前为空白新会议，暂无可导出的会议纪要", "warn", 2200);
+    return;
+  }
   try {
     const res = await fetch(`/api/sessions/${state.currentSessionId}/export`, {
       method: "GET",
@@ -2362,11 +3041,48 @@ async function exportMinutesMarkdownFile() {
   }
 }
 
-/* ==================== 顶栏四阶段进度、精简席位条与一体化席位配置浮层 ==================== */
+function resolveClientEpistemicMeta() {
+  const wbMode = state.whiteboard?.epistemic_mode || "";
+  const wbBadge = state.whiteboard?.epistemic_badge || "";
+  const enabledCount = state.enabledAgents.length || 1;
+  if (enabledCount <= 1 || wbMode === "solo_draft") {
+    return {
+      mode: "solo_draft",
+      badge: "[单席推演草稿]",
+      headerText: "[单席推演草稿]",
+      bannerText: "[单席推演草稿] 当前仅启用 1 席独立推演，未经异席反向审计，所有结论须由主持人审阅确认。",
+    };
+  }
+  const agents = state.system?.agents || {};
+  const fams = new Set();
+  state.enabledAgents.forEach((aid) => {
+    const st = state.seatStates[aid] || {};
+    const inf = agents[aid] || {};
+    if (st.binary_ready || inf.binary_detected) {
+      const fk = st.driver_family_key || inf.driver_family_key || st.effective_driver || inf.effective_driver;
+      if (fk) fams.add(fk);
+    }
+  });
+  if (wbMode === "heterogeneous" || fams.size >= 2) {
+    return {
+      mode: "heterogeneous",
+      badge: wbBadge || `多源异构独立交叉核验（${Math.max(2, fams.size)} 独立引擎）`,
+      headerText: `异构独立 · ${Math.max(2, fams.size)} 引擎`,
+      bannerText: `多源异构独立交叉核验（${Math.max(2, fams.size)} 个独立驱动族）：首轮盲评隔离 + 交叉质询闭环准入已启用。`,
+    };
+  }
+  return {
+    mode: "homogeneous_warning",
+    badge: "[同源模型多视角推演 · 误差相关]",
+    headerText: "[同源模型多视角推演 · 误差相关]",
+    bannerText: "[同源模型多视角推演 · 误差相关] 当前参会席位共用同一底层引擎，视角分化受同源盲区制约，禁止自动升格为多源共识。",
+  };
+}
 
 function renderStageAndHeader() {
   const stage = state.stage || "idle";
   const hasTopic = Boolean(state.topic);
+  const isIdleEmpty = stage === "idle" && !hasTopic && state.messages.size === 0 && !state.isBusy;
 
   const heading = el("currentTopicTitle");
   if (heading) {
@@ -2386,7 +3102,23 @@ function renderStageAndHeader() {
     }
   }
 
-  // 四阶段进度胶囊：① 独立初评 → ② 交叉质询 → ③ 形成决议 → ④ 执行交付
+  const epiEl = el("headerEpistemicBadge");
+  if (epiEl) {
+    const epi = resolveClientEpistemicMeta();
+    epiEl.classList.remove("hidden", "epistemic-warn", "epistemic-solo", "epistemic-hetero");
+    epiEl.textContent = epi.headerText;
+    epiEl.title = epi.bannerText;
+    if (epi.mode === "heterogeneous") epiEl.classList.add("epistemic-hetero");
+    else if (epi.mode === "solo_draft") epiEl.classList.add("epistemic-solo");
+    else epiEl.classList.add("epistemic-warn");
+  }
+
+  // 首屏空态收起顶栏装饰性四阶段条，进入会议后恢复展示
+  const stepperEl = el("stageStepper");
+  if (stepperEl) {
+    stepperEl.classList.toggle("hidden", isIdleEmpty);
+  }
+
   const stepOrder = ["opening", "discussion", "consensus", "execution"];
   let activeStepIdx = -1;
   if (stage === "opening_parallel") activeStepIdx = 0;
@@ -2451,7 +3183,10 @@ function renderStageAndHeader() {
     } else if (inMeeting) {
       topicInp.placeholder = "输入补充追问、使用 @席位名 点名深挖，或输入 @文件路径 注入源码";
     } else {
-      topicInp.placeholder = "输入技术议题开启研讨，输入 @ 引用项目源码或 @文件:起始行-结束行 切片";
+      const ws = effectiveWorkspacePath();
+      topicInp.placeholder = ws
+        ? "输入议题开启研讨，支持 @文件:起始-结束行 切片引用或拖拽截图/文档"
+        : "输入议题开启纯研讨（如需引用本地源码或写盘预演，可点击顶栏绑定项目）";
     }
   }
 
@@ -2466,27 +3201,23 @@ function renderWorkspaceBadges() {
 
   const headerChip = el("headerWsChip");
   const headerName = el("headerWsName");
+  const unbindBtn = el("headerUnbindWsBtn");
   if (headerChip && headerName) {
     headerChip.classList.toggle("ws-bound", Boolean(ws));
     headerChip.classList.toggle("ws-unbound", !ws);
-    headerName.textContent = folderName || "选择本地项目";
-    headerChip.title = ws ? `当前绑定本地工作区：${ws}（点击切换）` : "尚未绑定本地项目，点击选择本地项目目录";
+    headerName.textContent = folderName ? `项目：${folderName}` : "不绑定项目 · 纯研讨";
+    headerChip.title = ws ? `当前绑定本地工作区：${ws}（点击切换目录）` : "当前为纯研讨免绑仓模式，点击绑定本地项目工作区";
+  }
+  if (unbindBtn) {
+    unbindBtn.classList.toggle("hidden", !ws || state.isBusy || state.stage === "executing");
   }
 
   const wsName = el("workspaceName");
   const wsBadge = el("workspaceBadge");
-  if (wsName) wsName.textContent = folderName || "选择本地项目";
+  if (wsName) wsName.textContent = folderName || "不绑定项目 · 纯研讨";
   if (wsBadge) {
-    wsBadge.textContent = ws || "尚未绑定本地项目目录";
+    wsBadge.textContent = ws || "未绑定本地目录（纯研讨模式）";
     wsBadge.title = ws;
-  }
-
-  const emptyBtn = el("emptyBindWsBtn");
-  const emptyName = el("emptyWsName");
-  if (emptyBtn && emptyName) {
-    emptyBtn.classList.toggle("ws-bound", Boolean(ws));
-    emptyName.textContent = ws ? `已绑定：${folderName}` : "点击绑定本地项目目录";
-    emptyBtn.title = ws ? `${ws}（点击切换项目目录）` : "点击选择或切换本地项目工作区";
   }
 }
 
@@ -2503,6 +3234,7 @@ function renderSeatCard(agentId) {
   const unmounted = isExtraSeat && !enabled && !state.showAllSeatsInRing && status === "idle";
   const personaKey = state.seatPersonas[agentId] || DEFAULT_SEAT_PERSONAS[agentId];
   const pSpec = getPersonaSpec(personaKey, agentId);
+  const ready = Boolean(st.binary_ready ?? sysInfo.binary_detected);
 
   seatEl.className = [
     "seat-card",
@@ -2538,7 +3270,7 @@ function renderSeatCard(agentId) {
 
   const badgeEl = el(`seat-badge-${agentId}`);
   if (badgeEl) {
-    let badgeText = st.badge || (sysInfo.binary_detected ? "已就绪" : "未检测到 CLI");
+    let badgeText = st.badge || (ready ? "已就绪" : "未检测到 CLI");
     if (!enabled && status === "idle") {
       badgeText = "暂停参会";
     } else if (status === "idle" && st.elapsed_ms > 0 && badgeText && !badgeText.includes("s")) {
@@ -2547,11 +3279,25 @@ function renderSeatCard(agentId) {
     badgeEl.textContent = badgeText;
   }
 
+  // 中层协议透出：对抗立场标签 · 真实模型名 · 提供方 · [异构独立 / 同源复用]
   const teleEl = el(`seat-tele-${agentId}`);
   if (teleEl) {
     const model = st.effective_model || sysInfo.effective_model || "";
-    const effort = state.seatEfforts[agentId] || st.effective_effort || sysInfo.effective_discussion_effort || "";
-    teleEl.textContent = [model, effort].filter(Boolean).join(" · ") || DRIVER_LABELS[sysInfo.effective_driver] || "";
+    const provider = st.provider_name || sysInfo.provider_name || "";
+    let indep = st.independence_label || sysInfo.independence_label || "";
+    if (!indep && ready) {
+      if (isSolo) indep = "单席专注";
+      else indep = st.shared_cli_group || sysInfo.shared_fallback ? "同源复用" : "异构独立";
+    }
+    if (ready) {
+      const segs = [pSpec.label, model || DRIVER_LABELS[sysInfo.effective_driver] || "CLI", provider, indep ? `[${indep}]` : ""].filter(Boolean);
+      teleEl.textContent = segs.join(" · ");
+      teleEl.classList.toggle("tele-homog", indep === "同源复用");
+      teleEl.classList.toggle("tele-hetero", indep === "异构独立");
+    } else {
+      teleEl.textContent = `${pSpec.label} · 未检测到本地驱动`;
+      teleEl.classList.remove("tele-homog", "tele-hetero");
+    }
   }
 }
 
@@ -2857,6 +3603,16 @@ function renderExecutorControls() {
   const execName = AGENT_NAMES[execAid] || "工程师";
   const allowWrite = Boolean(el("allowWriteCheckbox")?.checked);
   const ws = effectiveWorkspacePath();
+  const checkedCnt = getCheckedActionCount();
+  const isCodePatch = (state.artifactType || "code_patch") === "code_patch";
+
+  const termTabBtn = document.querySelector('.wb-tab[data-tab="terminal"]');
+  if (termTabBtn) {
+    termTabBtn.classList.toggle("hidden", !isCodePatch && state.stage !== "executing");
+  }
+  if (!isCodePatch && state.activeTab === "terminal" && state.stage !== "executing") {
+    switchWorkbenchTab("whiteboard");
+  }
 
   const segWrap = el("executorSegmented");
   if (segWrap) {
@@ -2888,12 +3644,22 @@ function renderExecutorControls() {
     btn.classList.toggle("active", isWriteBtn === allowWrite);
   });
 
-  if (el("executeBtn")) {
-    el("executeBtn").textContent = `交由 ${execName} 执行 →`;
+  el("execWriteSafetyBanner")?.classList.toggle("hidden", !(allowWrite && ws));
+
+  const execCueBtn = el("executeBtn");
+  if (execCueBtn) {
+    execCueBtn.classList.toggle("hidden", !isCodePatch);
+    execCueBtn.disabled = checkedCnt < 1 || state.stage === "executing" || state.recoveryRequired;
+    execCueBtn.textContent = checkedCnt < 1 ? `请先勾选白板任务` : `交由 ${execName} 执行 (${checkedCnt}) →`;
   }
   if (el("runExecFromTabBtn")) {
-    el("runExecFromTabBtn").textContent = state.stage === "executing" ? `${execName} 执行中…` : `启动 ${execName} 执行`;
-    el("runExecFromTabBtn").disabled = state.stage === "executing" || state.recoveryRequired;
+    el("runExecFromTabBtn").textContent =
+      state.stage === "executing"
+        ? `${execName} 执行中…`
+        : checkedCnt < 1
+        ? "尚无已勾选任务（请回白板勾选）"
+        : `启动 ${execName} 执行 (${checkedCnt} 项)`;
+    el("runExecFromTabBtn").disabled = checkedCnt < 1 || state.stage === "executing" || state.recoveryRequired;
   }
   el("stopExecFromTabBtn")?.classList.toggle("hidden", state.stage !== "executing");
   if (el("termTargetTitle")) {
@@ -2904,14 +3670,14 @@ function renderExecutorControls() {
   if (descEl) {
     if (!ws) {
       descEl.classList.remove("warn");
-      descEl.textContent = "当前未绑定本地项目：点击执行将依据白板已确认共识与已勾选任务输出《工程实施方案报告》。";
+      descEl.textContent = "当前未绑定本地项目：点击执行将依据白板已锁定约束与已勾选任务输出《工程实施方案报告》。";
     } else if (allowWrite) {
       descEl.classList.add("warn");
       descEl.textContent =
-        `写入模式（${ws}）：写前自动生成无 Git 依赖的纯标准库 CAS 字节清单（含忽略文件，上限 128 MiB）并加排他 flock 锁，支持原子回滚。`;
+        `写入模式（${ws}）：写前将获取跨进程排他锁并建立写前字节快照，验证异常支持一键回滚。`;
     } else {
       descEl.classList.remove("warn");
-      descEl.textContent = `只读预演模式（${ws}）：依据白板已锁定共识与已勾选任务生成代码补丁预览，不修改本地文件。`;
+      descEl.textContent = `只读预演模式（${ws}）：依据白板已锁定约束与已勾选任务生成代码补丁预览，不改动本地文件。`;
     }
   }
 }
@@ -2948,29 +3714,42 @@ function renderSystemStatus(sys) {
     const jMode = String(sys.sqlite_journal_mode || "wal").toUpperCase();
     el("diagSqliteBadge").textContent = `SQLite ${jMode}`;
   }
+  if (el("diagIsolationSpec")) {
+    const conc = state.singleCliConcurrency || 3;
+    el("diagIsolationSpec").textContent = `独立 TMPDIR 隔离 · ${conc} 路并发通道 · 进程组围栏收割`;
+  }
 
   const agents = sys.agents || {};
   const activeSeatScope = state.enabledAgents.length ? state.enabledAgents : CORE_TRIAD_SEATS;
   let readyCount = 0;
-  let sharedCount = 0;
+  const distinctFamilies = new Set();
   activeSeatScope.forEach((aid) => {
-    if (agents[aid]?.binary_detected) readyCount += 1;
-    if (agents[aid]?.shared_fallback || agents[aid]?.shared_cli_group) sharedCount += 1;
+    if (agents[aid]?.binary_detected) {
+      readyCount += 1;
+      const fk = state.seatStates[aid]?.driver_family_key || agents[aid]?.driver_family_key || agents[aid]?.effective_driver;
+      if (fk) distinctFamilies.add(fk);
+    }
   });
+  const isHomogeneousMulti = activeSeatScope.length > 1 && distinctFamilies.size < 2;
+
+  const heteroBtn = el("ringHeterogeneousBtn");
+  if (heteroBtn) {
+    const canRec = Boolean(sys.can_recommend_heterogeneous) && activeSeatScope.length > 1 && isHomogeneousMulti && !state.isBusy;
+    heteroBtn.classList.toggle("hidden", !canRec);
+  }
 
   const summaryBar = el("readySummaryBar");
   if (summaryBar) {
     summaryBar.classList.remove("all-ready", "warn-ready");
-    if (readyCount === activeSeatScope.length && sharedCount === 0) {
+    if (readyCount === activeSeatScope.length && !isHomogeneousMulti && activeSeatScope.length > 1) {
       summaryBar.classList.add("all-ready");
-      summaryBar.textContent = `${readyCount} 席异构 CLI 引擎全部就绪 · 支持多模型真并行交锋`;
+      summaryBar.textContent = `${readyCount} 席异构独立模型已就绪 · 支持真多源独立立论与交叉证伪`;
     } else if (readyCount >= 1) {
       summaryBar.classList.add("all-ready");
-      const concModeLabel = (state.singleCliConcurrency || 3) > 1 ? `${state.singleCliConcurrency || 3} 路真并行` : "串行防限流";
       summaryBar.textContent =
-        sharedCount > 0
-          ? `单 CLI 多角色引擎池已就绪（${concModeLabel} · 独立 TMPDIR 隔离） · 当前启用 ${activeSeatScope.length} 席`
-          : `${readyCount}/${activeSeatScope.length} 席本地 CLI 引擎就绪 · 支持 1–6 席弹性研讨`;
+        activeSeatScope.length === 1
+          ? `单席专注模式已就绪 · 独立推演与边界自检`
+          : `本地模型已就绪（当前启用 ${activeSeatScope.length} 席 · 同源多视角推演）`;
     } else {
       summaryBar.classList.add("warn-ready");
       summaryBar.textContent = "未检测到可用本地 CLI · 请打开左下角「设置中心」配置驱动路径";
@@ -2989,7 +3768,7 @@ function renderSystemStatus(sys) {
       const isSeatEnabled = state.enabledAgents.includes(aid);
 
       let pillCls = ready ? "driver-pill live" : "driver-pill missing";
-      let pillTxt = ready ? (info.shared_fallback ? "并行池复用" : "已就绪") : "未安装";
+      let pillTxt = ready ? (info.independence_label || (info.shared_fallback ? "同源复用" : "已就绪")) : "未安装";
       if (latMs > 0 && pingRes?.ok) {
         pillCls =
           latMs < 2800
@@ -3003,7 +3782,8 @@ function renderSystemStatus(sys) {
       if (isSeatEnabled || CORE_TRIAD_SEATS.includes(aid)) {
         const card = document.createElement("div");
         card.className = `cli-card${isExpanded ? " expanded" : ""}`;
-        const drvText = `${DRIVER_LABELS[info.effective_driver] || info.effective_driver || "CLI"} · ${
+        const provPart = info.provider_name ? `${info.provider_name} · ` : "";
+        const drvText = `${provPart}${DRIVER_LABELS[info.effective_driver] || info.effective_driver || "CLI"} · ${
           info.effective_model || "默认模型"
         }${info.effective_discussion_effort ? ` (${info.effective_discussion_effort})` : ""}`;
 
@@ -3046,8 +3826,29 @@ function renderSystemStatus(sys) {
 }
 
 async function switchCurrentSessionWorkspace(targetPath) {
-  const clean = String(targetPath || "").trim();
-  if (!clean) return false;
+  const clean = String(targetPath ?? "").trim();
+  if (!clean) {
+    if (state.currentSessionId) {
+      const wsRes = await apiFetch(`/api/sessions/${state.currentSessionId}/workspace`, {
+        method: "POST",
+        body: JSON.stringify({ workspace_dir: "" }),
+      });
+      state.sessionWorkspaceDir = "";
+      state.workspaceBound = wsRes.workspace_bound ?? false;
+      state.workspaceIsGit = false;
+    } else {
+      state.sessionWorkspaceDir = "";
+      state.workspaceBound = false;
+      state.workspaceIsGit = false;
+    }
+    if (el("cfgWorkspaceDir")) el("cfgWorkspaceDir").value = "";
+    state.attachedFilesCache.clear();
+    refreshAttachedFilesBar();
+    renderWorkspaceBadges();
+    renderStageAndHeader();
+    if (state.whiteboard) renderWhiteboard(state.whiteboard, true, false);
+    return true;
+  }
   if (state.currentSessionId) {
     const wsRes = await apiFetch(`/api/sessions/${state.currentSessionId}/workspace`, {
       method: "POST",
@@ -3065,7 +3866,9 @@ async function switchCurrentSessionWorkspace(targetPath) {
   if (el("cfgWorkspaceDir")) el("cfgWorkspaceDir").value = clean;
   state.attachedFilesCache.clear();
   refreshAttachedFilesBar();
+  renderWorkspaceBadges();
   renderStageAndHeader();
+  if (state.whiteboard) renderWhiteboard(state.whiteboard, true, false);
   return true;
 }
 
@@ -3514,11 +4317,19 @@ function applySessionSnapshot(snap, options = {}) {
   const prevScrollTop = streamEl ? streamEl.scrollTop : 0;
   const prevScrolledUp = state.userScrolledUp;
 
+  const isDifferentSession = snap.session_id !== state.currentSessionId;
+  if (isDifferentSession) {
+    state.userToggledRightPane = false;
+  }
+
   state.currentSessionId = snap.session_id;
   state.stage = snap.stage || "idle";
   state.execState = snap.exec_state || "idle";
   state.isBusy = Boolean(snap.is_busy);
   state.topic = snap.topic || "";
+  state.topicLocked = Boolean(snap.topic_locked || state.stage !== "idle" || (snap.messages || []).length > 0);
+  state.scenarioPack = snap.scenario_pack || snap.whiteboard?.scenario_pack || "arch_code";
+  state.artifactType = snap.artifact_type || snap.whiteboard?.artifact_type || "code_patch";
   state.sessionWorkspaceDir = snap.workspace_dir || "";
   state.workspaceBound = snap.workspace_bound ?? null;
   state.workspaceIsGit = Boolean(snap.workspace_is_git);
@@ -3552,7 +4363,6 @@ function applySessionSnapshot(snap, options = {}) {
 
   const msgs = Array.isArray(snap.messages) ? snap.messages : [];
   if (isSameSessionReconnect) {
-    // P0.3 原地对账（In-place Reconcile）：不销毁已有 DOM 树，保留阅读滚动锚点与行内草稿
     const incomingIds = new Set(msgs.map((m) => m.id));
     for (const oldId of Array.from(state.messages.keys())) {
       if (!incomingIds.has(oldId)) {
@@ -3567,6 +4377,7 @@ function applySessionSnapshot(snap, options = {}) {
     renderAllSeats();
     renderWhiteboard(snap.whiteboard || {}, false, false);
     renderStageAndHeader();
+    syncAdaptiveRightCollapse();
     if (streamEl && prevScrolledUp) {
       streamEl.scrollTop = prevScrollTop;
       state.userScrolledUp = true;
@@ -3582,6 +4393,7 @@ function applySessionSnapshot(snap, options = {}) {
     renderAllSeats();
     renderWhiteboard(snap.whiteboard || {}, true, true);
     renderStageAndHeader();
+    syncAdaptiveRightCollapse();
     scrollToBottom(false);
   }
 
@@ -3621,6 +4433,7 @@ function dispatchSseEventFrame(eventName, rawData, rawId, sessionId) {
   if (eventName === "session_cleared") {
     clearChatMessages();
     updateEmptyGuideVisibility();
+    syncAdaptiveRightCollapse();
     return;
   }
 
@@ -3630,6 +4443,9 @@ function dispatchSseEventFrame(eventName, rawData, rawId, sessionId) {
     state.execState = pkt.exec_state || state.execState;
     state.isBusy = Boolean(pkt.is_busy);
     if (typeof pkt.topic === "string") state.topic = pkt.topic;
+    if (typeof pkt.topic_locked === "boolean") state.topicLocked = pkt.topic_locked;
+    if (typeof pkt.scenario_pack === "string" && pkt.scenario_pack) state.scenarioPack = pkt.scenario_pack;
+    if (typeof pkt.artifact_type === "string" && pkt.artifact_type) state.artifactType = pkt.artifact_type;
     if (typeof pkt.workspace_dir === "string") state.sessionWorkspaceDir = pkt.workspace_dir;
     if (typeof pkt.workspace_bound === "boolean") state.workspaceBound = pkt.workspace_bound;
     if (typeof pkt.workspace_is_git === "boolean") state.workspaceIsGit = pkt.workspace_is_git;
@@ -3638,8 +4454,6 @@ function dispatchSseEventFrame(eventName, rawData, rawId, sessionId) {
       if (state.recoveryRequired) fetchRecoveryPlanIfNeeded();
       else renderExecGuardBanner();
     }
-    // A settings response may arrive before earlier events on the same stream.
-    // Apply the rest of each event while keeping the latest confirmed roster.
     if (numericId >= state.seatConfigRev) {
       state.seatConfigRev = numericId;
       if (Array.isArray(pkt.enabled_agents)) state.enabledAgents = pkt.enabled_agents;
@@ -3649,6 +4463,10 @@ function dispatchSseEventFrame(eventName, rawData, rawId, sessionId) {
       if (pkt.collab_mode || typeof pkt.auto_preview_exec === "boolean") {
         syncCollabModeUI(pkt.collab_mode || state.collabMode, pkt.auto_preview_exec);
       }
+    }
+    if (state.whiteboard) {
+      if (pkt.epistemic_mode) state.whiteboard.epistemic_mode = pkt.epistemic_mode;
+      if (pkt.epistemic_badge) state.whiteboard.epistemic_badge = pkt.epistemic_badge;
     }
     if (pkt.consensus_status && el("wbConsensusTag")) {
       el("wbConsensusTag").textContent = pkt.consensus_status;
@@ -3671,6 +4489,7 @@ function dispatchSseEventFrame(eventName, rawData, rawId, sessionId) {
     updateEmptyGuideVisibility();
     renderAllSeats();
     renderStageAndHeader();
+    syncAdaptiveRightCollapse();
     refreshSessionsListOnly();
     return;
   }
@@ -3862,9 +4681,15 @@ async function switchToSession(sessionId) {
 }
 
 async function createNewSession() {
+  if (el("allowWriteCheckbox")) {
+    el("allowWriteCheckbox").checked = false;
+  }
+  state.userToggledRightPane = false;
   if (!state.topic && !state.whiteboard?.items?.length && state.messages.size === 0 && !state.isBusy && state.currentSessionId) {
+    renderExecutorControls();
+    syncAdaptiveRightCollapse();
     el("topicInput")?.focus();
-    showToast("当前已是空白新会议，可直接输入议题开启研讨", "info", 2000);
+    showToast("当前已是空白新会议，可直接选择场景意图包或输入议题开启研讨", "info", 2000);
     return;
   }
   try {
@@ -3873,6 +4698,8 @@ async function createNewSession() {
       body: JSON.stringify({
         title: "新会议",
         collab_mode: state.collabMode || "deep_deliberation",
+        scenario_pack: state.scenarioPack || "arch_code",
+        artifact_type: state.artifactType || "code_patch",
         auto_preview_exec: state.autoPreviewExec,
       }),
     });
@@ -3925,6 +4752,8 @@ async function startOrInterruptWithText(overrideText = "") {
         body: JSON.stringify({
           topic: text,
           collab_mode: state.collabMode,
+          scenario_pack: state.scenarioPack,
+          artifact_type: state.artifactType,
           auto_preview_exec: state.autoPreviewExec,
           enabled_agents: state.enabledAgents,
           seat_personas: state.seatPersonas,
@@ -3949,7 +4778,7 @@ async function startOrInterruptWithText(overrideText = "") {
       scrollToBottom(true);
     }
   } catch (err) {
-    showToast(err.message || "发送指令失败", "err");
+    showToast(err.message || "发送指令失败", "err", 3600);
   } finally {
     state.sendingSessions.delete(sessionId);
   }
@@ -3957,19 +4786,23 @@ async function startOrInterruptWithText(overrideText = "") {
 
 async function triggerExecutionNow() {
   if (!state.currentSessionId) return;
-  if (!state.topic && !state.whiteboard?.items?.some((it) => it.kind === "action" && it.checked !== false) && state.messages.size === 0) {
-    showToast("请先输入议题完成研讨或添加白板任务", "warn", 2200);
+  const checkedCnt = getCheckedActionCount();
+  if (checkedCnt < 1) {
+    setRightCollapsed(false, true);
+    switchWorkbenchTab("whiteboard");
+    el("wbCardAction")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    showToast("尚无已勾选任务（checked_action_count = 0），请先在会议白板核对并勾选至少 1 项待执行任务", "warn", 3000);
     return;
   }
   const allowWrite = Boolean(effectiveWorkspacePath() && el("allowWriteCheckbox")?.checked) === true;
   const execAid = state.executorAgent || "astra";
-  setRightCollapsed(false);
+  setRightCollapsed(false, true);
   switchWorkbenchTab("terminal");
   state.rollbackConflicts = [];
   state.postExecVerifyFailed = false;
   renderExecGuardBanner();
   if (el("astraTermLogs")) {
-    el("astraTermLogs").textContent = `正在进行单飞锁预约与写前 CAS 字节证明（${AGENT_NAMES[execAid] || execAid}）…`;
+    el("astraTermLogs").textContent = `正在核验任务勾选门禁与执行锁预约（${AGENT_NAMES[execAid] || execAid} · 已勾选 ${checkedCnt} 项任务）…`;
   }
   try {
     await apiFetch(`/api/sessions/${state.currentSessionId}/execute`, {
@@ -3983,6 +4816,10 @@ async function triggerExecutionNow() {
     if (el("astraTermLogs")) {
       el("astraTermLogs").textContent = `准入拦截 (${err.status || 409})：${err.message}`;
     }
+    if (err.payload?.reason === "unacknowledged_absent_seats") {
+      switchWorkbenchTab("whiteboard");
+      el("wbCardAbsent")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
     if (err.payload?.recovery_required) {
       state.recoveryRequired = true;
       await fetchRecoveryPlanIfNeeded();
@@ -3994,8 +4831,9 @@ async function triggerExecutionNow() {
 /* ==================== 渐进披露式「系统与模型设置弹窗」与单引擎串行模式 ==================== */
 
 function switchSettingsTab(tabKey) {
-  const validTabs = ["lineup", "seats", "concurrency", "workspace", "diagnostics"];
-  const next = validTabs.includes(tabKey) ? tabKey : "lineup";
+  const validTabs = ["seats", "concurrency", "diagnostics"];
+  const requested = tabKey === "workspace" ? "concurrency" : tabKey;
+  const next = validTabs.includes(requested) ? requested : "seats";
   state.activeSettingsTab = next;
   document.querySelectorAll("#settingsNav [data-settings-tab]").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.settingsTab === next);
@@ -4024,11 +4862,7 @@ function syncModalSeatMatrixSummary() {
 function openSettingsModal(initialTab = "") {
   const modal = el("settingsModal");
   if (!modal) return;
-  if (initialTab) {
-    switchSettingsTab(initialTab);
-  } else {
-    switchSettingsTab(state.activeSettingsTab || "lineup");
-  }
+  switchSettingsTab(initialTab || "seats");
   const sys = state.system || {};
   const agents = sys.agents || {};
 
@@ -4114,6 +4948,7 @@ function openSettingsModal(initialTab = "") {
   syncDynamicRosterNames();
   syncModalSeatMatrixSummary();
   modal.classList.remove("hidden");
+  modal.dispatchEvent(new Event("roundtable:settings-open"));
 }
 
 function closeSettingsModal() {
@@ -4389,7 +5224,10 @@ function bindEvents() {
   el("railPickFolderBtn")?.addEventListener("click", () => pickWorkspaceFolder());
   el("pickFolderQuickBtn")?.addEventListener("click", () => pickWorkspaceFolder());
   el("headerWsChip")?.addEventListener("click", () => pickWorkspaceFolder());
-  el("emptyBindWsBtn")?.addEventListener("click", () => pickWorkspaceFolder());
+  el("headerUnbindWsBtn")?.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    await switchCurrentSessionWorkspace("");
+  });
 
   // 历史会话搜索
   el("sessionSearchInput")?.addEventListener("input", (e) => {
@@ -4400,7 +5238,7 @@ function bindEvents() {
   // 右侧白板/执行终端面板显隐与页签滑块切换
   el("toggleRightBtn")?.addEventListener("click", () => {
     const isHidden = el("appShell")?.classList.contains("right-collapsed");
-    setRightCollapsed(!isHidden);
+    setRightCollapsed(!isHidden, true);
   });
   document.querySelectorAll(".wb-tab[data-tab]").forEach((btn) => {
     btn.addEventListener("click", () => switchWorkbenchTab(btn.dataset.tab));
@@ -4464,7 +5302,7 @@ function bindEvents() {
     }
     showToast(
       next
-        ? "已开启「自动执行预演」：讨论收敛后将自动生成决议并输出只读代码补丁预览"
+        ? "已开启「自动执行预演」：讨论收敛并勾选任务后将进入只读预演"
         : "已关闭「自动执行预演」",
       "info",
       2200
@@ -4473,21 +5311,14 @@ function bindEvents() {
   el("emptyAutoPreviewBtn")?.addEventListener("click", toggleAutoPreview);
   el("composerAutoPreviewBtn")?.addEventListener("click", toggleAutoPreview);
 
-  // Launchpad 与侧栏 5 大场景预设联动
-  document.querySelectorAll("[data-scenario-preset]").forEach((btn) => {
-    btn.addEventListener("click", () => applyScenarioPreset(btn.dataset.scenarioPreset));
+  // 首屏四大场景意图包 Facade 事务切换
+  document.querySelectorAll("[data-scenario-pack]").forEach((card) => {
+    card.addEventListener("click", () => applyScenarioPack(card.dataset.scenarioPack));
   });
 
-  // Launchpad 工程开局议题模板
-  document.querySelectorAll("[data-starter-topic]").forEach((card) => {
-    card.addEventListener("click", () => {
-      const inp = el("topicInput");
-      if (!inp) return;
-      inp.value = card.dataset.starterTopic || "";
-      inp.focus();
-      autoGrowComposer();
-      refreshAttachedFilesBar();
-    });
+  // 高级抽屉与侧栏 1–6 席预设联动
+  document.querySelectorAll("[data-scenario-preset]").forEach((btn) => {
+    btn.addEventListener("click", () => applyScenarioPreset(btn.dataset.scenarioPreset));
   });
 
   // 讨论流滚动监听与「↓ 查看最新发言」
@@ -4590,6 +5421,8 @@ function bindEvents() {
         body: JSON.stringify({
           topic: state.topic,
           collab_mode: state.collabMode,
+          scenario_pack: state.scenarioPack,
+          artifact_type: state.artifactType,
           auto_preview_exec: state.autoPreviewExec,
           enabled_agents: state.enabledAgents,
           seat_personas: state.seatPersonas,
@@ -4598,7 +5431,7 @@ function bindEvents() {
           reset_history: true,
         }),
       });
-      showToast("已按当前策略与席位分工重开本议题", "ok", 2000);
+      showToast("已按当前场景意图包与席位分工重开本议题", "ok", 2000);
     } catch (err) {
       showToast(err.message || "重开议题失败", "err");
     }
@@ -4616,8 +5449,12 @@ function bindEvents() {
   el("executeBtn")?.addEventListener("click", () => triggerExecutionNow());
   el("runExecFromTabBtn")?.addEventListener("click", () => triggerExecutionNow());
 
-  // 会议白板操作：单击议题编辑、+添加条目、整理去重、复制纪要、导出 .md、跳转执行终端
+  // 会议白板操作：单击议题编辑（运行前）、+添加条目、缺席确认、整理去重、复制纪要、导出 .md、自适应交付出口
   el("wbTopicText")?.addEventListener("click", () => startInlineTopicEdit());
+  el("wbAckAbsentBtn")?.addEventListener("click", async () => {
+    const wb = await postWhiteboardMutation({ op: "acknowledge_absent" });
+    if (wb) showToast("已确认知悉缺席席位影响，执行准入已解锁", "ok", 2200);
+  });
 
   document.querySelectorAll("[data-wb-add]").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -4641,13 +5478,14 @@ function bindEvents() {
         const txt = inp.value.trim();
         if (!txt) return;
         const isConstraint = editorKey === "chair_constraints";
+        const isAction = editorKey === "action";
         const wb = await postWhiteboardMutation({
           op: "add",
           bucket: isConstraint ? "chair_constraints" : editorKey,
           kind: isConstraint ? "decision" : editorKey,
           author: "chair",
           pinned: isConstraint,
-          checked: true,
+          checked: !isAction,
           text: txt,
         });
         if (wb && inp.value.trim() === txt) {
@@ -4661,17 +5499,34 @@ function bindEvents() {
   });
 
   el("dedupeWbBtn")?.addEventListener("click", async () => {
+    if (!hasExportableSessionContent()) return;
     const wb = await postWhiteboardMutation({ op: "dedupe_clean" });
     if (wb) showToast("已完成白板整理去重与过程性噪音清理", "ok", 2000);
   });
-  el("copyMdBtn")?.addEventListener("click", () => copyTextToClipboard(buildMinutesMarkdown(), "会议纪要 Markdown 已复制"));
+  el("copyMdBtn")?.addEventListener("click", () => {
+    if (!hasExportableSessionContent()) {
+      showToast("当前会话尚无发言或白板条目，不可复制空纪要", "warn", 2000);
+      return;
+    }
+    copyTextToClipboard(buildMinutesMarkdown(), "会议纪要 Markdown 已复制");
+  });
   el("exportMdBtn")?.addEventListener("click", () => exportMinutesMarkdownFile());
+  el("wbQuickCopyArtifactBtn")?.addEventListener("click", () => {
+    if (!hasExportableSessionContent()) return;
+    copyTextToClipboard(buildMinutesMarkdown(), "结构化交付纪要已复制");
+  });
+  el("wbQuickExportArtifactBtn")?.addEventListener("click", () => exportMinutesMarkdownFile());
   el("wbToExecBtn")?.addEventListener("click", () => {
-    setRightCollapsed(false);
+    const checkedCnt = getCheckedActionCount();
+    if (checkedCnt < 1) {
+      showToast("尚无已勾选任务，请先在待执行清单勾选至少 1 项任务", "warn", 2200);
+      return;
+    }
+    setRightCollapsed(false, true);
     switchWorkbenchTab("terminal");
   });
 
-  // 执行终端：执行席位分段器、沙箱权限分段器、日志与补丁操作、Git 回滚
+  // 执行终端：执行席位分段器、沙箱权限分段器、日志与补丁操作、CAS 快照回滚
   document.querySelectorAll("#executorSegmented [data-exec-agent]").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const aid = btn.dataset.execAgent;
@@ -4724,7 +5579,8 @@ function bindEvents() {
     }
   });
 
-  // 顶栏圆桌席位快速编排按钮 & 分导航系统设置中心
+  // 顶栏圆桌席位快速编排按钮、一键异构混编推荐 & 分导航系统设置中心
+  el("ringHeterogeneousBtn")?.addEventListener("click", () => applyHeterogeneousRecommendation());
   el("ringLineupQuickBtn")?.addEventListener("click", () => openSettingsModal("lineup"));
   el("railSettingsBtn")?.addEventListener("click", () => openSettingsModal());
   el("openSettingsBtn")?.addEventListener("click", () => openSettingsModal());

@@ -34,7 +34,12 @@ from .context import (
     run_index_in_thread,
     scan_workspace_index_cached,
 )
-from .domain import ALL_SEAT_IDS, IMMUTABLE_SEAT_CATALOG
+from .domain import (
+    ALL_SEAT_IDS,
+    DRIVER_PROVIDER_LABELS,
+    IMMUTABLE_SEAT_CATALOG,
+    normalize_driver_family_key,
+)
 from .drivers import (
     SupervisedProcessHandle,
     build_driver_specs_and_capabilities,
@@ -42,6 +47,7 @@ from .drivers import (
     spawn_supervised_cli,
     terminate_and_reap_process_group,
 )
+from .attachments import SessionAttachmentManager
 from .workspace_backup import WorkspaceBackup
 
 
@@ -478,7 +484,7 @@ _BINARY_FILE_EXTS = {
 }
 
 _AT_FILE_REF_RE = re.compile(
-    r"@([A-Za-z0-9_\u4e00-\u9fa5./-]+\.[A-Za-z0-9]{1,10})(?::[Ll]?(\d+)(?:-[Ll]?(\d+))?)?"
+    r"(?<![A-Za-z0-9_.+-])@([A-Za-z0-9_\u4e00-\u9fa5./-]+\.[A-Za-z0-9]{1,10})(?::[Ll]?(\d+)(?:-[Ll]?(\d+))?)?"
 )
 
 FULL_FILE_LINE_THRESHOLD = 1200
@@ -943,6 +949,57 @@ def build_file_outline_skeleton(rel_path: str, all_lines: List[str]) -> str:
         f"如需核对某段实现细节，请按上述 L起始-L结束 行号区间精确只读（或在追问中使用 @{rel_path}:起始行-结束行）。"
     )
     return skeleton[:8000]
+
+
+def validate_referenced_files_snapshot(
+    workspace_dir: str,
+    reference_texts: str,
+) -> List[str]:
+    """
+    原子校验待发文本中的显式 @path/to/file.ext[:start-end] 引用快照可读性（Section 1.2）：
+    - 若当前未绑定工作区且文本中显式包含带目录层级的 @path/file.ext，返回未绑仓阻断错误；
+    - 若已绑定工作区但目标文件不存在、路径越界、不可读或起始行超出文件总行数，返回逐项错误列表；
+    - 忽略邮箱地址（已由 _AT_FILE_REF_RE 负向前瞻过滤）与无文件后缀的 @席位名。
+    """
+    if not reference_texts:
+        return []
+    matches = list(_AT_FILE_REF_RE.finditer(reference_texts))
+    if not matches:
+        return []
+    bound, real_ws = is_real_bound_workspace(workspace_dir)
+    errors: List[str] = []
+    seen_refs: Set[str] = set()
+    for m in matches:
+        rel_raw = m.group(1).lstrip("/")
+        start_s, end_s = m.group(2), m.group(3)
+        raw_tok = f"@{rel_raw}" + (f":{start_s}" + (f"-{end_s}" if end_s else "") if start_s else "")
+        if raw_tok in seen_refs:
+            continue
+        seen_refs.add(raw_tok)
+        if not bound:
+            if "/" in rel_raw or start_s:
+                errors.append(f"{raw_tok}（当前为纯研讨未绑目录状态，请先在顶栏绑定项目工作区或移除该文件引用）")
+            continue
+        cand_path = os.path.realpath(os.path.join(real_ws, rel_raw))
+        if not cand_path.startswith(real_ws + os.sep):
+            errors.append(f"{raw_tok}（引用路径超出项目工作区安全边界）")
+            continue
+        if not os.path.isfile(cand_path):
+            errors.append(f"{raw_tok}（工作区内未找到该文件，请核对相对路径）")
+            continue
+        try:
+            with open(cand_path, "r", encoding="utf-8", errors="replace") as rf:
+                all_lines = rf.read().splitlines()
+            total_lines = len(all_lines)
+            if start_s:
+                s_ln = int(start_s)
+                e_ln = int(end_s) if end_s else s_ln
+                lo_ln = min(s_ln, e_ln)
+                if total_lines == 0 or lo_ln > total_lines:
+                    errors.append(f"{raw_tok}（文件共 {total_lines} 行，起始行 L{lo_ln} 超出范围）")
+        except Exception as exc:
+            errors.append(f"{raw_tok}（读取快照失败：{exc}）")
+    return errors
 
 
 def extract_referenced_files_context(
@@ -1877,8 +1934,35 @@ class RuntimeSettings:
             },
         )
 
+    def detect_available_drivers(self) -> List[dict]:
+        """探测本机独立已安装的 CLI 驱动族（按 realpath 去重防软链接伪异构），供前端『异构混编推荐』调用。"""
+        _refresh_declarative_driver_tables()
+        found: List[dict] = []
+        seen_families: Set[str] = set()
+        for drv_k in ("agy", "codex", "grok"):
+            spec = DRIVER_SPECS.get(drv_k)
+            if not spec:
+                continue
+            bpath = detect_driver_binary(drv_k)
+            if not bpath:
+                continue
+            fam_k = normalize_driver_family_key(drv_k, bpath)
+            if fam_k in seen_families:
+                continue
+            seen_families.add(fam_k)
+            prov_name, cli_disp = DRIVER_PROVIDER_LABELS.get(drv_k, ("Custom", spec["cli_name"]))
+            found.append({
+                "driver": drv_k,
+                "cli_name": cli_disp,
+                "provider": prov_name,
+                "binary_path": bpath,
+                "driver_family_key": fam_k,
+                "default_model": spec.get("default_model", ""),
+            })
+        return found
+
     def inspect_status(self, force_refresh: bool = False) -> Dict[str, dict]:
-        """并发探测所有 CLI 元信息并缓存（5s TTL），实时热加载外置驱动目录。"""
+        """并发探测所有 CLI 元信息并缓存（5s TTL），实时热加载外置驱动目录并计算异构/同源独立性元数据。"""
         _refresh_declarative_driver_tables()
         now_m = time.monotonic()
         if not force_refresh and self._status_cache is not None and (now_m - self._status_cache_ts) < 5.0:
@@ -1902,8 +1986,8 @@ class RuntimeSettings:
                 )
             _save_disk_probe_cache()
 
-        # 统计底层生效 CLI 驱动复用数，用于在状态面板清晰展示同源多角模式
-        drv_counts: Dict[str, int] = {}
+        # 按 realpath 规范化驱动族统计复用度，消除『· 单引擎多角色』模糊占位，透出真实提供方与独立性标签
+        fam_counts: Dict[str, int] = {}
         probed_map: Dict[str, Tuple[Optional[str], str, str, str, bool]] = {}
         for aid, cfg in items:
             pinfo = cfg.get_probe_info(
@@ -1912,7 +1996,8 @@ class RuntimeSettings:
             )
             probed_map[aid] = pinfo
             if pinfo[0]:
-                drv_counts[pinfo[3]] = drv_counts.get(pinfo[3], 0) + 1
+                fk = normalize_driver_family_key(pinfo[3], pinfo[0])
+                fam_counts[fk] = fam_counts.get(fk, 0) + 1
 
         result: Dict[str, dict] = {}
         for aid, cfg in items:
@@ -1923,11 +2008,12 @@ class RuntimeSettings:
                 cfg.model,
                 is_shared_fb=is_shared_fb,
             )
-            shared_multi_seat = is_shared_fb or (bool(bpath) and drv_counts.get(eff_drv, 0) > 1)
-
-            display_cli_name = eff_spec["cli_name"]
-            if shared_multi_seat:
-                display_cli_name = f"{eff_spec['cli_name']} (单引擎多角色)"
+            fam_key = normalize_driver_family_key(eff_drv, bpath or "") if bpath else normalize_driver_family_key(eff_drv, "")
+            shared_multi_seat = is_shared_fb or (bool(bpath) and fam_counts.get(fam_key, 0) > 1)
+            prov_name, clean_cli_name = DRIVER_PROVIDER_LABELS.get(eff_drv, ("Custom", eff_spec["cli_name"]))
+            display_cli_name = clean_cli_name or eff_spec["cli_name"]
+            is_heterogeneous = bool(bpath) and not shared_multi_seat
+            indep_label = "异构独立" if is_heterogeneous else ("同源复用" if bool(bpath) else "未就绪")
 
             effort_spec = get_model_effort_spec(eff_drv, model=effective_model, help_text=help_text)
             eff_discuss = normalize_model_effort(
@@ -1966,6 +2052,10 @@ class RuntimeSettings:
                 "cue_btn": pspec["cue_btn"],
                 "driver": cfg.driver,
                 "effective_driver": eff_drv,
+                "provider_name": prov_name,
+                "driver_family_key": fam_key,
+                "is_heterogeneous": is_heterogeneous,
+                "independence_label": indep_label,
                 "shared_fallback": is_shared_fb,
                 "shared_cli_group": shared_multi_seat,
                 "cli_name": display_cli_name,
@@ -2164,11 +2254,22 @@ class WarmAntigravityProcess:
             await self.close()
             raise
 
-    async def stream_turn(self, prompt: str) -> AsyncGenerator[dict, None]:
+    async def stream_turn(
+        self,
+        prompt: str,
+        *,
+        session_attachments: Optional[List[dict]] = None,
+        att_mgr: Optional[SessionAttachmentManager] = None,
+    ) -> AsyncGenerator[dict, None]:
         async with self._lock:
             await self.ensure_started()
             assert self.proc and self.proc.stdin and self.proc.stdout
-            payload = json.dumps({"event": "user", "message": {"content": prompt}}, ensure_ascii=False) + "\n"
+            eff_prompt = prompt
+            if session_attachments and att_mgr is not None and self.session_id:
+                att_block, _ = att_mgr.stage_for_cli_turn(self.session_id, session_attachments, self._call_tmp)
+                if att_block:
+                    eff_prompt = f"{att_block}\n\n{prompt}"
+            payload = json.dumps({"event": "user", "message": {"content": eff_prompt}}, ensure_ascii=False) + "\n"
             self.proc.stdin.write(payload.encode("utf-8"))
             await self.proc.stdin.drain()
 
@@ -2288,6 +2389,7 @@ class UnifiedAgentRunner:
 
     def __init__(self, settings: RuntimeSettings):
         self.settings = settings
+        self.attachments: Optional[SessionAttachmentManager] = None
         self._prewarmed_agy: Optional[WarmAntigravityProcess] = None
         self._warm_agy_pool: Dict[Tuple[str, str], WarmAntigravityProcess] = {}
         self._codex_threads: Dict[Tuple[str, str], str] = {}
@@ -2297,6 +2399,11 @@ class UnifiedAgentRunner:
         self._binary_semaphores: Dict[Tuple[str, int], asyncio.Semaphore] = {}
         self._active_raw_procs: Dict[Tuple[str, str], Set[asyncio.subprocess.Process]] = {}
         self._active_supervised_handles: Dict[Tuple[str, str], Set[SupervisedProcessHandle]] = {}
+
+    def _get_attachment_manager(self) -> SessionAttachmentManager:
+        if self.attachments is None:
+            self.attachments = SessionAttachmentManager()
+        return self.attachments
 
     def _get_binary_semaphore(self, binary_path: str, stateless_shared: bool = False) -> asyncio.Semaphore:
         real_key = os.path.realpath(binary_path) if (binary_path and "://" not in binary_path and os.path.lexists(binary_path)) else binary_path
@@ -2579,29 +2686,40 @@ class UnifiedAgentRunner:
 
     @staticmethod
     def _format_whiteboard_for_prompt(whiteboard: dict, seat_names: Optional[Dict[str, str]] = None) -> str:
-        """拼装三区结构化白板上下文摘要，支持动态成员称呼映射。"""
+        """拼装三区结构化白板与负面防回流清单上下文摘要，支持 1~6 席动态成员称呼映射。"""
         dyn = seat_names or {}
         seat_labels = {
-            "carbon": dyn.get("carbon") or "架构师",
-            "grok": dyn.get("grok") or "审计官",
-            "astra": dyn.get("astra") or "工程师",
-            "chair": "主持",
-            "system": "系统",
+            aid: dyn.get(aid) or IMMUTABLE_SEAT_CATALOG[aid]["default_name"]
+            for aid in ALL_SEAT_IDS
         }
+        seat_labels["chair"] = "主持"
+        seat_labels["system"] = "系统"
+
         chair_constraints = [
             str(x).strip()
             for x in (whiteboard.get("chair_constraints") or [])
             if str(x).strip()
         ]
+        abandoned_raw = whiteboard.get("abandoned_proposals") or []
+        abandoned_lines: List[str] = []
+        for ab_it in abandoned_raw[:16]:
+            if isinstance(ab_it, dict):
+                ab_txt = str(ab_it.get("text") or "").strip()
+                ab_reason = str(ab_it.get("reason") or "").strip()
+                if ab_txt:
+                    abandoned_lines.append(f"  · [已淘汰] {ab_txt}" + (f"（原因：{ab_reason}）" if ab_reason else ""))
+            elif isinstance(ab_it, str) and ab_it.strip():
+                abandoned_lines.append(f"  · [已淘汰] {ab_it.strip()}")
+
         raw_items = whiteboard.get("items")
-        if isinstance(raw_items, list) and (raw_items or chair_constraints):
+        if isinstance(raw_items, list) and (raw_items or chair_constraints or abandoned_lines):
             decision_lines: List[str] = []
             seen_dec: Set[str] = set()
             for c_txt in chair_constraints[:16]:
                 norm_c = re.sub(r"\W+", "", c_txt.lower())
                 if norm_c and norm_c not in seen_dec:
                     seen_dec.add(norm_c)
-                    decision_lines.append(f"  · [主持] {c_txt}")
+                    decision_lines.append(f"  · [主持硬约束] {c_txt}")
 
             risk_lines: List[str] = []
             action_lines: List[str] = []
@@ -2616,6 +2734,9 @@ class UnifiedAgentRunner:
                     continue
                 author = str(it.get("author") or it.get("source_seat") or "").lower()
                 src = seat_labels.get(author, "白板")
+                origin_tier = str(it.get("origin_tier") or "").strip()
+                if origin_tier == "chair_directive" and author != "chair":
+                    src = f"主持指定·{src}"
                 kind = str(it.get("kind") or "").lower()
                 if not kind:
                     if it.get("adopted") or it.get("pinned") or it.get("bucket") in ("chair_constraints", "carbon_plan"):
@@ -2633,7 +2754,7 @@ class UnifiedAgentRunner:
                 elif kind == "risk":
                     risk_lines.append(f"  · [{src}] {txt}")
                 elif kind == "action":
-                    chk = "✓" if it.get("checked", True) else "○"
+                    chk = "✓" if it.get("checked", False) else "○"
                     action_lines.append(f"  · [{chk}·{src}] {txt}")
 
             sections: List[str] = []
@@ -2641,10 +2762,14 @@ class UnifiedAgentRunner:
                 sections.append(
                     "【已锁定会议共识与硬约束（后续分析须严格遵循）】：\n" + "\n".join(decision_lines[:32])
                 )
+            if abandoned_lines:
+                sections.append(
+                    "【已确认放弃/证伪淘汰的差方案（严禁回流复用）】：\n" + "\n".join(abandoned_lines[:16])
+                )
             if risk_lines:
-                sections.append("【待决争议与风险项】：\n" + "\n".join(risk_lines[:14]))
+                sections.append("【待决争议与风险项】：\n" + "\n".join(risk_lines[:16]))
             if action_lines:
-                sections.append("【待执行任务清单草稿】：\n" + "\n".join(action_lines[:14]))
+                sections.append("【待执行任务清单草稿】：\n" + "\n".join(action_lines[:16]))
             return ("\n" + "\n".join(sections)) if sections else ""
 
         wb_digest_parts: List[str] = []
@@ -2652,6 +2777,10 @@ class UnifiedAgentRunner:
             wb_digest_parts.append(
                 "【已锁定会议共识与硬约束（后续分析须严格遵循）】：\n"
                 + "\n".join(f"  · [主持] {c}" for c in chair_constraints[:16])
+            )
+        if abandoned_lines:
+            wb_digest_parts.append(
+                "【已确认放弃/证伪淘汰的差方案（严禁回流复用）】：\n" + "\n".join(abandoned_lines[:16])
             )
         legacy_lines: List[str] = []
         for wb_label, wb_key in (
@@ -2686,9 +2815,8 @@ class UnifiedAgentRunner:
         seat_names_map: Optional[Dict[str, str]] = None,
     ) -> str:
         seat_names = {
-            "carbon": (seat_names_map or {}).get("carbon") or "架构师",
-            "grok": (seat_names_map or {}).get("grok") or "审计官",
-            "astra": (seat_names_map or {}).get("astra") or "工程师",
+            aid: (seat_names_map or {}).get(aid) or IMMUTABLE_SEAT_CATALOG[aid]["default_name"]
+            for aid in ALL_SEAT_IDS
         }
         seat_display = seat_names.get(agent_id, agent_id.capitalize())
         pspec = get_persona_spec(persona_key, fallback_agent_id=agent_id)
@@ -2719,71 +2847,89 @@ class UnifiedAgentRunner:
             else "篇幅按问题复杂度自然展开，允许输出完整推演链条、反例分析、接口契约或对比表格；严禁客套寒暄与无效复述，确保每段具备实质信息增量"
         )
 
-        # 独立长文决议通道：彻底解除字数限制
+        # 旗舰级全量防遗漏 + 废案强隔离决议合成通道：永远使用完整讨论档案与全量消息，绝不走增量截断
         if stage == "synthesis":
+            artifact_type = str(whiteboard.get("artifact_type") or "code_patch").strip().lower()
+            sec4_heading = {
+                "code_patch": "## 四、文件级待执行任务清单（明确模块路径、改动职责与回归验收标准）",
+                "decision_matrix": "## 四、方案对比决策矩阵与落地行动清单（明确选型结论、触发条件与执行动作）",
+                "ux_checklist": "## 四、产品体验分级走查与打磨清单（明确交互节点、预期体感与验收标准）",
+                "doc_export": "## 四、根因排查闭环与结构化定稿清单（明确核验步骤、定稿口径与交付动作）",
+            }.get(artifact_type, "## 四、待执行交付任务清单（明确改动职责与验收标准）")
+            epistemic_badge = str(whiteboard.get("epistemic_badge") or "").strip()
+            epistemic_rule = (
+                f"\n【认知防伪披露硬约束】：当前会话独立性状态为 `{epistemic_badge}`；若处于同源模型或单席模式，正文中严禁出现“多 AI 独立交叉验证共识”字样，须如实保留该认知标记。"
+                if epistemic_badge and ("同源" in epistemic_badge or "单席" in epistemic_badge)
+                else ""
+            )
+            dossier_block = str(whiteboard.get("_synthesis_dossier_block") or "").strip()
+            dossier_section = f"\n{dossier_block}\n" if dossier_block else ""
             synth_instruction = cue_instruction or (
-                "请基于完整会议讨论、白板已确认共识与主持约束，输出一份完整详尽、可直接执行的《会议最终决议》"
+                "请基于全轮次会议讨论、演进定论账本与主持约束，输出一份【零成果遗漏、零废案回流】的旗舰级《会议最终决议》"
             )
             synth_tail = (
-                f"只读汇总严禁调用工具修改磁盘文件，也严禁调用任何 shell 命令或脚本统计字数；{quality_constraint}。"
-                "请以结构清晰、细节完整、可直接交由工程师实施为准（包含：1. 核心架构裁定与取舍；2. 分阶段文件级实施任务清单；3. 风险边界防线与验证标准）。\n"
+                f"只读汇总严禁调用工具修改磁盘文件，严禁调用任何 shell 命令或脚本统计字数；{quality_constraint}。{epistemic_rule}\n"
+                "【决议合成铁律（必须 100% 遵守）】：\n"
+                "1. 全量保留不遗漏：主持人的初始硬约束、历次插话追问要求、各轮经质询后达成或修订成熟的方案细节、量化阈值与接口契约必须完整纳入第一节与第四节，严禁概括丢失关键参数！\n"
+                "2. 废案显式剥离防回流：凡在讨论中已被反驳证伪、席位主动声明放弃（[放弃原方案]）、被修订方案取代（[修正原方案] 之前的旧草案）或被主持人否决的差方案，严禁混入第一节『已确认共识』或第四节『待执行任务』，必须单独归档至第二节『已确认放弃与证伪淘汰方案』并注明淘汰理由！\n"
+                f"3. 请严格按以下四节一级结构输出：\n"
+                "   - `## 一、已确认共识与全量采纳成果`\n"
+                "   - `## 二、已确认放弃与证伪淘汰方案（防回流负面清单）`\n"
+                "   - `## 三、边界风险防线、未决争议与参会披露`\n"
+                f"   - `{sec4_heading}`\n"
                 "末尾必须独立换行附带两行结构化标记（禁止省略）：\n"
-                "[白板: 共识=核心架构结论或约束 | 风险=关键边界防线 | 任务=关键可执行开发动作]\n"
+                "[白板: 共识=核心采纳裁定结论（多条以分号分隔） | 弃案=已确认放弃或淘汰的旧方案（多条以分号分隔，无则填无） | 风险=关键边界防线（多条以分号分隔） | 任务=具体待执行动作（多条以分号分隔）]\n"
                 "[状态: 决议已成 | 共识: 已达成 | 点名: 无]"
             )
-            if incremental_only and recent_messages:
-                delta_lines = cls._format_transcript_within_budget(recent_messages, max_messages=40, max_chars=80000)
-                ref_section = f"\n{extra_ref_block}\n" if extra_ref_block else ""
-                return (
-                    f"【当前环节：形成会议最终决议】{synth_instruction}\n"
-                    f"【最新主持约束】：{constraints}"
-                    f"{wb_digest}"
-                    f"{ref_section}\n"
-                    f"【本轮补充发言】：\n{delta_lines}\n\n"
-                    f"要求：{synth_tail}"
-                )
-
-            transcript = cls._format_transcript_within_budget(recent_messages) or "（暂无前序发言）"
+            transcript = cls._format_transcript_within_budget(recent_messages, max_messages=240, max_chars=180000) or "（暂无前序发言）"
             ws_block = f"{workspace_snapshot}\n\n" if workspace_snapshot else ""
+            ref_section = f"{extra_ref_block}\n\n" if extra_ref_block else ""
             return (
                 f"{role_header}\n"
-                f"【当前环节：形成会议最终决议】{synth_instruction}\n"
+                f"【当前环节：形成会议最终决议（全量成果收敛 + 废案剥离）】{synth_instruction}\n"
                 f"【讨论策略】：{collab_mode}\n"
                 f"【议题】：{topic}\n"
                 f"【主持要求】：{constraints}"
-                f"{wb_digest}\n\n"
+                f"{wb_digest}"
+                f"{dossier_section}\n"
                 f"{ws_block}"
-                f"【会议完整讨论记录】：\n{transcript}\n\n"
+                f"{ref_section}"
+                f"【会议完整全轮次讨论记录】：\n{transcript}\n\n"
                 f"要求：{synth_tail}"
             )
 
         cue_note = f"（专项指引：{cue_instruction}）" if cue_instruction and stage != "cue" else ""
+        stance_protocol_hint = (
+            "为便于分歧追踪与淘汰废案识别，请在对应段落开头按需附带显式立场锚点："
+            "质疑他席写 `[反驳 @席位名：核心分歧]`；吸收质疑修正自身前序方案写 `[修正原方案：原设计 -> 新设计]`；"
+            "明确撤回或淘汰劣势方案写 `[放弃原方案：被弃方案及原因]`；确认无实质分歧写 `[无异议]`。"
+        )
         stage_desc_map = {
             "opening": (
                 f"【当前环节：单席深度方案设计】请立足【{pspec['label']}】视角，针对议题输出完整的「核心方案主张 + 关键接口/状态设计 + 分阶段实施路径」。{cue_note}"
                 if is_solo_mode
                 else (
-                    f"【当前环节：独立立论】请立足【{pspec['label']}】视角独立破题，明确给出：「1. 核心方案主张；2. 成立前提假设；3. 关键实现路径与边界约束」。"
-                    f"严禁客套寒暄或复述他人观点。{cue_note}"
+                    f"【当前环节：独立立论（首轮盲评隔离）】请立足【{pspec['label']}】视角独立破题，明确给出：「1. 核心方案主张；2. 成立前提假设；3. 关键实现路径与边界约束」。"
+                    f"严禁客套寒暄或猜测迎合他人观点。{cue_note}"
                 )
             ),
             "solo_audit": (
                 f"【当前环节：单席边界自检与执行清单收敛】请对你刚提出的初版方案进行严苛反向自检："
-                f"1) 排查隐含假设漏洞、异常/并发回退边界；2) 修正设计瑕疵并收敛可直接勾选交付的文件级待执行任务清单。{cue_note}"
+                f"1) 排查隐含假设漏洞、异常/并发回退边界；2) 修正设计瑕疵（若有淘汰初版设计请标注 `[放弃原方案：...]`）并收敛可直接勾选交付的待执行任务清单。{cue_note}"
             ),
             "cross_talk": (
                 f"【当前环节：交叉质询（证伪与边界审计协议）】严禁出现“同意/赞同/说得好/整体可行/补充一点”等附和套话，禁止复述已达成观点！"
                 f"必须严格执行：1) 对存在分歧的设计列出 `方案 A vs 方案 B` 的工程代价对比与具体失效反例；"
                 f"2) 对已达成共识的模块补充极端异常边界或量化验收条件；"
-                f"3) 鼓励使用 @{seat_names['carbon']} / @{seat_names['grok']} / @{seat_names['astra']} 定向提出尖锐质询（并在末尾标记的点名栏写明被质询席位）。{cue_note}"
+                f"3) {stance_protocol_hint}{cue_note}"
             ),
             "rebuttal": (
                 f"【当前环节：定向答辩】你在上一轮交叉质询中被点名质询{cue_note}。"
-                f"请直面质询焦点：对指出的真实漏洞直接吸收并给出修正后的接口/状态契约；对不成立的质疑给出具体技术依据或源码证据正面反驳，严禁回避核心问题。"
+                f"请直面质询焦点：对指出的真实漏洞直接吸收并标注 `[修正原方案：...]` 或 `[放弃原方案：...]` 给出修正后的契约；对不成立的质疑给出具体技术依据正面反驳，严禁回避核心问题。"
             ),
             "lead_synthesis": (
                 f"【当前环节：架构裁定】请作为本场主控收敛席，综合前序独立立论、交叉质询与定向答辩结果，"
-                f"输出《分歧裁定与阶段推进方案》：明确各项争议的最终裁定结论、采纳理由、风险防线与分阶段实施任务。{cue_note}"
+                f"输出《分歧裁定与阶段推进方案》：明确各项争议的最终采纳结论、已淘汰废案（标注 `[放弃原方案：...]`）、风险防线与分阶段实施任务。{cue_note}"
             ),
             "adv_propose": (
                 f"【当前环节：正反辩证 · 主方案立论】你担任本场正方主方案席，请针对议题先行独立输出一份结构完整、细节扎实的主推荐方案"
@@ -2792,15 +2938,15 @@ class UnifiedAgentRunner:
             "adv_attack": (
                 f"【当前环节：正反辩证 · 反向压力审计】你担任本场反向压力审计席，请针对正方主方案执行破坏性压力测试："
                 f"1) 拆穿方案中的隐含错误假设；2) 指出极端负载、异常输入或并发竞态下的具体失效点；"
-                f"3) 明确提出至少一条可行的替代路线并对比工程代价。严禁任何客套附和！{cue_note}"
+                f"3) 明确提出至少一条可行的替代路线并对比工程代价。{stance_protocol_hint}{cue_note}"
             ),
             "adv_defend": (
                 f"【当前环节：正反辩证 · 防御修正】请针对反向压力审计指出的各项实质风险与替代路线正面答辩："
-                f"对确有隐患的环节直接修订原方案架构与状态边界；对不合理的质疑给出量化成本或源码级反驳。{cue_note}"
+                f"对确有隐患的环节标注 `[修正原方案：...]` 或 `[放弃原方案：...]` 直接修订原方案架构与状态边界；对不合理的质疑给出量化成本或源码级反驳。{cue_note}"
             ),
             "adv_verdict": (
                 f"【当前环节：正反辩证 · 综合裁定】请站在终审裁定席视角，权衡正方主方案、反向压力审计与防御修正，"
-                f"给出最终架构权衡裁定、必须固化的安全护栏以及清晰的文件级执行边界。{cue_note}"
+                f"给出最终权衡裁定、明确淘汰的次优/高危方案（标注 `[放弃原方案：...]`）、必须固化的安全护栏以及清晰的执行边界。{cue_note}"
             ),
             "div_expand": (
                 f"【当前环节：发散收敛 · 多维方案发散】本轮严禁过早自我否定或保守趋同！"
@@ -2808,11 +2954,11 @@ class UnifiedAgentRunner:
             ),
             "div_evaluate": (
                 f"【当前环节：发散收敛 · 可行性与成本评估】请按照「用户感知价值 × 实现复杂度 × 维护风险」三维评估矩阵，"
-                f"横向对比第 1 轮各维度的发散方案（可输出对比表格），明确指出应淘汰的次优项及优选项的改造代价。{cue_note}"
+                f"横向对比第 1 轮各维度的发散方案（可输出对比表格），明确指出应淘汰的次优项（标注 `[放弃原方案：...]`）及优选项的改造代价。{cue_note}"
             ),
             "div_converge": (
                 f"【当前环节：发散收敛 · 优选方案收敛】请基于「用户感知价值 × 实现复杂度 × 维护风险」三维矩阵完成终局收敛，"
-                f"淘汰次优方案，输出唯一推荐的 MVP 实施路径、保留约束与分步落地清单。{cue_note}"
+                f"明确剥离淘汰的次优方案（标注 `[放弃原方案：...]`），输出唯一推荐的实施路径、保留约束与分步落地清单。{cue_note}"
             ),
             "cr_locate": (
                 f"【当前环节：代码审查 · 源码证据定位】请严格基于源码证据独立定位问题根因、架构耦合点或潜在缺陷，"
@@ -2820,31 +2966,36 @@ class UnifiedAgentRunner:
             ),
             "cr_verify": (
                 f"【当前环节：代码审查 · 调用链交叉核验】请交叉核验前序席位定位的源码证据，检查上下游调用链影响面、"
-                f"跨模块状态同步与潜在回归风险，指出遗漏的文件/函数或偏差归因。{cue_note}"
+                f"跨模块状态同步与潜在回归风险，指出遗漏的文件/函数或偏差归因。{stance_protocol_hint}{cue_note}"
             ),
             "cr_plan": (
-                f"【当前环节：代码审查 · 文件级修改方案】请汇总源码证据与调用链核验结论，输出精确到"
+                f"【当前环节：代码审查 · 文件级修改方案】请汇总源码证据与调用链核验结论，剥离误判或高风险修补草案，输出精确到"
                 f"「文件路径 → 函数/类名 → 具体修改逻辑 → 验证命令」的文件级修改方案。{cue_note}"
             ),
             "rapid_open": (
                 f"【当前环节：快速合议 · 单轮要点直出】请立足【{pspec['label']}】职责，简明分点直出核心改造要点与不可突破的底线风险。{cue_note}"
             ),
             "rapid_align": (
-                f"【当前环节：快速合议 · 生成执行清单】请快速核对各席核心要点与底线风险，去重整合为清晰可直接勾选执行的任务清单与硬约束。{cue_note}"
+                f"【当前环节：快速合议 · 生成执行清单】请快速核对各席核心要点与底线风险，剔除冲突劣势做法，去重整合为清晰可勾选执行的任务清单与硬约束。{cue_note}"
             ),
-            "interrupt_reply": f"【当前环节：响应主持人追问与约束】请针对主持人最新指示输出增量调整、边界防线或深化设计，禁止复述旧话。{cue_note}",
+            "redebate": (
+                f"【当前环节：双席定向再辩（1 轮焦点交锋）】请严格围绕指定争议焦点正面交锋，禁止泛化发散！"
+                f"给出明确的技术判据、修正契约（`[修正原方案：...]` / `[放弃原方案：...]`）或量化取舍结论。{cue_note}"
+            ),
+            "interrupt_reply": f"【当前环节：响应主持人追问与约束】请针对主持人最新指示输出增量调整、边界防线或深化设计（若推翻旧方案请标注 `[放弃原方案：...]`），禁止复述旧话。{cue_note}",
             "cue": f"【当前环节：主持人定向提问】具体问题：{cue_instruction}",
         }
         stage_desc = stage_desc_map.get(stage, f"【当前环节：会议研讨】{cue_note}")
 
-        mention_hint = "无" if is_solo_mode else f"@{seat_names['carbon']}或@{seat_names['grok']}或@{seat_names['astra']}或无"
+        mention_cands = "或".join(f"@{seat_names[a]}" for a in ("carbon", "grok", "astra"))
+        mention_hint = "无" if is_solo_mode else f"{mention_cands}或无"
         tail_rule = (
             f"{quality_constraint}；"
             "圆桌讨论阶段仅允许按需精准只读源码（已提供源码或索引骨架的文件请勿全量重复读取；单轮只读查看收敛在 1–3 处最关键代码段以内，禁止全仓遍历扫盘），严禁修改任何磁盘文件，"
             "严禁调用任何 shell 命令、脚本或工具去统计字数、计算篇幅或自我删改截断！"
             "正文中严禁输出“我先只读某文件/我先核对源码路径/不改任何文件”等工具探索独白，直接输出正式分析结论。\n"
             "末尾请独立换行附带两行结构化标记（独立提取，不挤压正文分析深度）：\n"
-            "[白板: 共识=已确认共识或约束 | 风险=待决争议或风险项 | 任务=具体待执行任务（按需填写1至3项）]\n"
+            "[白板: 共识=已确认共识或约束 | 弃案=本轮确认放弃或证伪的方案（无则填无） | 风险=待决争议或风险项 | 任务=具体待执行任务（按需填写1至3项）]\n"
             f"[状态: 核心立场摘要 | 共识: 已达成或需继续 | 点名: {mention_hint}]"
         )
 
@@ -2900,9 +3051,15 @@ class UnifiedAgentRunner:
             "carbon": "carbon",
             "grok": "grok",
             "astra": "astra",
+            "vega": "vega",
+            "titan": "titan",
+            "prism": "prism",
             "架构师": "carbon",
             "审计官": "grok",
             "工程师": "astra",
+            "交互设计": "vega",
+            "性能专家": "titan",
+            "质量验证": "prism",
             "alpha": "carbon",
             "beta": "grok",
             "gamma": "astra",
@@ -2912,7 +3069,7 @@ class UnifiedAgentRunner:
         }
         if isinstance(seat_names, dict):
             for k_aid, disp_n in seat_names.items():
-                if k_aid in ("carbon", "grok", "astra") and disp_n and str(disp_n).strip():
+                if k_aid in ALL_SEAT_IDS and disp_n and str(disp_n).strip():
                     alias_to_aid[str(disp_n).strip().lower()] = k_aid
 
         status_pat = re.compile(
@@ -2921,10 +3078,20 @@ class UnifiedAgentRunner:
             r"(?:\s*[|｜]\s*点名[:：]\s*@?([A-Za-z0-9_·\-\u4e00-\u9fa5]+))?\s*\]\s*$"
         )
         wb_pat = re.compile(r"\[白板(?:要点)?[:：]\s*([^\]]+)\]\s*$")
+        wb_block_pat = re.compile(r"(?:^|\n)\[白板(?:要点)?\]\s*:?\s*\n((?:\s*(?:[-*•]|\d+[.)、])\s*.+(?:\n|$))+)\s*$")
         kind_prefix_pat = re.compile(
-            r"^(共识|决策|约束|结论|风险|争议|审计|隐患|边界|任务|动作|执行|实施|待办|清单)\s*[=:：]\s*(.+)$"
+            r"^(共识|决策|约束|结论|弃案|淘汰|废弃|放弃|否决|风险|争议|审计|隐患|边界|任务|行动|动作|执行|实施|待办|清单)\s*[=:：]\s*(.+)$"
         )
         placeholder_vals = {"无", "暂无", "待补充", "略", "可选", "none", "n/a", "..."}
+
+        def _kw_to_kind(kw_s: str) -> str:
+            if kw_s in ("共识", "决策", "约束", "结论"):
+                return "decision"
+            if kw_s in ("弃案", "淘汰", "废弃", "放弃", "否决"):
+                return "abandoned"
+            if kw_s in ("风险", "争议", "审计", "隐患", "边界"):
+                return "risk"
+            return "action"
 
         for _ in range(3):
             m_status = status_pat.search(working)
@@ -2957,29 +3124,35 @@ class UnifiedAgentRunner:
                     seg_kind: Optional[str] = None
                     rhs = seg_s
                     if m_kp:
-                        kw = m_kp.group(1)
+                        seg_kind = _kw_to_kind(m_kp.group(1))
                         rhs = m_kp.group(2).strip()
-                        if kw in ("共识", "决策", "约束", "结论"):
-                            seg_kind = "decision"
-                        elif kw in ("风险", "争议", "审计", "隐患", "边界"):
-                            seg_kind = "risk"
-                        else:
-                            seg_kind = "action"
                     for sub in re.split(r"[；;]+", rhs):
                         sub_s = re.sub(r"^(?:\d+[.)、]|[-*•])\s*", "", sub.strip())
                         m_inner = kind_prefix_pat.match(sub_s)
                         item_kind = seg_kind
                         if m_inner:
-                            ikw = m_inner.group(1)
+                            item_kind = _kw_to_kind(m_inner.group(1))
                             sub_s = m_inner.group(2).strip()
-                            if ikw in ("共识", "决策", "约束", "结论"):
-                                item_kind = "decision"
-                            elif ikw in ("风险", "争议", "审计", "隐患", "边界"):
-                                item_kind = "risk"
-                            else:
-                                item_kind = "action"
                         if len(sub_s) >= 4 and sub_s.lower() not in placeholder_vals:
                             wb_typed_items.append({"kind": item_kind, "text": sub_s[:180]})
+                continue
+
+            m_wb_blk = wb_block_pat.search(working)
+            if m_wb_blk:
+                candidate_body = working[: m_wb_blk.start()].strip()
+                if candidate_body:
+                    working = candidate_body
+                for blk_ln in m_wb_blk.group(1).splitlines():
+                    sub_s = re.sub(r"^\s*(?:\d+[.)、]|[-*•])\s*", "", blk_ln.strip())
+                    if not sub_s:
+                        continue
+                    m_inner = kind_prefix_pat.match(sub_s)
+                    item_kind = None
+                    if m_inner:
+                        item_kind = _kw_to_kind(m_inner.group(1))
+                        sub_s = m_inner.group(2).strip()
+                    if len(sub_s) >= 4 and sub_s.lower() not in placeholder_vals:
+                        wb_typed_items.append({"kind": item_kind, "text": sub_s[:180]})
                 continue
             break
 
@@ -2991,7 +3164,7 @@ class UnifiedAgentRunner:
                 if m_at:
                     target = alias_to_aid.get(m_at.group(1).lower())
 
-        return working, badge, target, wb_typed_items[:4], consensus_reached
+        return working, badge, target, wb_typed_items[:16], consensus_reached
 
     @classmethod
     def parse_structured_tail(cls, full_text: str) -> Tuple[str, str, Optional[str], List[str], Optional[bool]]:
@@ -3284,7 +3457,7 @@ class UnifiedAgentRunner:
         already_injected = self._injected_refs.setdefault(seen_key, set())
         newly_loaded_refs: Set[str] = set()
 
-        if has_mem and not persona_switched and all_completed_count > prev_seen and prev_seen > 0:
+        if stage != "synthesis" and has_mem and not persona_switched and all_completed_count > prev_seen and prev_seen > 0:
             delta_count = min(len(recent_messages), max(1, all_completed_count - prev_seen))
             msgs_for_prompt = recent_messages[-delta_count:]
             incremental = True
@@ -3307,7 +3480,7 @@ class UnifiedAgentRunner:
             ref_corpus = "\n".join(
                 [topic, cue_instruction]
                 + (whiteboard.get("chair_constraints") or [])
-                + [m["content"] for m in recent_messages[-20:]]
+                + [m["content"] for m in recent_messages[-24:]]
             )
             full_ref_block, newly_loaded_refs = extract_referenced_files_context(
                 eff_ws,
@@ -3329,7 +3502,7 @@ class UnifiedAgentRunner:
 
         seat_names_now = {
             aid_k: self.settings.resolve_seat_name(aid_k)
-            for aid_k in ("carbon", "grok", "astra")
+            for aid_k in ALL_SEAT_IDS
         }
         prompt = self._build_prompt(
             agent_id=agent_id,
@@ -3400,6 +3573,7 @@ class UnifiedAgentRunner:
                 "model": eff_model,
                 "effort": eff_effort,
             }
+            sess_atts = whiteboard.get("session_attachments") if isinstance(whiteboard, dict) else None
             stream_iter = self._stream_with_fallback(
                 session_id=session_id,
                 agent_id=agent_id,
@@ -3413,6 +3587,7 @@ class UnifiedAgentRunner:
                 cwd_override=discuss_cwd,
                 discuss_readonly=True,
                 disable_stepdown_fallback=bool(ov and ov.get("strict_effort")),
+                session_attachments=sess_atts if isinstance(sess_atts, list) else None,
             ).__aiter__()
             hard_deadline = time.perf_counter() + total_timeout
             terminal_ok = False
@@ -3520,6 +3695,7 @@ class UnifiedAgentRunner:
         cwd_override: Optional[str] = None,
         discuss_readonly: bool = True,
         disable_stepdown_fallback: bool = False,
+        session_attachments: Optional[List[dict]] = None,
     ) -> AsyncGenerator[dict, None]:
         """按候选模型与推理档位顺序尝试流式请求；单次波动回退绝不篡改用户保存的配置。"""
         if disable_stepdown_fallback:
@@ -3549,6 +3725,7 @@ class UnifiedAgentRunner:
                         use_warm=use_warm,
                         cwd_override=cwd_override,
                         discuss_readonly=discuss_readonly,
+                        session_attachments=session_attachments,
                     ):
                         if ev.get("type") == "delta" and ev.get("text"):
                             emitted_delta = True
@@ -3594,15 +3771,24 @@ class UnifiedAgentRunner:
         use_warm: bool = True,
         cwd_override: Optional[str] = None,
         discuss_readonly: bool = True,
+        session_attachments: Optional[List[dict]] = None,
     ) -> AsyncGenerator[dict, None]:
         cwd = cwd_override if (cwd_override and os.path.isdir(cwd_override)) else self._effective_workspace_cwd()
         seat_key = (session_id, agent_id)
+        att_mgr = self._get_attachment_manager() if session_attachments else None
 
-        async def spawn_call(cmd, stdin):
+        async def spawn_call_with_attachments(build_cmd_fn, stdin):
             env, call_tmp = self._prepare_isolated_call_env(session_id, agent_id)
             try:
-                handle = await spawn_supervised_cli(cmd, cwd=cwd, env=env, stdin=stdin)
-                return handle, call_tmp
+                staged_prompt = prompt
+                staged_imgs: List[str] = []
+                if session_attachments and att_mgr is not None:
+                    att_blk, staged_imgs = att_mgr.stage_for_cli_turn(session_id, session_attachments, call_tmp)
+                    if att_blk:
+                        staged_prompt = f"{att_blk}\n\n{prompt}"
+                final_cmd = build_cmd_fn(staged_prompt, staged_imgs)
+                handle = await spawn_supervised_cli(final_cmd, cwd=cwd, env=env, stdin=stdin)
+                return handle, call_tmp, staged_prompt
             except BaseException:
                 self._cleanup_isolated_call_tmp(call_tmp)
                 raise
@@ -3663,7 +3849,11 @@ class UnifiedAgentRunner:
                     )
                     self._warm_agy_pool[seat_key] = warm_inst
                 try:
-                    async for ev in warm_inst.stream_turn(prompt):
+                    async for ev in warm_inst.stream_turn(
+                        prompt,
+                        session_attachments=session_attachments,
+                        att_mgr=att_mgr,
+                    ):
                         yield ev
                     return
                 except asyncio.CancelledError:
@@ -3683,19 +3873,21 @@ class UnifiedAgentRunner:
                     if _is_model_or_effort_rejection(warm_exc):
                         raise
 
-            cmd = [binary_path, "-p", prompt]
-            if has_disable_slash:
-                cmd.append("--disable-slash-commands")
-            if discuss_readonly and "--sandbox" in help_text:
-                cmd.append("--sandbox")
-            if supports_stream_json:
-                cmd.extend(["--output-format", "stream-json"])
-            if model:
-                cmd.extend(["--model", model])
-            if has_effort and agy_effort:
-                cmd.extend(["--effort", agy_effort])
+            def _build_agy_cmd(eff_p: str, _imgs: List[str]) -> List[str]:
+                c = [binary_path, "-p", eff_p]
+                if has_disable_slash:
+                    c.append("--disable-slash-commands")
+                if discuss_readonly and "--sandbox" in help_text:
+                    c.append("--sandbox")
+                if supports_stream_json:
+                    c.extend(["--output-format", "stream-json"])
+                if model:
+                    c.extend(["--model", model])
+                if has_effort and agy_effort:
+                    c.extend(["--effort", agy_effort])
+                return c
 
-            sup_handle, call_tmp_dir = await spawn_call(cmd, asyncio.subprocess.DEVNULL)
+            sup_handle, call_tmp_dir, _ = await spawn_call_with_attachments(_build_agy_cmd, asyncio.subprocess.DEVNULL)
             proc = sup_handle.proc
             self._register_raw_proc(seat_key, proc)
             try:
@@ -3802,7 +3994,10 @@ class UnifiedAgentRunner:
             if "--permission-mode" in help_text:
                 cmd.extend(["--permission-mode", "dontAsk"])
 
-            sup_handle, call_tmp_dir = await spawn_call(cmd, asyncio.subprocess.DEVNULL)
+            def _build_grok_cmd(eff_p: str, _imgs: List[str]) -> List[str]:
+                return [*cmd[:2], eff_p, *cmd[3:]]
+
+            sup_handle, call_tmp_dir, _ = await spawn_call_with_attachments(_build_grok_cmd, asyncio.subprocess.DEVNULL)
             proc = sup_handle.proc
             self._register_raw_proc(seat_key, proc)
             try:
@@ -3913,28 +4108,37 @@ class UnifiedAgentRunner:
 
         existing_tid = self._codex_threads.get(seat_key) if use_warm else None
         codex_eff = normalize_model_effort("codex", model=model, effort=effort, help_text=help_text)
-        cmd = [binary_path, "exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only"]
-        if codex_eff in CANONICAL_EFFORT_LEVELS:
-            cmd.extend(["-c", f'model_reasoning_effort="{codex_eff}"'])
-        if model:
-            cmd.extend(["-m", model])
-        if existing_tid:
-            cmd.extend(["resume", existing_tid, "-"])
-        else:
-            cmd.append("-")
+        def _build_codex_or_ext_cmd(eff_p: str, imgs: List[str]) -> List[str]:
+            if driver_key != "codex" and DRIVER_SPECS.get(driver_key, {}).get("cmd_template"):
+                tpl = DRIVER_SPECS[driver_key]["cmd_template"]
+                return [
+                    str(tok).format(binary=binary_path, model=model, effort=effort, prompt=eff_p, cwd=cwd)
+                    for tok in tpl
+                ]
+            c = [binary_path, "exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only"]
+            if codex_eff in CANONICAL_EFFORT_LEVELS:
+                c.extend(["-c", f'model_reasoning_effort="{codex_eff}"'])
+            if model:
+                c.extend(["-m", model])
+            if existing_tid:
+                c.append("resume")
+            if imgs and "--image" in help_text:
+                for img_p in imgs[-4:]:
+                    c.extend(["--image", img_p])
+                c.append("--")
+            if existing_tid:
+                c.append(existing_tid)
+            c.append("-")
+            return c
 
-        if driver_key != "codex" and DRIVER_SPECS.get(driver_key, {}).get("cmd_template"):
-            tpl = DRIVER_SPECS[driver_key]["cmd_template"]
-            cmd = [
-                str(tok).format(binary=binary_path, model=model, effort=effort, prompt=prompt, cwd=cwd)
-                for tok in tpl
-            ]
-        sup_handle, call_tmp_dir = await spawn_call(cmd, asyncio.subprocess.PIPE)
+        sup_handle, call_tmp_dir, eff_stdin_prompt = await spawn_call_with_attachments(
+            _build_codex_or_ext_cmd, asyncio.subprocess.PIPE
+        )
         proc = sup_handle.proc
         self._register_raw_proc(seat_key, proc)
         try:
             assert proc.stdin is not None and proc.stdout is not None
-            proc.stdin.write(prompt.encode("utf-8"))
+            proc.stdin.write(eff_stdin_prompt.encode("utf-8"))
             await proc.stdin.drain()
             proc.stdin.close()
 
@@ -4238,6 +4442,12 @@ class UnifiedAgentRunner:
                             cmd.extend(["--permission-mode", "dontAsk"])
 
                 exec_env, exec_tmp = self._prepare_isolated_call_env(session_id or "exec", target_aid)
+                exec_atts = whiteboard.get("session_attachments") if isinstance(whiteboard, dict) else None
+                if exec_atts and session_id:
+                    att_b, _ = self._get_attachment_manager().stage_for_cli_turn(session_id, exec_atts, exec_tmp)
+                    if att_b and len(cmd) >= 3 and cmd[1] == "-p":
+                        cmd = list(cmd)
+                        cmd[2] = f"{att_b}\n\n{exec_prompt}"
                 sup_handle = await spawn_supervised_cli(
                     cmd,
                     cwd=cwd,
@@ -4372,6 +4582,17 @@ class UnifiedAgentRunner:
             yield {"type": "term_log", "line": f"$ {' '.join(cmd[:-1])} <{cfg.name}决议指令> (cwd={cwd})"}
 
             exec_env, exec_tmp = self._prepare_isolated_call_env(session_id or "exec", target_aid)
+            eff_codex_exec_prompt = exec_prompt
+            exec_atts = whiteboard.get("session_attachments") if isinstance(whiteboard, dict) else None
+            if exec_atts and session_id:
+                att_b, exec_imgs = self._get_attachment_manager().stage_for_cli_turn(session_id, exec_atts, exec_tmp)
+                if att_b:
+                    eff_codex_exec_prompt = f"{att_b}\n\n{exec_prompt}"
+                if exec_imgs and "--image" in help_text:
+                    cmd = list(cmd[:-1])
+                    for img_p in exec_imgs[:4]:
+                        cmd.extend(["--image", img_p])
+                    cmd.append("-")
             sup_handle = await spawn_supervised_cli(
                 cmd,
                 cwd=cwd,
@@ -4394,7 +4615,7 @@ class UnifiedAgentRunner:
             exec_deadline = time.perf_counter() + exec_turn_sec
             try:
                 assert proc.stdin is not None and proc.stdout is not None
-                proc.stdin.write(exec_prompt.encode("utf-8"))
+                proc.stdin.write(eff_codex_exec_prompt.encode("utf-8"))
                 await proc.stdin.drain()
                 proc.stdin.close()
 

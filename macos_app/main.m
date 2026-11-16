@@ -1,4 +1,4 @@
-// AI圆桌.app — 原生 macOS (Cocoa + WKWebView) 桌面端入口（v3 安全凭据闭环 + 三态忙闲探针 + 星轨启动动效）
+// AI圆桌.app — 原生 macOS (Cocoa + WKWebView) 桌面端入口（v4 原生多文件/图片选择器 + 安全凭据闭环 + 三态忙闲探针）
 #import <Cocoa/Cocoa.h>
 #import <Security/Security.h>
 #import <WebKit/WebKit.h>
@@ -101,6 +101,7 @@ static NSString *escapeHtmlString(NSString *raw) {
     NSMenu *fileMenu = [[NSMenu alloc] initWithTitle:@"会议"];
     [fileMenu addItemWithTitle:@"新建会议" action:@selector(createNewSession:) keyEquivalent:@"n"];
     [fileMenu addItemWithTitle:@"绑定本地项目目录…" action:@selector(openNativeFolderSheet:) keyEquivalent:@"o"];
+    [fileMenu addItemWithTitle:@"添加图片或文件附件…" action:@selector(openAttachmentPicker:) keyEquivalent:@"u"];
     [fileMenuItem setSubmenu:fileMenu];
 
     NSMenuItem *editMenuItem = [[NSMenuItem alloc] init];
@@ -147,6 +148,11 @@ static NSString *escapeHtmlString(NSString *raw) {
     if (self.webView) [self.webView evaluateJavaScript:@"window.__roundtableMenu && window.__roundtableMenu('newSession')" completionHandler:nil];
 }
 
+- (void)openAttachmentPicker:(id)sender {
+    [self ensureWindowVisible];
+    if (self.webView) [self.webView evaluateJavaScript:@"window.__roundtableMenu && window.__roundtableMenu('attachFiles')" completionHandler:nil];
+}
+
 - (void)toggleLeftSidebar:(id)sender {
     [self ensureWindowVisible];
     if (self.webView) [self.webView evaluateJavaScript:@"window.__roundtableMenu && window.__roundtableMenu('toggleLeft')" completionHandler:nil];
@@ -183,6 +189,32 @@ static NSString *escapeHtmlString(NSString *raw) {
             chosen = panel.URL.path;
         }
         completion(chosen);
+    }];
+}
+
+// v4 关键能力：支持 WKWebView 内 <input type="file" multiple> 唤起原生 macOS 文件与图片选择面板
+- (void)webView:(WKWebView *)webView
+runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
+initiatedByFrame:(WKFrameInfo *)frame
+completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler {
+    if (![self isTrustedMainFrameOrigin:frame]) {
+        completionHandler(nil);
+        return;
+    }
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.canChooseFiles = YES;
+    panel.canChooseDirectories = NO;
+    panel.allowsMultipleSelection = parameters.allowsMultipleSelection;
+    panel.resolvesAliases = YES;
+    panel.prompt = @"添加附件";
+    panel.message = @"选择图片截图、源码、配置、日志或 PDF 文档加入当前圆桌研讨：";
+
+    [panel beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse result) {
+        if (result == NSModalResponseOK && panel.URLs.count > 0) {
+            completionHandler(panel.URLs);
+        } else {
+            completionHandler(nil);
+        }
     }];
 }
 
@@ -258,7 +290,10 @@ static NSString *escapeHtmlString(NSString *raw) {
 
     NSString *resPath = [[NSBundle mainBundle] resourcePath];
     NSString *serverPy = [resPath stringByAppendingPathComponent:@"app/backend/server.py"];
-    NSString *dataDir = [NSHomeDirectory() stringByAppendingPathComponent:@".ai-roundtable"];
+    NSString *dataDir = [[NSProcessInfo processInfo].environment[@"AI_ROUNDTABLE_HOME"] stringByExpandingTildeInPath];
+    if (dataDir.length == 0) {
+        dataDir = [NSHomeDirectory() stringByAppendingPathComponent:@".ai-roundtable"];
+    }
     NSString *defaultWs = [dataDir stringByAppendingPathComponent:@"workspace"];
     self.bootLogPath = [dataDir stringByAppendingPathComponent:@"backend_boot.log"];
 
@@ -279,6 +314,7 @@ static NSString *escapeHtmlString(NSString *raw) {
         }
     }
     envMap[@"AI_ROUNDTABLE_LOGIN_SHELL"] = @"1";
+    envMap[@"PYTHONDONTWRITEBYTECODE"] = @"1";
     envMap[@"AI_ROUNDTABLE_BOOT_TOKEN"] = self.bootToken;
     envMap[@"AI_ROUNDTABLE_BOOT_ID"] = self.bootId;
     [envMap removeObjectForKey:@"AI_ROUNDTABLE_BOOTSTRAP_CODE"];
@@ -320,20 +356,21 @@ static NSString *escapeHtmlString(NSString *raw) {
     NSString *bootHtml = @"<!DOCTYPE html><html><head><meta charset='utf-8'>"
         @"<style>"
         @"html,body{margin:0;height:100vh;display:flex;flex-direction:column;gap:16px;align-items:center;justify-content:center;"
-        @"background:#f5f4fb;color:#475569;font-family:-apple-system,BlinkMacSystemFont,sans-serif;font-size:13.5px;font-weight:500;}"
-        @".orbit-stage{position:relative;width:54px;height:54px;display:flex;align-items:center;justify-content:center;}"
-        @".node{position:absolute;width:11px;height:11px;border-radius:999px;will-change:transform,opacity;}"
-        @".n1{background:#3b63f6;animation:orb1 1.7s infinite cubic-bezier(0.34,1.45,0.64,1);}"
-        @".n2{background:#d97706;animation:orb2 1.7s infinite cubic-bezier(0.34,1.45,0.64,1);}"
-        @".n3{background:#0d9470;animation:orb3 1.7s infinite cubic-bezier(0.34,1.45,0.64,1);}"
-        @".core{width:18px;height:18px;border-radius:7px;background:linear-gradient(135deg,#4f46e5,#0d9470);opacity:0.18;animation:coreBreathe 1.7s infinite ease-in-out;}"
-        @"@keyframes orb1{0%,100%{transform:translate(0,-16px) scale(1)}33%{transform:translate(15px,10px) scale(0.86)}66%{transform:translate(-15px,10px) scale(0.92)}}"
-        @"@keyframes orb2{0%,100%{transform:translate(15px,10px) scale(0.92)}33%{transform:translate(-15px,10px) scale(1)}66%{transform:translate(0,-16px) scale(0.86)}}"
-        @"@keyframes orb3{0%,100%{transform:translate(-15px,10px) scale(0.86)}33%{transform:translate(0,-16px) scale(0.92)}66%{transform:translate(15px,10px) scale(1)}}"
-        @"@keyframes coreBreathe{0%,100%{transform:scale(0.9);opacity:0.14}50%{transform:scale(1.22);opacity:0.32}}"
+        @"background:#f4f5fa;color:#475569;font-family:-apple-system,BlinkMacSystemFont,sans-serif;font-size:13.5px;font-weight:500;}"
+        @".orbit-stage{position:relative;width:62px;height:62px;border-radius:18px;background:linear-gradient(145deg,#ffffff,#eef0fb);"
+        @"box-shadow:0 12px 30px rgba(79,70,229,0.14),inset 0 1px 0 #fff;display:flex;align-items:center;justify-content:center;}"
+        @".node{position:absolute;width:9px;height:9px;border-radius:999px;will-change:transform,opacity;}"
+        @".n1{background:#3b63f6;animation:orb1 1.8s infinite cubic-bezier(0.34,1.45,0.64,1);}"
+        @".n2{background:#d97706;animation:orb2 1.8s infinite cubic-bezier(0.34,1.45,0.64,1);}"
+        @".n3{background:#0d9470;animation:orb3 1.8s infinite cubic-bezier(0.34,1.45,0.64,1);}"
+        @".core{width:18px;height:18px;border-radius:6px;transform:rotate(45deg);background:linear-gradient(135deg,#4f46e5,#0d9470);opacity:0.26;animation:coreBreathe 1.8s infinite ease-in-out;}"
+        @"@keyframes orb1{0%,100%{transform:translate(0,-17px) scale(1)}33%{transform:translate(15px,10px) scale(0.86)}66%{transform:translate(-15px,10px) scale(0.92)}}"
+        @"@keyframes orb2{0%,100%{transform:translate(15px,10px) scale(0.92)}33%{transform:translate(-15px,10px) scale(1)}66%{transform:translate(0,-17px) scale(0.86)}}"
+        @"@keyframes orb3{0%,100%{transform:translate(-15px,10px) scale(0.86)}33%{transform:translate(0,-17px) scale(0.92)}66%{transform:translate(15px,10px) scale(1)}}"
+        @"@keyframes coreBreathe{0%,100%{transform:rotate(45deg) scale(0.88);opacity:0.18}50%{transform:rotate(45deg) scale(1.16);opacity:0.38}}"
         @"</style></head><body>"
         @"<div class='orbit-stage'><div class='core'></div><div class='node n1'></div><div class='node n2'></div><div class='node n3'></div></div>"
-        @"<div>正在启动 AI圆桌 安全控制面并探测 CLI 引擎…</div></body></html>";
+        @"<div>正在启动 AI圆桌 v4 多模态协同工作台…</div></body></html>";
     [self.webView loadHTMLString:bootHtml baseURL:nil];
 }
 
@@ -467,9 +504,9 @@ static NSString *escapeHtmlString(NSString *raw) {
                                               styleMask:style
                                                 backing:NSBackingStoreBuffered
                                                   defer:NO];
-    [self.window setTitle:@"AI圆桌 — 多引擎协同研讨与工程交付工作台"];
+    [self.window setTitle:@"AI圆桌 — 多模态协同研讨与工程交付工作台"];
     [self.window setMinSize:NSMakeSize(980, 620)];
-    [self.window setBackgroundColor:[NSColor colorWithSRGBRed:0.961 green:0.957 blue:0.984 alpha:1.0]];
+    [self.window setBackgroundColor:[NSColor colorWithSRGBRed:0.957 green:0.961 blue:0.980 alpha:1.0]];
     [self.window setReleasedWhenClosed:NO];
     self.window.delegate = self;
     [self.window center];

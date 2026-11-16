@@ -415,6 +415,33 @@ async def run_all_tests() -> None:
             record_ok("3.1 Pipe-EOF 孤儿进程组自毁围栏", f"父管道断开后进程组 pgid={recorded_pgid} 及其孙进程在 {eof_ms:.0f}ms 内消亡")
 
             # ---------------- 4. 越界符号链接写前 409 拦截（零字节与阶段污染） ----------------
+            # v5 门禁适配：先断言零勾选任务返回 409 no_checked_tasks，随后添加并显式勾选 1 条任务
+            st_zero_chk, _, b_zero_chk = await raw_http_request(
+                port,
+                "POST",
+                "/api/sessions/legacy01/execute",
+                headers=auth_hdr,
+                body=json.dumps({"allow_workspace_write": True, "executor_id": "astra"}).encode("utf-8"),
+            )
+            assert st_zero_chk == 409 and "no_checked_tasks" in b_zero_chk.decode("utf-8", errors="replace"), (
+                f"Expected 409 no_checked_tasks, got {st_zero_chk}: {b_zero_chk}"
+            )
+            _, _, b_add_act1 = await raw_http_request(
+                port,
+                "POST",
+                "/api/sessions/legacy01/whiteboard",
+                headers=auth_hdr,
+                body=json.dumps({"op": "add", "kind": "action", "author": "chair", "text": "执行工作区变更回归核验"}).encode("utf-8"),
+            )
+            wb_act1_items = [it for it in json.loads(b_add_act1.decode("utf-8"))["whiteboard"]["items"] if it["kind"] == "action"]
+            await raw_http_request(
+                port,
+                "POST",
+                "/api/sessions/legacy01/whiteboard",
+                headers=auth_hdr,
+                body=json.dumps({"op": "toggle_check", "item_id": wb_act1_items[0]["id"], "checked": True}).encode("utf-8"),
+            )
+
             escape_link = legacy_ws / "escape_etc_hosts"
             escape_link.symlink_to("/etc/hosts")
             before_app_bytes = (legacy_ws / "app.py").read_bytes()
@@ -447,6 +474,21 @@ async def run_all_tests() -> None:
             )
             # 给会话 2 注入议题以便可执行
             app.orchestrator.get_session(sid2).topic = "并发冲突执行测试"
+            _, _, b_add_act2 = await raw_http_request(
+                port,
+                "POST",
+                f"/api/sessions/{sid2}/whiteboard",
+                headers=auth_hdr,
+                body=json.dumps({"op": "add", "kind": "action", "author": "chair", "text": "并发锁竞争验证任务"}).encode("utf-8"),
+            )
+            wb_act2_items = [it for it in json.loads(b_add_act2.decode("utf-8"))["whiteboard"]["items"] if it["kind"] == "action"]
+            await raw_http_request(
+                port,
+                "POST",
+                f"/api/sessions/{sid2}/whiteboard",
+                headers=auth_hdr,
+                body=json.dumps({"op": "toggle_check", "item_id": wb_act2_items[0]["id"], "checked": True}).encode("utf-8"),
+            )
 
             orig_hashes = {
                 "app.py": hashlib.sha256((legacy_ws / "app.py").read_bytes()).hexdigest(),

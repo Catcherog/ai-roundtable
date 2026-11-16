@@ -2630,13 +2630,20 @@ body {
 }
 
 .msg-hover-actions {
-  display: none;
+  display: inline-flex;
   align-items: center;
   gap: 5px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(4px);
+  transition: opacity 0.16s var(--ease-smooth), transform 0.16s var(--ease-smooth);
 }
 
-.msg-card:hover .msg-hover-actions {
-  display: inline-flex;
+.msg-card:hover .msg-hover-actions,
+.msg-card:focus-within .msg-hover-actions {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(0);
 }
 
 .msg-act-btn {
@@ -3089,11 +3096,8 @@ body {
 .msg-body.thinking-only::after { display: none; }
 
 .msg-body.streaming::after {
-  content: "▋";
-  display: inline-block;
-  margin-left: 3px;
-  color: var(--accent-primary);
-  animation: blink 0.7s infinite;
+  content: none;
+  display: none;
 }
 
 @keyframes blink {
@@ -5048,45 +5052,46 @@ body {
   background: radial-gradient(420px 140px at 0% 0%, var(--prism-bg), transparent 72%), var(--msg-surface-grad);
 }
 
-/* 流式生成中卡片顶部极光扫掠细轨 */
-.msg-card.is-streaming::before {
+/* 流式生成中卡片保持左侧角色竖细线，仅用顶部轻盈流光细线 ::after 提示活跃态 */
+.msg-card.is-streaming::after {
   content: "";
   position: absolute;
   top: 0;
   left: 0;
   right: 0;
-  height: 2.5px;
-  background: linear-gradient(90deg, transparent 0%, var(--seat-accent) 48%, var(--accent-primary) 65%, transparent 100%);
+  height: 1.5px;
+  background: linear-gradient(90deg, transparent 0%, var(--seat-accent) 50%, transparent 100%);
   transform: translateX(-100%);
   will-change: transform, opacity;
-  animation: msgAuroraRail 1.9s var(--ease-smooth) infinite;
+  animation: msgAuroraRail 2.2s var(--ease-smooth) infinite;
   pointer-events: none;
   z-index: 3;
 }
 
 @keyframes msgAuroraRail {
-  0% { transform: translateX(-95%); opacity: 0.55; }
-  50% { opacity: 1; }
-  100% { transform: translateX(95%); opacity: 0.55; }
+  0% { transform: translateX(-95%); opacity: 0.35; }
+  50% { opacity: 0.88; }
+  100% { transform: translateX(95%); opacity: 0.35; }
 }
 
-/* 流式输出尾端柔和呼吸胶囊光标 */
+/* 流式输出尾端空心圆环线性呼吸光标（唯一光标，与角色强调色严格一致） */
 .msg-body.streaming > :last-child::after {
   content: "";
   display: inline-block;
-  width: 6px;
-  height: 14px;
-  margin-left: 4px;
-  vertical-align: -2px;
-  border-radius: 999px;
-  background: var(--seat-accent);
+  width: 8.5px;
+  height: 8.5px;
+  margin-left: 5px;
+  vertical-align: 1px;
+  border-radius: 50%;
+  border: 1.55px solid var(--seat-accent);
+  background: transparent;
   will-change: transform, opacity;
-  animation: fluidCaretBreathe 0.92s ease-in-out infinite alternate;
+  animation: fluidCaretBreathe 0.95s ease-in-out infinite alternate;
 }
 
 @keyframes fluidCaretBreathe {
-  from { opacity: 0.25; transform: scaleY(0.76); }
-  to { opacity: 0.95; transform: scaleY(1.04); }
+  from { opacity: 0.32; transform: scale(0.78); }
+  to { opacity: 1; transform: scale(1.08); }
 }
 
 /* 灵动多模态思考指示舞台（彻底取代单调旋转圆环 .thinking-spinner） */
