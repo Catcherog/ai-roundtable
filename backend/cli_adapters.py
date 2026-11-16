@@ -536,15 +536,24 @@ def _save_disk_probe_cache() -> None:
         pass
 
 
+def _strip_control_plane_secrets(env: Dict[str, str]) -> Dict[str, str]:
+    for key in list(env.keys()):
+        if key in (
+            "AI_ROUNDTABLE_BOOT_TOKEN",
+            "AI_ROUNDTABLE_BOOTSTRAP_CODE",
+            "AI_ROUNDTABLE_BOOT_ID",
+        ) or key.upper().startswith("AI_ROUNDTABLE_BOOT_"):
+            env.pop(key, None)
+    return env
+
+
 def build_host_env() -> Dict[str, str]:
     """构建宿主机环境变量（缓存登录 Shell PATH，实时感知代理变更，并剥离控制面敏感凭据防子进程泄露）。"""
     global _CACHED_LOGIN_PATH, _CACHED_HOST_ENV
     if _CACHED_HOST_ENV is not None:
         fresh = os.environ.copy()
         fresh["PATH"] = _CACHED_HOST_ENV["PATH"]
-        fresh.pop("AI_ROUNDTABLE_BOOT_TOKEN", None)
-        fresh.pop("AI_ROUNDTABLE_BOOTSTRAP_CODE", None)
-        return fresh
+        return _strip_control_plane_secrets(fresh)
 
     env = os.environ.copy()
     home = os.path.expanduser("~")
@@ -553,8 +562,7 @@ def build_host_env() -> Dict[str, str]:
         extra = [os.path.join(home, ".local", "bin"), os.path.join(home, ".grok", "bin"),
                  os.path.join(env.get("APPDATA", home), "npm")]
         env["PATH"] = os.pathsep.join([env.get("PATH", ""), *(p for p in extra if os.path.isdir(p))])
-        env.pop("AI_ROUNDTABLE_BOOT_TOKEN", None)
-        env.pop("AI_ROUNDTABLE_BOOTSTRAP_CODE", None)
+        _strip_control_plane_secrets(env)
         _CACHED_HOST_ENV = env.copy()
         return env
 
@@ -615,8 +623,7 @@ def build_host_env() -> Dict[str, str]:
             merged.append(d)
 
     env["PATH"] = os.pathsep.join(merged)
-    env.pop("AI_ROUNDTABLE_BOOT_TOKEN", None)
-    env.pop("AI_ROUNDTABLE_BOOTSTRAP_CODE", None)
+    _strip_control_plane_secrets(env)
     _CACHED_HOST_ENV = {"PATH": env["PATH"]}
     return env.copy()
 
@@ -2533,16 +2540,15 @@ class UnifiedAgentRunner:
 
     def _effective_workspace_cwd(self, session_workspace: str = "") -> str:
         raw = session_workspace.strip() if session_workspace else self.settings.workspace_dir
-        home = os.path.realpath(os.path.expanduser("~"))
-        if raw and os.path.isdir(raw):
-            if os.path.realpath(raw) != home:
-                return raw
+        bound, real_ws = is_real_bound_workspace(raw)
+        if bound and real_ws and os.path.isdir(real_ws):
+            return os.path.realpath(real_ws)
         safe_ws = os.path.join(os.path.expanduser(os.environ.get("AI_ROUNDTABLE_HOME") or "~/.ai-roundtable"), "workspace")
         try:
             os.makedirs(safe_ws, exist_ok=True)
-            return safe_ws
+            return os.path.realpath(safe_ws)
         except Exception:
-            return tempfile.gettempdir()
+            return os.path.realpath(tempfile.gettempdir())
 
     def _require_binary(
         self,

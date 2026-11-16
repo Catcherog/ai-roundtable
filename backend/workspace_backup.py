@@ -328,6 +328,115 @@ def _entry_equal(a: Optional[dict], b: Optional[dict]) -> bool:
     return a.get("sha256") == b.get("sha256") and int(a.get("mode", 0o644)) == int(b.get("mode", 0o644))
 
 
+HONEST_ROLLBACK_DISCLOSURE = (
+    "已恢复绑定工作区内受管文件字节（不含 Git 提交/远端推送、家目录配置及验证命令外部副作用）"
+)
+
+
+def _read_git_index_bytes(root_path: Path) -> bytes:
+    """纯标准库读取 .git/index 原始字节，不派生任何 git 子进程。"""
+    dot_git = root_path / ".git"
+    git_dir: Optional[Path] = None
+    try:
+        if dot_git.is_dir():
+            git_dir = dot_git
+        elif dot_git.is_file():
+            raw_ptr = dot_git.read_text(encoding="utf-8", errors="ignore").strip()
+            if raw_ptr.startswith("gitdir:"):
+                cand = raw_ptr.split(":", 1)[1].strip()
+                git_dir = Path(cand) if os.path.isabs(cand) else (root_path / cand).resolve()
+        if git_dir is None:
+            return b""
+        idx_file = git_dir / "index"
+        if idx_file.is_file() and idx_file.stat().st_size <= 32 * 1024 * 1024:
+            return idx_file.read_bytes()
+    except OSError:
+        return b""
+    return b""
+
+
+def _is_untracked_archive_dir(root_path: Path, dir_name: str, rel_posix: str, git_idx_bytes: bytes) -> bool:
+    """默认忽略未纳入版本控制的 output/ 大型构建归档目录及 .app 产物包目录。"""
+    if dir_name != "output" and not dir_name.endswith(".app"):
+        return False
+    clean_rel = rel_posix.strip("/")
+    if not clean_rel:
+        return False
+    if not git_idx_bytes:
+        return True
+    return (clean_rel + "/").encode("utf-8") not in git_idx_bytes
+
+
+def precheck_workspace_capacity(
+    cwd: str,
+    *,
+    max_bytes: int = MAX_BACKUP_WORKSPACE_BYTES,
+) -> Tuple[bool, int, List[dict], str]:
+    """
+    绑定工作区阶段前置 128 MiB 容量预检：
+    按快照同源排除规则扫描受管普通文件总字节数；超限时当场返回体积排名前列的大子目录清单。
+    """
+    real_cwd = os.path.realpath(os.path.expanduser(str(cwd or "").strip()))
+    root_path = Path(real_cwd)
+    if not root_path.is_dir():
+        return False, 0, [], f"目标目录不存在：{cwd}"
+
+    git_idx_bytes = _read_git_index_bytes(root_path)
+    total_bytes = 0
+    dir_bytes: Dict[str, int] = {}
+    stack: List[Path] = [root_path]
+
+    while stack:
+        cur_dir = stack.pop()
+        try:
+            scandir_it = os.scandir(str(cur_dir))
+        except OSError:
+            continue
+        with scandir_it:
+            for item in scandir_it:
+                try:
+                    lst = os.lstat(item.path)
+                except OSError:
+                    continue
+                mode = lst.st_mode
+                full_p = Path(item.path)
+                rel_posix = full_p.relative_to(root_path).as_posix()
+                if item.name == ".git" and stat.S_ISDIR(mode):
+                    continue
+                if stat.S_ISDIR(mode):
+                    if os.name == "nt" and getattr(lst, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                        continue
+                    if _is_untracked_archive_dir(root_path, item.name, rel_posix, git_idx_bytes):
+                        continue
+                    stack.append(full_p)
+                elif stat.S_ISREG(mode):
+                    sz = max(0, int(lst.st_size))
+                    total_bytes += sz
+                    top_bucket = rel_posix.split("/", 1)[0] if "/" in rel_posix else "."
+                    dir_bytes[top_bucket] = dir_bytes.get(top_bucket, 0) + sz
+
+    ranked = sorted(dir_bytes.items(), key=lambda kv: kv[1], reverse=True)
+    largest_dirs = [
+        {
+            "path": name,
+            "size_bytes": sz,
+            "size_mb": round(sz / (1024 * 1024), 2),
+        }
+        for name, sz in ranked[:6]
+        if sz > 0
+    ]
+    if total_bytes > max_bytes:
+        mb_cap = max_bytes // (1024 * 1024)
+        cur_mb = total_bytes / (1024 * 1024)
+        top_desc = "、".join(f"{d['path']} ({d['size_mb']} MiB)" for d in largest_dirs[:4]) or "根目录大文件"
+        err_msg = (
+            f"受管工作区总体积 {cur_mb:.1f} MiB 超出 {mb_cap} MiB 安全准入上限，已拒绝绑定；"
+            f"体积占比较大的目录/位置：{top_desc}"
+        )
+        return False, total_bytes, largest_dirs, err_msg
+    return True, total_bytes, largest_dirs, ""
+
+
 @dataclass
 class WorkspaceBackup:
     """纯 Python 标准库 CAS 写前字节清单与原子回滚引擎。"""
@@ -416,6 +525,7 @@ class WorkspaceBackup:
         if not root_path.is_dir():
             raise WorkspaceAdmissionError(f"工作区目录不存在：{self.cwd}", reason="missing_workspace")
 
+        git_idx_bytes = _read_git_index_bytes(root_path)
         entries: Dict[str, dict] = {}
         total_bytes = 0
         stack: List[Path] = [root_path]
@@ -457,8 +567,10 @@ class WorkspaceBackup:
                             f"Windows 工作区包含重解析点：{rel_posix}。请选择普通本地目录后再执行写入。",
                             reason="windows_reparse_point", offending_path=rel_posix,
                         )
-                    # 仅跳过 .git 元数据目录本身（保留子模块工作树普通文件与所有 .gitignore 忽略文件）
+                    # 跳过 .git 元数据目录与未纳入版本控制的 output/ 大型构建归档及 .app 产物包目录
                     if item.name == ".git" and stat.S_ISDIR(mode):
+                        continue
+                    if stat.S_ISDIR(mode) and _is_untracked_archive_dir(root_path, item.name, rel_posix, git_idx_bytes):
                         continue
 
                     if stat.S_ISLNK(mode):
@@ -625,17 +737,38 @@ class WorkspaceBackup:
 
     @property
     def is_rollbackable(self) -> bool:
-        return self.state == "rollbackable" and self.after_entries is not None and bool(self.changed_paths)
+        return self.state in ("rollbackable", "rolling_back") and self.after_entries is not None and bool(self.changed_paths)
 
     def mark_acknowledged(self) -> None:
         """用户显式确认保留当前执行变更、归档上一轮可回滚状态以开启新一轮写入。"""
-        if self.state == "rollbackable":
+        if self.state in ("rollbackable", "rolling_back"):
             self.state = "archived"
             self._persist_manifest()
 
+    @staticmethod
+    def _write_restored_file(target_p: Path, raw_data: bytes, fmode: int) -> None:
+        atomic_write_bytes_fsync(target_p, raw_data, mode=fmode)
+
+    @staticmethod
+    def _is_permission_only_diff(expected_ent: Optional[dict], now_ent: Optional[dict]) -> bool:
+        if not expected_ent or not now_ent:
+            return False
+        if expected_ent.get("type") != "file" or now_ent.get("type") != "file":
+            return False
+        if expected_ent.get("sha256") != now_ent.get("sha256"):
+            return False
+        return int(expected_ent.get("mode", 0o644)) != int(now_ent.get("mode", 0o644))
+
     def restore_with_report(self) -> Tuple[bool, str, dict]:
-        """执行整批原子冲突检测与字节级还原；发现事后编辑冲突时返回 409 + 全量 conflict_paths 并保留 rollbackable。"""
-        if self.after_entries is None or self.state not in ("rollbackable",):
+        """
+        「先写后删 + 双态幂等可重入」快照回滚状态机：
+        1. 预检与入态 (rolling_back)：首次要求匹配 after；重入态允许匹配 after 或 before（待删新增文件已不存在亦通过），
+           核验未过零写盘并区分「仅权限位变化」与「文件内容变化」返回 409；通过后先原子落盘 rolling_back。
+        2. 先还原旧文件 (before_entries)：同目录临时文件 + atomic_write_bytes_fsync + os.replace。
+        3. 后清理新增文件 (added_files)：unlink 前二次复核当前 SHA-256 仍等于 after，偏离则保留文件并记入冲突报告。
+        4. 完结与诚实披露 (rolled_back)：原子更新为 rolled_back 并返回固定诚实披露文案。
+        """
+        if self.after_entries is None or self.state not in ("rollbackable", "rolling_back"):
             return False, "当前没有可回滚的已完成执行快照", {"status_code": 409, "conflict_paths": []}
 
         try:
@@ -645,7 +778,14 @@ class WorkspaceBackup:
             return (
                 False,
                 f"回滚前工作区校验受阻：{adm_exc}",
-                {"status_code": 409, "conflict_paths": offending, "rollbackable": True},
+                {
+                    "status_code": 409,
+                    "conflict_paths": offending,
+                    "permission_only_conflicts": [],
+                    "content_conflicts": offending,
+                    "conflict_kind": "content_changed",
+                    "rollbackable": True,
+                },
             )
 
         all_affected = sorted(
@@ -656,28 +796,64 @@ class WorkspaceBackup:
         if not all_affected:
             return False, "本次执行未产生任何文件变更，无需回滚", {"status_code": 400, "conflict_paths": []}
 
-        conflict_paths: List[str] = []
+        is_reentrant = self.state == "rolling_back"
+        added_only = [p for p in all_affected if p not in self.before_entries and p in self.after_entries]
+        added_only_set = set(added_only)
+
+        permission_only_conflicts: List[str] = []
+        content_conflicts: List[str] = []
+
         for rel in all_affected:
+            before_ent = self.before_entries.get(rel)
             after_ent = self.after_entries.get(rel)
             now_ent = current_map.get(rel)
-            if not _entry_equal(after_ent, now_ent):
-                conflict_paths.append(rel)
 
+            if not is_reentrant:
+                matched = _entry_equal(after_ent, now_ent)
+            else:
+                if rel in added_only_set:
+                    matched = (now_ent is None) or _entry_equal(after_ent, now_ent)
+                else:
+                    matched = _entry_equal(after_ent, now_ent) or _entry_equal(before_ent, now_ent)
+
+            if not matched:
+                if self._is_permission_only_diff(after_ent, now_ent) or (
+                    is_reentrant and self._is_permission_only_diff(before_ent, now_ent)
+                ):
+                    permission_only_conflicts.append(rel)
+                else:
+                    content_conflicts.append(rel)
+
+        conflict_paths = sorted(set(permission_only_conflicts) | set(content_conflicts))
         if conflict_paths:
             preview = "、".join(conflict_paths[:5])
             suffix = f" 等共 {len(conflict_paths)} 个文件" if len(conflict_paths) > 5 else ""
-            msg = f"检测到以下文件在执行结束后又被修改，已整批拒绝回滚并保留当前内容：{preview}{suffix}"
+            if permission_only_conflicts and not content_conflicts:
+                conflict_kind = "permission_only"
+                msg = f"检测到以下文件仅发生权限位变化（文件内容未变），已整批暂停回滚：{preview}{suffix}；可还原权限后重试或直接归档保留现场"
+            elif permission_only_conflicts and content_conflicts:
+                conflict_kind = "mixed"
+                msg = (
+                    f"检测到事后修改冲突（文件内容变化 {len(content_conflicts)} 项，仅权限位变化 {len(permission_only_conflicts)} 项），"
+                    f"已零写盘拒绝回滚并保留当前现场：{preview}{suffix}"
+                )
+            else:
+                conflict_kind = "content_changed"
+                msg = f"检测到以下文件在执行结束后发生了文件内容变化，已零写盘拒绝回滚并保留当前现场：{preview}{suffix}"
             return (
                 False,
                 msg,
                 {
                     "status_code": 409,
                     "conflict_paths": conflict_paths,
+                    "permission_only_conflicts": permission_only_conflicts,
+                    "content_conflicts": content_conflicts,
+                    "conflict_kind": conflict_kind,
                     "rollbackable": True,
                 },
             )
 
-        # 第一阶段：全量预检并加载所有需要还原的 CAS 字节（保证写盘中途绝不因缺失 blob 半途而废）
+        # 预检阶段加载并核验所有需要还原的 before CAS 对象（确保进入 rolling_back 后绝不因缺失 blob 中断）
         staged_blobs: Dict[str, bytes] = {}
         for rel in all_affected:
             b_ent = self.before_entries.get(rel)
@@ -686,18 +862,64 @@ class WorkspaceBackup:
                 if sha not in staged_blobs:
                     staged_blobs[sha] = self._load_blob_bytes(sha)
 
+        # 阶段 1 完结：核验通过后先将清单原子落盘为 rolling_back
+        if self.state != "rolling_back":
+            self.state = "rolling_back"
+            self._persist_manifest()
+
         root_path = Path(self.cwd)
         touched_dirs: Set[Path] = set()
 
-        # 第二阶段：先删除本次执行新增的文件/链接（已证明与 after 字节完全一致）
-        added_only = [p for p in all_affected if p not in self.before_entries and p in self.after_entries]
+        # 阶段 2：优先遍历全部修改/被删旧文件 (before_entries)，同目录临时文件 + fsync + os.replace 原子写回
+        for rel in all_affected:
+            b_ent = self.before_entries.get(rel)
+            if b_ent is None:
+                continue
+            target_p = root_path / rel
+            target_p.parent.mkdir(parents=True, exist_ok=True)
+            if os.path.lexists(str(target_p)) and os.path.isdir(str(target_p)) and not os.path.islink(str(target_p)):
+                os.rmdir(str(target_p))
+            if b_ent.get("type") == "symlink":
+                tmp_lnk = target_p.parent / f".{target_p.name}.lnk.{uuid.uuid4().hex[:8]}"
+                os.symlink(b_ent["link_target"], str(tmp_lnk))
+                os.replace(str(tmp_lnk), str(target_p))
+                touched_dirs.add(target_p.parent)
+            else:
+                raw_data = staged_blobs[b_ent["sha256"]]
+                fmode = int(b_ent.get("mode") or 0o644)
+                self._write_restored_file(target_p, raw_data, fmode)
+                touched_dirs.add(target_p.parent)
+
+        # 阶段 3：全部旧文件写回成功后，逐一二次复核待删新增文件当前 SHA-256 仍等于 after，匹配后执行 unlink
+        skipped_added_conflicts: List[str] = []
         for rel in sorted(added_only, key=lambda x: x.count("/"), reverse=True):
             target_p = root_path / rel
-            if os.path.lexists(str(target_p)):
-                if os.path.isdir(str(target_p)) and not os.path.islink(str(target_p)):
+            after_ent = self.after_entries.get(rel)
+            if not os.path.lexists(str(target_p)):
+                continue
+            if os.path.isdir(str(target_p)) and not os.path.islink(str(target_p)):
+                continue
+            if after_ent is None:
+                continue
+            if after_ent.get("type") == "symlink":
+                try:
+                    live_lnk = os.readlink(str(target_p)) if os.path.islink(str(target_p)) else None
+                except OSError:
+                    live_lnk = None
+                if live_lnk != after_ent.get("link_target"):
+                    skipped_added_conflicts.append(rel)
                     continue
-                os.unlink(str(target_p))
-                touched_dirs.add(target_p.parent)
+            else:
+                try:
+                    live_bytes, _ = _read_file_nofollow_bytes(target_p)
+                    live_sha = hashlib.sha256(live_bytes).hexdigest()
+                except Exception:
+                    live_sha = ""
+                if live_sha != after_ent.get("sha256"):
+                    skipped_added_conflicts.append(rel)
+                    continue
+            os.unlink(str(target_p))
+            touched_dirs.add(target_p.parent)
 
         # 清理因本次新增文件产生的空子目录
         for d in sorted(touched_dirs, key=lambda p: len(p.parts), reverse=True):
@@ -710,41 +932,25 @@ class WorkspaceBackup:
                 except OSError:
                     break
 
-        # 第三阶段：还原所有修改或被删的文件与符号链接
-        for rel in all_affected:
-            b_ent = self.before_entries.get(rel)
-            if b_ent is None:
-                continue
-            target_p = root_path / rel
-            target_p.parent.mkdir(parents=True, exist_ok=True)
-            if os.path.lexists(str(target_p)) and os.path.isdir(str(target_p)) and not os.path.islink(str(target_p)):
-                # 若目录占据了原文件路径，安全移空目录
-                os.rmdir(str(target_p))
-            if b_ent.get("type") == "symlink":
-                tmp_lnk = target_p.parent / f".{target_p.name}.lnk.{uuid.uuid4().hex[:8]}"
-                os.symlink(b_ent["link_target"], str(tmp_lnk))
-                os.replace(str(tmp_lnk), str(target_p))
-                touched_dirs.add(target_p.parent)
-            else:
-                raw_data = staged_blobs[b_ent["sha256"]]
-                fmode = int(b_ent.get("mode") or 0o644)
-                atomic_write_bytes_fsync(target_p, raw_data, mode=fmode)
-                touched_dirs.add(target_p.parent)
-
         for d in touched_dirs:
             if d.is_dir():
                 fsync_directory(d)
         fsync_directory(root_path)
 
+        # 阶段 4：清单原子更新为 rolled_back 并返回诚实边界披露
         self.state = "rolled_back"
         self._persist_manifest()
+        final_msg = HONEST_ROLLBACK_DISCLOSURE
+        if skipped_added_conflicts:
+            final_msg += f"（另有 {len(skipped_added_conflicts)} 个新增文件因回滚窗口期被外部修改已保留未删：{', '.join(skipped_added_conflicts)}）"
         return (
             True,
-            f"已按字节清单完整回滚本次执行的 {len(all_affected)} 个文件",
+            final_msg,
             {
                 "status_code": 200,
-                "restored_count": len(all_affected),
-                "conflict_paths": [],
+                "restored_count": len(all_affected) - len(skipped_added_conflicts),
+                "conflict_paths": skipped_added_conflicts,
+                "skipped_added_conflicts": skipped_added_conflicts,
                 "rollbackable": False,
             },
         )

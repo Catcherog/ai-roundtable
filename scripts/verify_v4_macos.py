@@ -3,6 +3,7 @@
 import hashlib
 import json
 import plistlib
+import re
 import struct
 import subprocess
 import tempfile
@@ -19,6 +20,10 @@ def main():
     root = Path(__file__).resolve().parents[1]
     built, installed = root / "AI圆桌.app", Path.home() / "Desktop" / "AI圆桌.app"
     src = (root / "macos_app/main.m").read_text()
+    build_script = (root / "scripts/build_macos_app.sh").read_text()
+    version_match = re.search(r"<key>CFBundleShortVersionString</key>\s*<string>([^<]+)</string>", build_script)
+    assert version_match, "Build script does not declare a macOS bundle version"
+    expected_version = version_match.group(1)
     assert "runOpenPanelWithParameters:" in src and "panel.canChooseFiles = YES" in src
     assert ".UIDelegate = self" in src or "setUIDelegate:self" in src
     records = []
@@ -26,7 +31,7 @@ def main():
         subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], check=True)
         contents = app / "Contents"
         info = plistlib.loads((contents / "Info.plist").read_bytes())
-        assert info["CFBundleShortVersionString"] == "4.0.0"
+        assert info["CFBundleShortVersionString"] == expected_version
         binary = contents / "MacOS" / info["CFBundleExecutable"]
         assert b"webView:runOpenPanelWithParameters:initiatedByFrame:completionHandler:" in binary.read_bytes()
         ico = contents / "Resources/AppIcon.icns"

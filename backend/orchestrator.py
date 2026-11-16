@@ -73,15 +73,18 @@ from .domain import (
     normalize_driver_family_key,
     normalize_scenario_pack_and_artifact,
 )
-from .drivers import is_process_group_alive
+from .drivers import is_process_group_alive, load_driver_catalog
 from .engine import run_post_execution_verification
 from .attachments import SessionAttachmentManager
 from .storage import RoundtableSQLiteStore
 from .workspace_backup import (
+    HONEST_ROLLBACK_DISCLOSURE,
+    MAX_BACKUP_WORKSPACE_BYTES,
     WorkspaceAdmissionError,
     WorkspaceBackup,
     WorkspaceLockBusyError,
     WorkspaceWriteLock,
+    precheck_workspace_capacity,
 )
 
 
@@ -162,463 +165,31 @@ def normalize_collab_mode(
     return mapped, bool(auto_preview_exec) if auto_preview_exec is not None else False
 
 
-WHITEBOARD_LIST_KEYS = ("chair_constraints", "carbon_plan", "grok_risks", "astra_actions")
-VALID_WB_KINDS = ("decision", "risk", "action")
-VALID_WB_AUTHORS = ("chair", "carbon", "grok", "astra", "vega", "titan", "prism", "system")
-UNPINNED_WB_SOFT_LIMIT = 60
-DISAGREEMENT_KEYWORDS = ("存疑", "分歧", "反对", "漏洞", "阻塞", "不同意", "待定", "需修", "质疑", "未决")
-
-_CONVERSATIONAL_NOISE_PREFIX = re.compile(
-    r"^(?:我只查公开资料|先核实|同意|完全赞同|赞同|收到|好的|没问题|说得好|整体可行|补充一点|针对\s*@|工程侧赞同|综合\s*@|以下是|作为)",
-    re.IGNORECASE,
+from .domain.whiteboard import (
+    DEFAULT_SEAT_WB_KINDS,
+    DISAGREEMENT_KEYWORDS,
+    STALE_STREAMING_BADGES,
+    UNPINNED_WB_SOFT_LIMIT,
+    VALID_WB_AUTHORS,
+    VALID_WB_KINDS,
+    WHITEBOARD_LIST_KEYS,
+    _empty_session_draft,
+    _infer_source_msg_id,
+    _norm_dedupe_key,
+    _normalize_and_sync_whiteboard,
+    dedupe_chair_constraints,
+    extract_key_points_from_markdown,
+    is_whiteboard_noise,
+    make_deterministic_wb_id,
+    normalize_whiteboard_structure,
+    now_display_time,
+    now_hhmmss,
+    sanitize_persisted_message,
+    smart_clip,
+    strip_markdown_links,
+    summarize_topic_and_constraints,
+    sync_whiteboard_legacy_arrays_and_caps,
 )
-
-_TOOL_MONOLOGUE_NOISE_RE = re.compile(
-    r"^(?:"
-    r"我(?:先|这就|来|去|将|准备|需要|正在|只)?\s*(?:只读|核对|查看|读取|检查|检索|扫描|查阅|浏览|打开|看下|看一下|查一下|只查|核实|定位)"
-    r"|先\s*(?:只读|核对|查看|读取|检查|检索|看下|看一下|看源码|核实|对一下|浏览|扫描)"
-    r"|让我(?:先)?\s*(?:只读|核对|查看|读取|检查|看下|浏览)"
-    r"|正在\s*(?:只读|读取|核对|查看|检索|扫描|浏览)"
-    r"|接下来我(?:先)?\s*(?:只读|核对|查看|读取|检查)"
-    r"|只读(?:查看|读取|浏览|核对|扫描|检查)"
-    r"|不(?:改|修改|改动|写入)任何(?:本地)?(?:文件|代码|源码)"
-    r"|Finishing\s+session"
-    r")",
-    re.IGNORECASE,
-)
-
-_PROCEDURAL_INLINE_BLACKLIST_RE = re.compile(
-    r"(?:"
-    r"我(?:先|只|正在)\s*(?:只读|核对|查看|读取|检查|检索|扫描|浏览)"
-    r"|先(?:查看|只读|核对|读取|看下|看一下)"
-    r"|不(?:改|修改|改动|写入)任何(?:本地)?(?:文件|代码|源码)"
-    r"|只读[^。；\n]{0,20}不改任何文件"
-    r")",
-    re.IGNORECASE,
-)
-
-
-def _empty_session_draft(topic: str, messages: list, board: dict) -> bool:
-    has_entries = isinstance(board, dict) and any(board.get(key) for key in ("items", *WHITEBOARD_LIST_KEYS))
-    return not str(topic or "").strip() and not messages and not has_entries
-
-
-def is_whiteboard_noise(text: str) -> bool:
-    """拦截模型工具读取独白、过程性铺垫与空泛寒暄，严禁进入结构化白板。"""
-    s = re.sub(r"^(?:[-*•]+|\d+[.)、]|[①②③④⑤])\s*", "", (text or "").strip()).strip()
-    if len(s) < 4:
-        return True
-    if s in ("无", "暂无", "待补充", "发言完成", "略"):
-        return True
-    if _CONVERSATIONAL_NOISE_PREFIX.match(s):
-        return True
-    if _TOOL_MONOLOGUE_NOISE_RE.match(s):
-        return True
-    if _PROCEDURAL_INLINE_BLACKLIST_RE.search(s):
-        return True
-    return False
-
-
-def make_deterministic_wb_id(seat_or_bucket: str, ordinal: int, text: str) -> str:
-    """按「桶名/来源标识 + 序号 + 归一化内容短哈希」生成跨重启稳定的确定性白板条目 ID。"""
-    prefix = re.sub(r"[^a-z0-9_]", "", (seat_or_bucket or "wb").lower())[:12] or "wb"
-    norm = _norm_dedupe_key(text) or (text or "").strip()
-    digest = hashlib.sha1(f"{prefix}:{ordinal}:{norm}".encode("utf-8")).hexdigest()[:8]
-    return f"wb_{prefix}_{ordinal}_{digest}"
-
-
-def _infer_source_msg_id(seat: str, point_text: str, messages: List[dict]) -> str:
-    """为历史迁移条目尽力关联左侧对应席位发言卡片 ID，支持一键定位高亮。"""
-    if not messages or seat not in ("carbon", "grok", "astra", "chair"):
-        return ""
-    norm_pt = _norm_dedupe_key(point_text)[:12]
-    candidates = [m for m in messages if isinstance(m, dict) and m.get("speaker") == seat and m.get("id")]
-    if not candidates:
-        return ""
-    if norm_pt and len(norm_pt) >= 4:
-        for m in reversed(candidates):
-            if norm_pt in _norm_dedupe_key(str(m.get("content") or "")):
-                return str(m["id"])
-    return str(candidates[-1]["id"])
-
-
-def sync_whiteboard_legacy_arrays_and_caps(wb: dict) -> None:
-    """
-    对未置顶的 risk/action 条目施加软上限（decision 共识约束与置顶条目永不淘汰），
-    并每次修改后同步回写 chair_constraints / carbon_plan / grok_risks / astra_actions 四个兼容字段。
-    """
-    items = wb.get("items")
-    if not isinstance(items, list):
-        items = []
-        wb["items"] = items
-
-    unpinned_indices = [
-        idx
-        for idx, it in enumerate(items)
-        if isinstance(it, dict) and not it.get("pinned") and it.get("kind") != "decision"
-    ]
-    if len(unpinned_indices) > UNPINNED_WB_SOFT_LIMIT:
-        drop_count = len(unpinned_indices) - UNPINNED_WB_SOFT_LIMIT
-        drop_set = set(unpinned_indices[:drop_count])
-        wb["items"] = [it for idx, it in enumerate(items) if idx not in drop_set]
-        items = wb["items"]
-
-    ordered = [
-        it for it in items if isinstance(it, dict) and (it.get("pinned") or it.get("kind") == "decision")
-    ] + [
-        it for it in items if isinstance(it, dict) and not (it.get("pinned") or it.get("kind") == "decision")
-    ]
-
-    chair_arr: List[str] = []
-    plan_arr: List[str] = []
-    risk_arr: List[str] = []
-    action_arr: List[str] = []
-
-    for it in ordered:
-        txt = str(it.get("text") or "").strip()
-        if not txt:
-            continue
-        kind = str(it.get("kind") or "decision")
-        author = str(it.get("author") or "chair")
-        if kind == "decision":
-            if author == "chair":
-                if txt not in chair_arr:
-                    chair_arr.append(txt)
-            else:
-                if txt not in plan_arr:
-                    plan_arr.append(txt)
-        elif kind == "risk":
-            if txt not in risk_arr:
-                risk_arr.append(txt)
-        elif kind == "action":
-            if bool(it.get("checked", True)) and txt not in action_arr:
-                action_arr.append(txt)
-
-    wb["chair_constraints"] = chair_arr[:24]
-    wb["carbon_plan"] = plan_arr[:24]
-    wb["grok_risks"] = risk_arr[:24]
-    wb["astra_actions"] = action_arr[:24]
-
-
-def _normalize_and_sync_whiteboard(
-    wb: dict,
-    topic: str = "",
-    messages: Optional[List[dict]] = None,
-) -> dict:
-    """
-    归一化并双向同步三区结构化白板：
-    - 每条结构：{"id": "wb_...", "kind": "decision"|"risk"|"action", "text": "...",
-      "author": "chair"|"carbon"|"grok"|"astra"|"system", "source_msg_id": "m_xxx",
-      "pinned": bool, "checked": bool, "ver": int}
-    - 加载旧会话（仅有 chair_constraints / carbon_plan / grok_risks / astra_actions）时，
-      按“桶名+序号+内容短哈希”稳定迁移生成 items；
-    - 同步回写四个旧数组字段，确保旧逻辑与测试脚本 100% 兼容。
-    """
-    if not isinstance(wb, dict):
-        wb = {}
-    wb["wb_version"] = max(1, int(wb.get("wb_version") or 1))
-    if topic and not wb.get("topic"):
-        wb["topic"] = topic
-    short_title, _ = summarize_topic_and_constraints(wb.get("topic") or topic)
-    if short_title and not wb.get("topic_title"):
-        wb["topic_title"] = short_title
-
-    msg_list = messages if isinstance(messages, list) else []
-    raw_items = wb.get("items")
-
-    if isinstance(raw_items, list):
-        normalized_items: List[dict] = []
-        seen_ids: set = set()
-        seen_norm_decisions: set = set()
-
-        # 若为旧过渡版 items（不含 kind 字段且 chair_constraints 独立存在），先吸收主持约束为 decision
-        has_chair_item = any(
-            isinstance(x, dict) and (x.get("author") == "chair" or x.get("source_seat") == "chair")
-            for x in raw_items
-        )
-        raw_chair_list = wb.get("chair_constraints")
-        if not has_chair_item and isinstance(raw_chair_list, list) and raw_chair_list:
-            clean_chair = dedupe_chair_constraints(
-                wb.get("topic") or topic,
-                wb.get("topic_title", ""),
-                raw_chair_list,
-            )
-            for c_idx, c_txt in enumerate(clean_chair):
-                nk = _norm_dedupe_key(c_txt)
-                if not nk or nk in seen_norm_decisions:
-                    continue
-                seen_norm_decisions.add(nk)
-                cid = make_deterministic_wb_id("chair_constraints", c_idx, c_txt)
-                seen_ids.add(cid)
-                normalized_items.append(
-                    {
-                        "id": cid,
-                        "kind": "decision",
-                        "text": c_txt,
-                        "author": "chair",
-                        "origin_tier": "chair_directive",
-                        "source_msg_id": _infer_source_msg_id("chair", c_txt, msg_list),
-                        "pinned": True,
-                        "checked": True,
-                        "ver": 1,
-                    }
-                )
-
-        for idx, raw_it in enumerate(raw_items):
-            if not isinstance(raw_it, dict):
-                continue
-            txt = str(raw_it.get("text") or "").strip()
-            if not txt:
-                continue
-            raw_kind = str(raw_it.get("kind") or "").strip().lower()
-            raw_bucket = str(raw_it.get("bucket") or "").strip().lower()
-            raw_author = str(raw_it.get("author") or raw_it.get("source_seat") or "").strip().lower()
-            pinned = bool(raw_it.get("pinned", False))
-            adopted = bool(raw_it.get("adopted", False))
-
-            if raw_kind in VALID_WB_KINDS:
-                kind = raw_kind
-            elif adopted:
-                kind = "decision"
-            elif raw_bucket in ("chair_constraints", "carbon_plan", "consensus"):
-                kind = "decision"
-            elif raw_bucket == "grok_risks":
-                kind = "risk"
-            elif raw_bucket == "astra_actions":
-                kind = "action"
-            else:
-                kind = {"chair": "decision", "carbon": "decision", "grok": "risk", "astra": "action"}.get(
-                    raw_author, "decision"
-                )
-
-            if raw_author not in VALID_WB_AUTHORS:
-                raw_author = {
-                    "chair_constraints": "chair",
-                    "carbon_plan": "carbon",
-                    "grok_risks": "grok",
-                    "astra_actions": "astra",
-                }.get(raw_bucket, "chair" if kind == "decision" else "system")
-
-            if not pinned and kind != "decision" and is_whiteboard_noise(txt):
-                continue
-            if raw_author != "chair" and is_whiteboard_noise(txt) and not pinned and not adopted:
-                continue
-
-            nk = _norm_dedupe_key(txt)
-            if kind == "decision" and nk in seen_norm_decisions:
-                continue
-            if kind == "decision" and nk:
-                seen_norm_decisions.add(nk)
-
-            det_id = str(raw_it.get("id") or "").strip() or make_deterministic_wb_id(f"{kind}_{raw_author}", idx, txt)
-            if det_id in seen_ids:
-                det_id = make_deterministic_wb_id(f"{kind}_{raw_author}", idx + 1000, txt)
-            seen_ids.add(det_id)
-
-            src_msg_id = str(raw_it.get("source_msg_id") or "").strip()
-            if not src_msg_id and raw_author in (*ALL_SEAT_IDS, "chair"):
-                src_msg_id = _infer_source_msg_id(raw_author, txt, msg_list)
-
-            raw_origin = str(raw_it.get("origin_tier") or "").strip()
-            if raw_origin in VALID_ORIGIN_TIERS:
-                origin_tier = raw_origin
-            elif raw_author == "chair":
-                origin_tier = "chair_directive"
-            elif kind == "decision":
-                origin_tier = "multi_seat_consensus"
-            else:
-                origin_tier = "provisional_suggestion"
-
-            checked = bool(raw_it.get("checked", True))
-            ver = max(1, int(raw_it.get("ver") or raw_it.get("version") or 1))
-            norm_entry: dict = {
-                "id": det_id,
-                "kind": kind,
-                "text": txt,
-                "author": raw_author,
-                "origin_tier": origin_tier,
-                "source_msg_id": src_msg_id,
-                "pinned": pinned,
-                "checked": checked,
-                "ver": ver,
-            }
-            if raw_it.get("provisional_decision"):
-                norm_entry["provisional_decision"] = True
-            if raw_it.get("adopted_by"):
-                norm_entry["adopted_by"] = str(raw_it["adopted_by"])
-            if raw_it.get("adopted_at"):
-                norm_entry["adopted_at"] = str(raw_it["adopted_at"])
-            if raw_it.get("disagreement_id"):
-                norm_entry["disagreement_id"] = str(raw_it["disagreement_id"])
-            if raw_it.get("rebutted"):
-                norm_entry["rebutted"] = True
-            normalized_items.append(norm_entry)
-        wb["items"] = normalized_items
-    else:
-        # 旧会话（仅有四个字符串数组字段）按“桶名+序号+内容短哈希”确定性迁移
-        migrated: List[dict] = []
-        seen_norm: set = set()
-        legacy_mapping = (
-            ("chair_constraints", "decision", "chair", True),
-            ("carbon_plan", "decision", "carbon", False),
-            ("grok_risks", "risk", "grok", False),
-            ("astra_actions", "action", "astra", False),
-        )
-        for bkey, mapped_kind, mapped_author, default_pinned in legacy_mapping:
-            raw_arr = wb.get(bkey)
-            if not isinstance(raw_arr, list):
-                continue
-            if bkey == "chair_constraints":
-                raw_arr = dedupe_chair_constraints(wb.get("topic") or topic, wb.get("topic_title", ""), raw_arr)
-            for local_idx, raw_txt in enumerate(raw_arr):
-                txt = str(raw_txt or "").strip()
-                if not txt:
-                    continue
-                if bkey != "chair_constraints" and is_whiteboard_noise(txt):
-                    continue
-                nk = _norm_dedupe_key(txt)
-                if not nk or nk in seen_norm:
-                    continue
-                seen_norm.add(nk)
-                migrated.append(
-                    {
-                        "id": make_deterministic_wb_id(bkey, local_idx, txt),
-                        "kind": mapped_kind,
-                        "text": txt,
-                        "author": mapped_author,
-                        "origin_tier": "chair_directive" if mapped_author == "chair" else ("multi_seat_consensus" if mapped_kind == "decision" else "provisional_suggestion"),
-                        "source_msg_id": _infer_source_msg_id(mapped_author, txt, msg_list),
-                        "pinned": default_pinned,
-                        "checked": True,
-                        "ver": 1,
-                    }
-                )
-        wb["items"] = migrated
-
-    if not isinstance(wb.get("absent_seats"), list):
-        wb["absent_seats"] = []
-    if not isinstance(wb.get("disagreements"), list):
-        wb["disagreements"] = []
-    if not isinstance(wb.get("abandoned_proposals"), list):
-        wb["abandoned_proposals"] = []
-    if not isinstance(wb.get("round_summaries"), list):
-        wb["round_summaries"] = []
-    if not isinstance(wb.get("resolution_meta"), dict):
-        wb["resolution_meta"] = {}
-
-    sync_whiteboard_legacy_arrays_and_caps(wb)
-    return wb
-
-
-normalize_whiteboard_structure = _normalize_and_sync_whiteboard
-
-STALE_STREAMING_BADGES = frozenset(
-    {"思考中", "发言中", "调用中", "重试中", "排队等待发言…", "汇总决议中", "正在深度推演…"}
-)
-
-
-def sanitize_persisted_message(mc: dict, fallback_badge: str = "已中断") -> dict:
-    """
-    清理非流式消息中残留的「思考中」徽章与空白僵尸消息体：
-    根治历史会话重开或异常中断后页面出现大块空白「思考中」卡片的问题。
-    """
-    mc.pop("activity", None)
-    mc.pop("_start_seq", None)
-    mc.pop("_done_seq", None)
-    was_streaming = bool(mc.get("streaming"))
-    if was_streaming:
-        mc["streaming"] = False
-    cur_badge = str(mc.get("badge") or "").strip()
-    if was_streaming or cur_badge in STALE_STREAMING_BADGES or cur_badge.startswith("正在"):
-        mc["badge"] = fallback_badge if (was_streaming or not cur_badge or cur_badge in STALE_STREAMING_BADGES or cur_badge.startswith("正在")) else cur_badge
-
-    body_txt = str(mc.get("content") or "").strip()
-    if not mc.get("streaming") and not body_txt and not mc.get("error") and not mc.get("skipped"):
-        mc["skipped"] = True
-        mc["badge"] = fallback_badge
-        mc["content"] = f"*（该轮发言未完成：{fallback_badge}）*"
-    return mc
-
-
-def now_hhmmss() -> str:
-    return time.strftime("%H:%M:%S", time.localtime())
-
-
-def now_display_time() -> str:
-    return time.strftime("%m-%d %H:%M", time.localtime())
-
-
-def _norm_dedupe_key(text: str) -> str:
-    return re.sub(r"[^\w\u4e00-\u9fa5]+", "", (text or "").strip().lower())
-
-
-def summarize_topic_and_constraints(raw_topic: str) -> Tuple[str, List[str]]:
-    """
-    将用户输入议题提炼为：
-    1) 精炼短标题 topic_title（<= 28 字，避免白板粗体标题与顶栏重复铺满整段长文）；
-    2) 独立约束列表 extracted_constraints（仅当多行输入包含明确分点/附加条款时提取，绝不重复首句或整段原话）。
-    """
-    cleaned = (raw_topic or "").strip()
-    if not cleaned:
-        return "", []
-
-    lines = [ln.strip() for ln in cleaned.splitlines() if ln.strip()]
-    first_line = re.sub(r"^(?:[#>*•\-]+|\d+[.)、])\s*", "", lines[0]).strip()
-    first_clause = re.split(r"[。！？!?；;\n]", first_line)[0].strip()
-    candidate = first_clause or first_line
-    if len(candidate) > 28:
-        sub_clauses = [seg.strip() for seg in re.split(r"[，,：:——]+", candidate) if seg.strip()]
-        if sub_clauses and 4 <= len(sub_clauses[0]) <= 28:
-            candidate = sub_clauses[0]
-        else:
-            candidate = candidate[:27].rstrip("，,、：:；; ") + "…"
-
-    full_norm = _norm_dedupe_key(cleaned)
-    title_norm = _norm_dedupe_key(candidate)
-
-    extracted: List[str] = []
-    if len(lines) > 1:
-        for ln in lines[1:]:
-            item = re.sub(r"^(?:[-*•]+|\d+[.)、]|[①②③④⑤⑥⑦⑧⑨⑩])\s*", "", ln).strip()
-            if not item or len(item) < 3:
-                continue
-            item_norm = _norm_dedupe_key(item)
-            if not item_norm or item_norm == full_norm or item_norm == title_norm:
-                continue
-            clipped = item[:150] + ("…" if len(item) > 150 else "")
-            if all(_norm_dedupe_key(ex) != _norm_dedupe_key(clipped) for ex in extracted):
-                extracted.append(clipped)
-            if len(extracted) >= 8:
-                break
-
-    return candidate, extracted
-
-
-def dedupe_chair_constraints(topic: str, topic_title: str, constraints: List[str]) -> List[str]:
-    """清理白板主持约束中与完整议题或短标题重复的条目，保留真正的独立约束项。"""
-    if not isinstance(constraints, list):
-        return []
-    topic_norm = _norm_dedupe_key(topic)
-    title_norm = _norm_dedupe_key(topic_title)
-    out: List[str] = []
-    seen: set = set()
-    for raw in constraints:
-        txt = str(raw or "").strip()
-        if not txt:
-            continue
-        kn = _norm_dedupe_key(txt)
-        if not kn:
-            continue
-        if kn == topic_norm or kn == title_norm:
-            continue
-        # 若某条约束与整段长议题高度重合（前缀相同且长度占议题 85% 以上），视为整段重复予以剔除
-        if topic_norm and len(topic_norm) >= 24 and len(kn) >= int(len(topic_norm) * 0.85):
-            if kn.startswith(topic_norm[:24]) or topic_norm.startswith(kn[:24]):
-                continue
-        if kn not in seen:
-            seen.add(kn)
-            out.append(txt)
-    return out[:16]
 
 
 @dataclass
@@ -963,6 +534,7 @@ class RoundtableOrchestrator:
         self.boot_id = boot_id or f"boot_{uuid.uuid4().hex[:12]}"
         self.runtime_code_root = os.path.realpath(runtime_code_root or str(Path(__file__).resolve().parent.parent))
         self.config_ver: int = 1
+        self._verify_cmds_by_workspace: Dict[str, str] = {}
         self.config_file = os.path.join(self.data_dir, "config.json")
         self.sessions_file = os.path.join(self.data_dir, "sessions.json")
         self._persist_handle: Optional[asyncio.TimerHandle] = None
@@ -1009,8 +581,8 @@ class RoundtableOrchestrator:
                 sess.pending_recovery_backup = bk
                 sess.whiteboard["recovery_required"] = True
                 sess.whiteboard["consensus_status"] = "检测到上次执行异常中断，请核对文件哈希后恢复"
-            elif bk.state == "rollbackable" and bk.is_rollbackable:
-                if os.path.realpath(sess.workspace_dir or self.settings.workspace_dir) == bk.cwd:
+            elif bk.state in ("rollbackable", "rolling_back") and bk.is_rollbackable:
+                if os.path.realpath(sess.workspace_dir or self.settings.workspace_dir or "") == bk.cwd:
                     sess.last_backup = bk
                     sess.whiteboard["can_rollback"] = True
                     sess.whiteboard["exec_diff"] = bk.worktree_diff
@@ -1086,9 +658,11 @@ class RoundtableOrchestrator:
                         pass
 
                 if schema_ver >= 8:
-                    raw_pm = str(data.get("pacing_mode", "unrestricted") or "unrestricted").strip().lower()
+                    raw_pm = str(data.get("pacing_mode", "standard") or "standard").strip().lower()
+                    if raw_pm == "extended":
+                        raw_pm = "unrestricted"
                     self.settings.pacing_mode = (
-                        raw_pm if raw_pm in ("unrestricted", "standard", "custom") else "unrestricted"
+                        raw_pm if raw_pm in ("unrestricted", "standard", "custom") else "standard"
                     )
                     if "idle_timeout_sec" in data:
                         try:
@@ -1100,11 +674,15 @@ class RoundtableOrchestrator:
                     if "turn_timeout_sec" in data:
                         try:
                             raw_turn = int(data["turn_timeout_sec"])
+                            min_turn = 2 if os.environ.get("AI_ROUNDTABLE_FAST_TEST") == "1" else 30
                             self.settings.turn_timeout_sec = (
-                                DEFAULT_TURN_TIMEOUT_SEC if raw_turn <= 0 else max(30, min(3600, raw_turn))
+                                DEFAULT_TURN_TIMEOUT_SEC if raw_turn <= 0 else max(min_turn, min(14400, raw_turn))
                             )
                         except Exception:
                             pass
+                    if self.settings.pacing_mode == "unrestricted" and ("idle_timeout_sec" not in data or "turn_timeout_sec" not in data):
+                        self.settings.idle_timeout_sec = 600
+                        self.settings.turn_timeout_sec = 1800
                     if self.settings.idle_timeout_sec <= 0:
                         self.settings.idle_timeout_sec = DEFAULT_IDLE_TIMEOUT_SEC
                     if self.settings.turn_timeout_sec <= 0:
@@ -1119,8 +697,19 @@ class RoundtableOrchestrator:
                     self.settings.idle_timeout_sec = DEFAULT_IDLE_TIMEOUT_SEC
                     self.settings.turn_timeout_sec = DEFAULT_TURN_TIMEOUT_SEC
                     self.settings.max_ref_chars = MAX_ROUND_SOURCE_CHARS
+                raw_vmap = data.get("verify_cmds_by_workspace")
+                if isinstance(raw_vmap, dict):
+                    self._verify_cmds_by_workspace = {
+                        os.path.realpath(os.path.expanduser(str(k))): str(v).strip()[:500]
+                        for k, v in raw_vmap.items()
+                        if str(k).strip() and isinstance(v, str) and str(v).strip()
+                    }
                 if "post_exec_verify_cmd" in data and isinstance(data["post_exec_verify_cmd"], str):
-                    self.settings.post_exec_verify_cmd = data["post_exec_verify_cmd"].strip()[:500]
+                    legacy_vcmd = data["post_exec_verify_cmd"].strip()[:500]
+                    bound_def, real_def = is_real_bound_workspace(self.settings.workspace_dir)
+                    if legacy_vcmd and bound_def and real_def and real_def not in self._verify_cmds_by_workspace:
+                        self._verify_cmds_by_workspace[os.path.realpath(real_def)] = legacy_vcmd
+                    self.settings.post_exec_verify_cmd = self.get_verify_cmd_for_workspace(self.settings.workspace_dir)
                 if "single_cli_concurrency" in data:
                     try:
                         self.settings.single_cli_concurrency = max(1, min(6, int(data["single_cli_concurrency"])))
@@ -1156,16 +745,43 @@ class RoundtableOrchestrator:
                 normalized_changed = self._normalize_agent_efforts()
                 self.settings.invalidate_status_cache()
                 self._sync_agent_meta_names()
-                if schema_ver < 9 or normalized_changed:
+                if schema_ver < 11 or normalized_changed:
                     self._save_persisted_config()
         except Exception:
             pass
+
+    def get_verify_cmd_for_workspace(self, raw_ws: str) -> str:
+        bound, real_ws = is_real_bound_workspace(raw_ws)
+        if not bound or not real_ws:
+            return ""
+        return str(self._verify_cmds_by_workspace.get(os.path.realpath(real_ws), "") or "")
+
+    def set_verify_cmd_for_workspace(self, raw_ws: str, cmd: str) -> None:
+        bound, real_ws = is_real_bound_workspace(raw_ws)
+        if not bound or not real_ws:
+            return
+        clean_cmd = str(cmd or "").strip()[:500]
+        key = os.path.realpath(real_ws)
+        if clean_cmd:
+            self._verify_cmds_by_workspace[key] = clean_cmd
+        else:
+            self._verify_cmds_by_workspace.pop(key, None)
+
+    def _is_within_runtime_code_root(self, candidate_ws: str) -> bool:
+        if not candidate_ws or not self.runtime_code_root:
+            return False
+        try:
+            cand_real = Path(os.path.realpath(os.path.expanduser(candidate_ws)))
+            code_real = Path(os.path.realpath(self.runtime_code_root))
+            return cand_real == code_real or cand_real.is_relative_to(code_real)
+        except Exception:
+            return False
 
     def _save_persisted_config(self) -> None:
         try:
             os.makedirs(self.data_dir, exist_ok=True)
             payload = {
-                "config_schema_version": 10,
+                "config_schema_version": 11,
                 "workspace_dir": self.settings.workspace_dir,
                 "allow_single_cli_fallback": self.settings.allow_single_cli_fallback,
                 "roster_preset": self.settings.roster_preset,
@@ -1174,7 +790,8 @@ class RoundtableOrchestrator:
                 "idle_timeout_sec": self.settings.idle_timeout_sec,
                 "turn_timeout_sec": self.settings.turn_timeout_sec,
                 "max_ref_chars": self.settings.max_ref_chars,
-                "post_exec_verify_cmd": self.settings.post_exec_verify_cmd,
+                "post_exec_verify_cmd": self.get_verify_cmd_for_workspace(self.settings.workspace_dir),
+                "verify_cmds_by_workspace": dict(self._verify_cmds_by_workspace),
                 "agents": {
                     aid: {
                         "driver": cfg.driver,
@@ -1595,47 +1212,142 @@ class RoundtableOrchestrator:
         raw_ws = (sess.workspace_dir if sess and sess.workspace_dir else self.settings.workspace_dir) or ""
         return await list_workspace_files_async(raw_ws, query=query, limit=limit)
 
-    def validate_safe_workspace_path(self, raw_path: str, *, allow_default_sandbox: bool = False) -> Tuple[bool, str]:
-        """校验目标工作区路径存在且绝不落入 ~/.ai-roundtable 私有状态目录或任何 .app 包资源目录。"""
+    def validate_safe_workspace_path_detailed(
+        self,
+        raw_path: str,
+        *,
+        allow_default_sandbox: bool = False,
+    ) -> Tuple[bool, str, dict]:
+        """
+        工作区爆炸半径前置硬拦截与 128 MiB 准入容量预检：
+        拒绝磁盘根目录、用户家目录 $HOME、~/.ai-roundtable、.app 包内路径、本机凭证与密钥目录及超 128 MiB 目录。
+        """
         cleaned = str(raw_path or "").strip()
         if not cleaned:
-            return False, "工作区路径不能为空"
+            return False, "工作区路径不能为空", {"reason": "empty_workspace_path"}
         expanded = os.path.expanduser(cleaned)
         if not os.path.isdir(expanded):
-            return False, f"目标目录不存在：{expanded}"
+            return False, f"目标目录不存在：{expanded}", {"reason": "missing_workspace"}
         real_target = Path(os.path.realpath(expanded))
         data_root = Path(os.path.realpath(self.data_dir))
         default_sb = (data_root / "workspace").resolve()
         if allow_default_sandbox and real_target == default_sb:
-            return True, str(real_target)
+            return True, str(real_target), {}
+
+        # 1. 磁盘根目录与系统顶层目录拦截
+        if real_target == Path(real_target.anchor):
+            return False, f"禁止将磁盘根目录（{real_target}）绑定为项目工作区", {"reason": "filesystem_root_forbidden"}
+        if os.name != "nt" and str(real_target) in ("/Users", "/System", "/Volumes", "/Library", "/etc", "/var", "/private"):
+            return False, f"禁止将系统顶层目录（{real_target}）绑定为项目工作区", {"reason": "system_dir_forbidden"}
+
+        # 2. 用户家目录 $HOME 硬拦截
+        home_candidates: Set[Path] = {Path(os.path.realpath(os.path.expanduser("~")))}
+        for env_k in ("HOME", "USERPROFILE"):
+            ev = os.environ.get(env_k, "").strip()
+            if ev and os.path.isdir(ev):
+                home_candidates.add(Path(os.path.realpath(ev)))
+        for h_root in home_candidates:
+            if real_target == h_root:
+                return False, "禁止将用户家目录（$HOME）直接绑定为项目工作区，请选择具体项目子目录", {"reason": "home_dir_forbidden"}
+
+        # 3. 私有状态目录与 .app 应用包拦截
         if real_target == data_root or real_target.is_relative_to(data_root):
-            return False, "禁止将 ~/.ai-roundtable 内部状态目录绑定为项目工作区"
+            return False, "禁止将 ~/.ai-roundtable 内部状态目录绑定为项目工作区", {"reason": "runtime_state_dir_forbidden"}
         for part in real_target.parts:
             if part.endswith(".app"):
-                return False, "禁止将 macOS .app 应用包内部资源目录绑定为项目工作区"
-        return True, str(real_target)
+                return False, "禁止将 macOS .app 应用包内部资源目录绑定为项目工作区", {"reason": "app_bundle_forbidden"}
+
+        # 4. 本机凭证与密钥敏感目录拦截
+        sensitive_rel_dirs = (
+            ".ssh",
+            ".gnupg",
+            ".aws",
+            ".kube",
+            ".config/gcloud",
+            "Library/Keychains",
+            "AppData",
+            "AppData/Roaming",
+            "AppData/Local",
+            "AppData/Roaming/Microsoft/Credentials",
+            "AppData/Local/Microsoft/Credentials",
+            "AppData/Roaming/Microsoft/Protect",
+        )
+        for h_root in home_candidates:
+            for s_rel in sensitive_rel_dirs:
+                sens_p = Path(os.path.realpath(str(h_root / s_rel)))
+                if real_target == sens_p or real_target.is_relative_to(sens_p):
+                    return (
+                        False,
+                        f"禁止将本机凭证或密钥敏感目录（~/{s_rel}）绑定为项目工作区",
+                        {"reason": "sensitive_credentials_dir_forbidden"},
+                    )
+        for env_app in ("APPDATA", "LOCALAPPDATA"):
+            ap_val = os.environ.get(env_app, "").strip()
+            if ap_val and os.path.isdir(ap_val):
+                ap_real = Path(os.path.realpath(ap_val))
+                if real_target == ap_real or real_target.is_relative_to(ap_real):
+                    return (
+                        False,
+                        f"禁止将 Windows AppData 凭据与配置目录绑定为项目工作区",
+                        {"reason": "sensitive_credentials_dir_forbidden"},
+                    )
+
+        # 5. 128 MiB 准入容量前置预检
+        cap_ok, total_b, largest_dirs, cap_err = precheck_workspace_capacity(str(real_target))
+        if not cap_ok:
+            return (
+                False,
+                cap_err,
+                {
+                    "reason": "workspace_too_large",
+                    "total_bytes": total_b,
+                    "max_bytes": MAX_BACKUP_WORKSPACE_BYTES,
+                    "largest_dirs": largest_dirs,
+                },
+            )
+
+        return True, str(real_target), {"total_bytes": total_b, "largest_dirs": largest_dirs}
+
+    def validate_safe_workspace_path(self, raw_path: str, *, allow_default_sandbox: bool = False) -> Tuple[bool, str]:
+        ok, res_or_err, _ = self.validate_safe_workspace_path_detailed(
+            raw_path, allow_default_sandbox=allow_default_sandbox
+        )
+        return ok, res_or_err
 
     def update_default_workspace_only(self, new_default_ws: str) -> dict:
-        """pick-folder 弹窗专用：仅更新新建会话默认目录（及尚未发起议题的空闲草稿），绝不篡改已有会话。"""
-        real_ws = os.path.realpath(os.path.expanduser(new_default_ws.strip()))
+        """仅更新新建会话默认工作区偏好，绝不篡改任何已存在活跃会话或未开题会话的工作区与快照状态。"""
+        cleaned = str(new_default_ws or "").strip()
+        real_ws = os.path.realpath(os.path.expanduser(cleaned)) if cleaned else ""
         self.settings.workspace_dir = real_ws
+        self.settings.post_exec_verify_cmd = self.get_verify_cmd_for_workspace(real_ws)
         self.config_ver += 1
-        for s in self.sessions.values():
-            if not s.is_busy and s.stage == "idle" and _empty_session_draft(s.topic, s.messages, s.whiteboard):
-                s.workspace_dir = real_ws
         self._save_persisted_config()
         return self.get_system_status()
 
-    async def switch_session_workspace(self, sess: MeetingSession, target_ws: str) -> Tuple[int, dict]:
-        """POST /api/sessions/{sid}/workspace 唯一入口：支持绑定安全本地目录或切回纯研讨（target_ws=""）。"""
+    async def switch_session_workspace(
+        self,
+        sess: MeetingSession,
+        target_ws: str,
+        *,
+        confirm_abandon_rollback: bool = False,
+    ) -> Tuple[int, dict]:
+        """
+        会话工作区变更唯一互斥闸门（POST /api/sessions/{sid}/workspace）：
+        - is_busy 或 recovery_required 一律返回 409；
+        - 持有未归档可回滚快照且未传 confirm_abandon_rollback=True 时返回 409 提示单独确认；
+        - 用户确认后先将磁盘备份清单持久化 fsync 为 archived，随后才清空内存 last_backup 并完成换绑。
+        """
         cleaned_target = str(target_ws or "").strip()
         if cleaned_target == "":
             real_ws = ""
         else:
-            ok_p, res_or_err = self.validate_safe_workspace_path(cleaned_target, allow_default_sandbox=False)
+            ok_p, res_or_err, ws_details = self.validate_safe_workspace_path_detailed(
+                cleaned_target, allow_default_sandbox=False
+            )
             if not ok_p:
-                return 400, {"ok": False, "error": res_or_err}
+                return 400, {"ok": False, "error": res_or_err, **ws_details}
             real_ws = res_or_err
+
         async with sess.session_lock:
             if sess.is_busy or sess.exec_state != "idle" or sess.stage in (
                 "opening_parallel",
@@ -1643,18 +1355,65 @@ class RoundtableOrchestrator:
                 "chair_interrupt",
                 "executing",
             ):
-                return 409, {"ok": False, "error": "会话当前正在运行中，请待空闲后再切换绑定工作区"}
+                return 409, {
+                    "ok": False,
+                    "reason": "session_busy",
+                    "error": "会话当前正在运行中，请待空闲后再切换绑定工作区",
+                }
             if sess.recovery_required:
-                return 409, {"ok": False, "error": "当前会话存在待确认恢复的崩溃快照，请先处理恢复后再切换工作区"}
+                return 409, {
+                    "ok": False,
+                    "reason": "recovery_required",
+                    "error": "当前会话存在待确认恢复的崩溃快照，请先处理恢复后再切换工作区",
+                }
+
             old_real = os.path.realpath(sess.workspace_dir) if sess.workspace_dir else ""
             if old_real != real_ws:
-                if sess.last_backup and sess.last_backup.is_rollbackable:
-                    sess.last_backup.mark_acknowledged()
+                for probe_ws in (old_real, real_ws):
+                    if probe_ws and os.path.isdir(probe_ws):
+                        try:
+                            with WorkspaceWriteLock(
+                                probe_ws,
+                                session_id=sess.session_id,
+                                run_id="ws_switch_probe",
+                                runtime_home=Path(self.data_dir),
+                            ):
+                                pass
+                        except WorkspaceLockBusyError as lock_exc:
+                            return 409, {
+                                "ok": False,
+                                "reason": "workspace_locked",
+                                "holder": lock_exc.holder,
+                                "error": str(lock_exc),
+                            }
+
+                if sess.last_backup is not None and sess.last_backup.is_rollbackable:
+                    if not confirm_abandon_rollback:
+                        return 409, {
+                            "ok": False,
+                            "reason": "confirm_abandon_rollback_required",
+                            "can_rollback": True,
+                            "previous_workspace_dir": old_real,
+                            "error": "当前会话持有上一工作区未归档的可回滚快照，请先回滚，或显式确认放弃该可回滚快照后再切换目录",
+                        }
+                    bk_to_archive = sess.last_backup
+                    await asyncio.to_thread(bk_to_archive.mark_acknowledged)
+                    self.store.record_exec_recovery(
+                        run_id=bk_to_archive.run_id,
+                        session_id=sess.session_id,
+                        workspace_realpath=bk_to_archive.cwd,
+                        backup_dir=str(bk_to_archive.backup_dir),
+                        state="archived",
+                    )
                 sess.last_backup = None
                 sess.whiteboard["can_rollback"] = False
+                sess.whiteboard["verification_failed"] = False
                 sess.whiteboard["exec_diff"] = ""
+
             sess.workspace_dir = real_ws
+            sess.whiteboard["post_exec_verify_cmd"] = self.get_verify_cmd_for_workspace(real_ws)
             sess.updated_ts = time.time()
+
         if real_ws:
             invalidate_workspace_index(real_ws)
         await self._broadcast_meta(sess)
@@ -1665,21 +1424,47 @@ class RoundtableOrchestrator:
             "workspace_dir": real_ws,
             "workspace_bound": is_real_bound_workspace(real_ws)[0],
             "workspace_is_git": is_git_workspace(real_ws),
+            "is_runtime_code_root": self._is_within_runtime_code_root(real_ws),
+            "post_exec_verify_cmd": self.get_verify_cmd_for_workspace(real_ws),
             "session": sess.to_snapshot(),
         }
 
     def update_runtime_config(self, payload: dict, active_session_id: str = "") -> dict:
+        if "agents" in payload and isinstance(payload["agents"], dict):
+            for s in self.sessions.values():
+                if s.is_busy or s.recovery_required or s.exec_state != "idle":
+                    in_flight_seats = set(s.enabled_agents) | {s.effective_executor_agent()}
+                    if s.recovery_required:
+                        in_flight_seats = set(ALL_SEAT_IDS)
+                    for aid in in_flight_seats:
+                        acfg = payload["agents"].get(aid)
+                        if not isinstance(acfg, dict) or aid not in self.settings.agents:
+                            continue
+                        cur_cfg = self.settings.agents[aid]
+                        next_drv = str(acfg.get("driver", cur_cfg.driver) or cur_cfg.driver).strip()
+                        next_bin = (
+                            str(acfg.get("custom_binary") or "").strip()
+                            if "custom_binary" in acfg
+                            else cur_cfg.custom_binary
+                        )
+                        if ("driver" in acfg and next_drv != cur_cfg.driver) or (
+                            "custom_binary" in acfg and next_bin != cur_cfg.custom_binary
+                        ):
+                            raise ExecutionAdmissionConflictError(
+                                f"会话 {s.session_id} 处于运行中或待恢复状态，禁止热修改在途席位（{aid}）的 CLI 驱动或二进制路径",
+                                status_code=409,
+                                details={
+                                    "reason": "in_flight_driver_change_forbidden",
+                                    "session_id": s.session_id,
+                                    "agent_id": aid,
+                                },
+                            )
+
         self.config_ver += 1
         if "workspace_dir" in payload and isinstance(payload["workspace_dir"], str):
-            wdir = os.path.expanduser(payload["workspace_dir"].strip())
-            if wdir:
-                self.settings.workspace_dir = wdir
-                for sid, s in self.sessions.items():
-                    if sid == active_session_id or not s.topic:
-                        if os.path.realpath(s.workspace_dir) != os.path.realpath(wdir):
-                            s.last_backup = None
-                            s.whiteboard["can_rollback"] = False
-                        s.workspace_dir = wdir
+            wdir = payload["workspace_dir"].strip()
+            self.settings.workspace_dir = os.path.realpath(os.path.expanduser(wdir)) if wdir else ""
+
         if "allow_single_cli_fallback" in payload:
             self.settings.allow_single_cli_fallback = bool(payload["allow_single_cli_fallback"])
         if "roster_preset" in payload:
@@ -1691,43 +1476,41 @@ class RoundtableOrchestrator:
                 self.settings.single_cli_concurrency = max(1, min(6, int(payload["single_cli_concurrency"])))
             except Exception:
                 pass
+
         if "post_exec_verify_cmd" in payload and isinstance(payload["post_exec_verify_cmd"], str):
-            self.settings.post_exec_verify_cmd = payload["post_exec_verify_cmd"].strip()[:500]
+            vcmd_clean = payload["post_exec_verify_cmd"].strip()[:500]
+            target_sess = self.sessions.get(active_session_id) if active_session_id else None
+            bind_ws = (target_sess.workspace_dir if target_sess and target_sess.workspace_dir else self.settings.workspace_dir) or ""
+            self.set_verify_cmd_for_workspace(bind_ws, vcmd_clean)
+            if target_sess is not None:
+                target_sess.whiteboard["post_exec_verify_cmd"] = self.get_verify_cmd_for_workspace(target_sess.workspace_dir)
+            self.settings.post_exec_verify_cmd = self.get_verify_cmd_for_workspace(bind_ws or self.settings.workspace_dir)
 
         pm = str(payload.get("pacing_mode") or "").strip().lower()
         if pm in ("unrestricted", "extended", "standard", "custom"):
-            self.settings.pacing_mode = "extended" if pm == "unrestricted" else pm
-            if pm in ("unrestricted", "extended") and "idle_timeout_sec" not in payload and "turn_timeout_sec" not in payload:
+            norm_pm = "unrestricted" if pm in ("unrestricted", "extended") else pm
+            self.settings.pacing_mode = norm_pm
+            if norm_pm == "unrestricted" and payload.get("idle_timeout_sec") is None and payload.get("turn_timeout_sec") is None:
                 self.settings.idle_timeout_sec = 600
-                self.settings.turn_timeout_sec = 1200
-            elif pm == "standard" and "idle_timeout_sec" not in payload and "turn_timeout_sec" not in payload:
+                self.settings.turn_timeout_sec = 1800
+            elif norm_pm == "standard" and payload.get("idle_timeout_sec") is None and payload.get("turn_timeout_sec") is None:
                 self.settings.idle_timeout_sec = 300
                 self.settings.turn_timeout_sec = 600
 
-        if "idle_timeout_sec" in payload:
+        if payload.get("idle_timeout_sec") is not None:
             try:
                 raw_idle = int(payload["idle_timeout_sec"])
                 min_idle = 1 if os.environ.get("AI_ROUNDTABLE_FAST_TEST") == "1" else 15
                 self.settings.idle_timeout_sec = DEFAULT_IDLE_TIMEOUT_SEC if raw_idle <= 0 else max(min_idle, min(7200, raw_idle))
             except Exception:
                 pass
-        if "turn_timeout_sec" in payload:
+        if payload.get("turn_timeout_sec") is not None:
             try:
                 raw_turn = int(payload["turn_timeout_sec"])
                 min_turn = 2 if os.environ.get("AI_ROUNDTABLE_FAST_TEST") == "1" else 30
                 self.settings.turn_timeout_sec = DEFAULT_TURN_TIMEOUT_SEC if raw_turn <= 0 else max(min_turn, min(14400, raw_turn))
             except Exception:
                 pass
-        if pm == "unrestricted" and payload.get("pacing_mode") == "unrestricted":
-            if payload.get("idle_timeout_sec") is None:
-                self.settings.idle_timeout_sec = 900
-            if payload.get("turn_timeout_sec") is None:
-                self.settings.turn_timeout_sec = DEFAULT_TURN_TIMEOUT_SEC
-        elif pm == "standard" and payload.get("pacing_mode") == "standard":
-            if payload.get("idle_timeout_sec") is None:
-                self.settings.idle_timeout_sec = 300
-            if payload.get("turn_timeout_sec") is None:
-                self.settings.turn_timeout_sec = 600
 
         if "max_ref_chars" in payload:
             try:
@@ -1774,32 +1557,16 @@ class RoundtableOrchestrator:
         self._save_persisted_config()
         inspected = self.settings.inspect_status(force_refresh=True)
         for sid, sess in self.sessions.items():
-            if updated_personas and (sid == active_session_id or not sess.topic):
-                for aid, p_key in updated_personas.items():
-                    sess.seat_personas[aid] = p_key
-            if updated_efforts and (sid == active_session_id or not sess.topic):
-                for aid in updated_efforts:
-                    sess.seat_efforts.pop(aid, None)
+            if not sess.is_busy and not sess.recovery_required:
+                if updated_personas and (sid == active_session_id or not sess.topic):
+                    for aid, p_key in updated_personas.items():
+                        sess.seat_personas[aid] = p_key
+                if updated_efforts and (sid == active_session_id or not sess.topic):
+                    for aid in updated_efforts:
+                        sess.seat_efforts.pop(aid, None)
             self._sync_seat_readiness(sess, inspected=inspected)
         self._save_persisted_sessions()
-        return {
-            "workspace_dir": self.settings.workspace_dir,
-            "workspace_bound": is_real_bound_workspace(self.settings.workspace_dir)[0],
-            "workspace_is_git": is_git_workspace(self.settings.workspace_dir),
-            "allow_single_cli_fallback": self.settings.allow_single_cli_fallback,
-            "roster_preset": self.settings.roster_preset,
-            "roster_presets": ROSTER_NAME_PRESETS,
-            "single_cli_concurrency": self.settings.single_cli_concurrency,
-            "pacing_mode": self.settings.pacing_mode,
-            "idle_timeout_sec": self.settings.idle_timeout_sec,
-            "turn_timeout_sec": self.settings.turn_timeout_sec,
-            "max_ref_chars": self.settings.max_ref_chars,
-            "has_busy_session": self.has_any_busy_session(),
-            "collab_modes": COLLAB_MODES,
-            "persona_presets": PERSONA_PRESETS,
-            "model_effort_catalog": export_model_effort_catalog(),
-            "agents": inspected,
-        }
+        return self.get_system_status()
 
     async def update_session_seats(
         self,
@@ -1929,7 +1696,7 @@ class RoundtableOrchestrator:
     def _extract_resolution_bundle(cls, markdown_text: str) -> Tuple[List[dict], List[dict]]:
         """
         从《会议最终决议》正文中精准分离两类产物：
-        1) active_entries: 已确认采纳成果（decision）、边界风险（risk）、待执行交付任务（action），上限放宽至 60 条防长文截断遗漏；
+        1) active_entries: 已确认采纳成果（decision）、边界风险（risk）、待执行交付任务（action），按分区独立配额防止长文截断导致任务区饥饿；
         2) abandoned_entries: 第二节『已确认放弃与证伪淘汰方案』及 [白板: 弃案=...] 中的负面清单，100% 物理隔离防回流！
         """
         if not markdown_text:
@@ -1938,9 +1705,10 @@ class RoundtableOrchestrator:
         abandoned_entries: List[dict] = []
         seen_active_norms: Set[str] = set()
         seen_abandoned_norms: Set[str] = set()
+        kind_counts: Dict[str, int] = {"decision": 0, "risk": 0, "action": 0}
 
         def _push_abandoned(raw_t: str, reason_s: str = "决议确认淘汰") -> None:
-            t_clean = cls._smart_clip(raw_t.strip(), limit=220)
+            t_clean = cls._smart_clip(strip_markdown_links(raw_t).strip(), limit=220)
             nk = _norm_dedupe_key(t_clean)
             if not nk or len(t_clean) < 4 or nk in seen_abandoned_norms:
                 return
@@ -1948,14 +1716,18 @@ class RoundtableOrchestrator:
             abandoned_entries.append({"text": t_clean, "reason": reason_s})
 
         def _push_active(k_str: str, raw_t: str) -> None:
-            t_clean = cls._smart_clip(raw_t.strip(), limit=220)
+            eff_k = k_str if k_str in VALID_WB_KINDS else "decision"
+            if kind_counts.get(eff_k, 0) >= 40:
+                return
+            t_clean = cls._smart_clip(strip_markdown_links(raw_t).strip(), limit=220)
             nk = _norm_dedupe_key(t_clean)
             if not nk or len(t_clean) < 5 or is_whiteboard_noise(t_clean):
                 return
             if nk in seen_abandoned_norms or nk in seen_active_norms:
                 return
             seen_active_norms.add(nk)
-            active_entries.append({"kind": k_str if k_str in VALID_WB_KINDS else "decision", "text": t_clean})
+            kind_counts[eff_k] = kind_counts.get(eff_k, 0) + 1
+            active_entries.append({"kind": eff_k, "text": t_clean})
 
         _, tail_items = parse_structured_tail_with_kinds(markdown_text)
         for ti in tail_items:
@@ -1970,41 +1742,72 @@ class RoundtableOrchestrator:
 
         cleaned = re.sub(r"\[(?:状态|徽章|白板|白板要点)[:：][^\]]*\]", "", markdown_text)
         cleaned = re.sub(r"```[\s\S]*?```", "", cleaned)
+        cleaned = strip_markdown_links(cleaned)
 
+        major_kind = "decision"
         cur_kind = "decision"
         for raw_ln in cleaned.splitlines():
             ln = raw_ln.strip()
             if not ln:
                 continue
-            m_head = re.match(r"^(?:#{1,4}\s*|\*\*|[一二三四五六1-6][、.)）]\s*)(.+?)(?:\*\*)?[:：]?\s*$", ln)
-            if m_head and len(ln) <= 68 and not re.match(r"^[-*•]\s+", ln):
-                htxt = m_head.group(1)
+            m_head = re.match(r"^(#{1,4}\s*|\*\*|[一二三四五六1-6][、.)）]\s*)(.+?)(?:\*\*)?[:：]?\s*$", ln)
+            if m_head and len(ln) <= 84 and not re.match(r"^[-*•]\s+", ln):
+                prefix_tok = m_head.group(1).strip()
+                htxt = m_head.group(2).strip()
+                is_major_sec = bool(
+                    re.match(r"^[一二三四五六1-6][、.)）]", htxt)
+                    or re.match(r"^[一二三四五六1-6][、.)）]", prefix_tok)
+                    or (prefix_tok.startswith("#") and len(prefix_tok.rstrip()) <= 2 and not re.match(r"^(?:Phase|Step|Stage|阶段)\b", htxt, re.IGNORECASE))
+                )
+                is_phase_subhead = bool(
+                    not is_major_sec
+                    and re.match(r"^(?:Phase|Step|Stage|阶段|\d+(?:\.\d+)+|P[0-3])\b", htxt, re.IGNORECASE)
+                )
+                if is_phase_subhead and major_kind in ("action", "abandoned"):
+                    cur_kind = major_kind
+                    continue
+
+                next_kind: Optional[str] = None
                 if any(k in htxt for k in ("放弃", "弃案", "淘汰", "证伪", "废案", "负面清单", "不采用", "否决", "剔除")):
-                    cur_kind = "abandoned"
+                    next_kind = "abandoned"
+                elif any(k in htxt for k in ("待执行", "任务清单", "交付清单", "交付任务", "实施清单", "落地行动", "整改清单", "定稿清单", "走查清单")):
+                    next_kind = "action"
                 elif any(k in htxt for k in ("风险", "防线", "边界", "回滚", "异常", "隐患", "审计", "未决争议", "缺席")):
-                    cur_kind = "risk"
+                    next_kind = "risk" if (is_major_sec or major_kind != "action") else "action"
                 elif any(k in htxt for k in ("实施", "任务", "清单", "执行", "改动", "步骤", "文件", "落地", "走查", "矩阵", "排查", "定稿")):
-                    cur_kind = "action"
+                    next_kind = "action"
                 elif any(k in htxt for k in ("共识", "结论", "裁定", "取舍", "约束", "架构", "决议", "采纳", "成果")):
-                    cur_kind = "decision"
+                    next_kind = "decision" if (is_major_sec or major_kind != "action") else "action"
+
+                if next_kind:
+                    cur_kind = next_kind
+                    if is_major_sec:
+                        major_kind = next_kind
                 continue
 
-            m_b = re.match(r"^(?:[-*•]+|\d+[.)、]|[①②③④⑤⑥⑦⑧⑨⑩])\s*(?:\[[xX ]\]\s*)?(.+)$", ln)
+            m_b = re.match(r"^(?:[-*•]+|\d+[.)、]|[①②③④⑤⑥⑦⑧⑨⑩])\s*(?:\[([xX✓✔ ])\]\s*)?(.+)$", ln)
             if not m_b:
                 continue
-            item_txt = re.sub(r"\*\*([^*]+)\*\*", r"\1", m_b.group(1)).strip()
+            has_checkbox = m_b.group(1) is not None
+            item_txt = strip_markdown_links(m_b.group(2)).strip()
+            item_txt = re.sub(r"\*\*([^*]+)\*\*", r"\1", item_txt).strip()
             item_txt = re.sub(r"`([^`]+)`", r"\1", item_txt).strip()
             if len(item_txt) < 5 or is_whiteboard_noise(item_txt):
                 continue
-            if item_txt in ("暂无记录", "暂无", "无", "（无）", "（暂无已确认放弃方案）"):
+            if item_txt in ("暂无记录", "暂无", "无", "（无）", "（暂无已确认放弃方案）", "暂无待执行交付项"):
                 continue
             inferred_kind = cur_kind
             if any(item_txt.startswith(pfx) for pfx in ("[已淘汰]", "[放弃]", "[弃案]", "弃案：", "淘汰：", "放弃方案：", "不采用：")):
                 inferred_kind = "abandoned"
             elif inferred_kind != "abandoned":
-                if any(item_txt.startswith(pfx) for pfx in ("风险：", "风险:", "隐患：", "防线：", "边界：")):
+                if has_checkbox or re.match(r"^P[0-3](?:-\d+)?\s+", item_txt, re.IGNORECASE):
+                    inferred_kind = "action"
+                elif any(item_txt.startswith(pfx) for pfx in ("风险：", "风险:", "隐患：", "防线：", "边界：")):
                     inferred_kind = "risk"
-                elif any(item_txt.startswith(pfx) for pfx in ("任务：", "任务:", "修改 ", "新增 ", "重构 ", "走查：", "排查：")):
+                elif any(
+                    item_txt.startswith(pfx)
+                    for pfx in ("任务：", "任务:", "修改 ", "新增 ", "重构 ", "删除 ", "清理 ", "剥离 ", "修复 ", "实现 ", "走查：", "排查：")
+                ):
                     inferred_kind = "action"
 
             if inferred_kind == "abandoned":
@@ -2012,8 +1815,6 @@ class RoundtableOrchestrator:
                 _push_abandoned(clean_ab or item_txt, "决议确认放弃与证伪淘汰")
             else:
                 _push_active(inferred_kind, item_txt)
-            if len(active_entries) >= 60:
-                break
 
         if seen_abandoned_norms:
             active_entries = [e for e in active_entries if _norm_dedupe_key(e["text"]) not in seen_abandoned_norms]
@@ -2096,8 +1897,33 @@ class RoundtableOrchestrator:
             ]
         return True
 
+    async def delete_session_attachment(self, sess: MeetingSession, att_id: str) -> bool:
+        """在 session_lock 内删除会话附件、同步清理 session_attachments、落盘 SQLite 并推送 SSE 增量帧。"""
+        clean_id = str(att_id or "").strip()
+        if not clean_id:
+            return False
+        async with sess.session_lock:
+            removed_disk = await asyncio.to_thread(self.attachments.delete_attachment, sess.session_id, clean_id)
+            sess_atts = sess.whiteboard.get("session_attachments")
+            removed_wb = False
+            if isinstance(sess_atts, list):
+                filtered = [x for x in sess_atts if isinstance(x, dict) and x.get("id") != clean_id]
+                if len(filtered) != len(sess_atts):
+                    sess.whiteboard["session_attachments"] = filtered
+                    removed_wb = True
+            if not removed_disk and not removed_wb:
+                return False
+            sess.whiteboard["wb_version"] = max(1, int(sess.whiteboard.get("wb_version") or 1)) + 1
+            sess.updated_ts = time.time()
+        await self.broadcast(sess, "attachment_deleted", {"id": clean_id, "wb_version": sess.whiteboard["wb_version"]})
+        await self.broadcast(sess, "whiteboard_update", sess.whiteboard)
+        self._persist_single_session(sess, immediate=True)
+        return True
+
     async def update_whiteboard_manual(self, sess: MeetingSession, payload: dict) -> dict:
-        wb = _normalize_and_sync_whiteboard(sess.whiteboard, topic=sess.topic, messages=sess.messages)
+        wb = _normalize_and_sync_whiteboard(
+            sess.whiteboard, topic=sess.topic, messages=sess.messages, seat_states=sess.seat_states
+        )
         wb.pop("conflict", None)
         wb.pop("conflict_message", None)
         wb.pop("conflict_item", None)
@@ -2176,8 +2002,22 @@ class RoundtableOrchestrator:
             }.get(bucket_key, default_kind)
 
         if op == "acknowledge_absent":
+            raw_ack_ids = payload.get("acknowledged_absent_agents", payload.get("agent_ids"))
+            ack_filter = (
+                {str(x).strip().lower() for x in raw_ack_ids if str(x).strip()}
+                if isinstance(raw_ack_ids, list)
+                else None
+            )
             for ab_s in wb.get("absent_seats") or []:
-                if isinstance(ab_s, dict) and not ab_s.get("acknowledged"):
+                if not isinstance(ab_s, dict):
+                    continue
+                aid_ab = str(ab_s.get("agent_id") or "").strip().lower()
+                if ack_filter is not None:
+                    new_ack = aid_ab in ack_filter
+                    if bool(ab_s.get("acknowledged")) != new_ack:
+                        ab_s["acknowledged"] = new_ack
+                        mutated = True
+                elif not ab_s.get("acknowledged"):
                     ab_s["acknowledged"] = True
                     mutated = True
 
@@ -2567,10 +2407,12 @@ class RoundtableOrchestrator:
             "idle_timeout_sec": self.settings.idle_timeout_sec,
             "turn_timeout_sec": self.settings.turn_timeout_sec,
             "max_ref_chars": self.settings.max_ref_chars,
-            "post_exec_verify_cmd": self.settings.post_exec_verify_cmd,
+            "post_exec_verify_cmd": self.get_verify_cmd_for_workspace(self.settings.workspace_dir),
+            "verify_cmds_by_workspace": dict(self._verify_cmds_by_workspace),
             "has_busy_session": self.has_any_busy_session(),
             "collab_modes": COLLAB_MODES,
             "persona_presets": PERSONA_PRESETS,
+            "driver_catalog": load_driver_catalog(),
             "model_effort_catalog": export_model_effort_catalog(),
             "agents": self.settings.inspect_status(),
         }
@@ -3812,7 +3654,7 @@ class RoundtableOrchestrator:
 
     @staticmethod
     def _smart_clip(text: str, limit: int = 165) -> str:
-        s = text.strip()
+        s = strip_markdown_links(text or "").strip()
         if len(s) <= limit:
             return s
         cut = s[:limit]
@@ -3828,6 +3670,7 @@ class RoundtableOrchestrator:
             return []
         cleaned = re.sub(r"\[(?:状态|徽章|白板|白板要点)[:：][^\]]*\]", "", text)
         cleaned = re.sub(r"```[\s\S]*?```", "", cleaned)
+        cleaned = strip_markdown_links(cleaned)
         cleaned = re.sub(r"\*\*([^*]+)\*\*", r"\1", cleaned)
         cleaned = re.sub(r"`([^`]+)`", r"\1", cleaned)
 
@@ -3836,7 +3679,7 @@ class RoundtableOrchestrator:
             ln = raw_line.strip()
             if not ln or ln.startswith("#"):
                 continue
-            m_bullet = re.match(r"^(?:[-*•]|\d+[.)、]|[①②③④⑤])\s*(.+)$", ln)
+            m_bullet = re.match(r"^(?:[-*•]|\d+[.)、]|[①②③④⑤])\s*(?:\[[xX✓✔ ]\]\s*)?(.+)$", ln)
             if m_bullet:
                 candidate = m_bullet.group(1).strip()
                 if len(candidate) >= 6 and not is_whiteboard_noise(candidate):
@@ -3863,9 +3706,38 @@ class RoundtableOrchestrator:
 
     def _can_session_auto_promote_decision(self, sess: MeetingSession) -> bool:
         """Section 一.5：统计实际成功驱动族（基于 realpath 防软链接绕过），< 2 时严禁自动升格 decision。"""
-        fams = compute_effective_driver_families(sess.round_driver_records)
+        records = list(sess.round_driver_records)
+        if not records and sess.messages:
+            inspected = self.settings.inspect_status()
+            for m in sess.messages:
+                if (
+                    isinstance(m, dict)
+                    and m.get("speaker") in AGENT_META
+                    and not m.get("streaming")
+                    and not m.get("error")
+                    and not m.get("skipped")
+                    and str(m.get("content") or "").strip()
+                ):
+                    sp = str(m["speaker"])
+                    m_drv = str(m.get("driver") or "").strip().lower()
+                    s_info = inspected.get(sp) or {}
+                    eff_drv = m_drv or str(s_info.get("effective_driver") or "").strip().lower()
+                    b_path = (
+                        str(s_info.get("binary_path") or "")
+                        if (not m_drv or m_drv == str(s_info.get("effective_driver") or "").strip().lower())
+                        else ""
+                    )
+                    if eff_drv:
+                        records.append(
+                            {
+                                "agent_id": sp,
+                                "status": "success",
+                                "driver": eff_drv,
+                                "binary_path": b_path,
+                            }
+                        )
+        fams = compute_effective_driver_families(records)
         if not fams:
-            # 尚未积累到跨席异构成功记录时，预检当前启用且就绪席位的潜在异构驱动族；若配置本身同源则立即阻断，若仅 1 席成功亦阻断
             return False
         return can_auto_promote_consensus_decision(
             enabled_seat_count=len(sess.enabled_agents),
@@ -3882,9 +3754,14 @@ class RoundtableOrchestrator:
         source_msg_id: str = "",
     ) -> None:
         p_key = sess.seat_personas.get(agent_id) or DEFAULT_SEAT_PERSONAS.get(agent_id, "planner")
-        default_kind = get_persona_spec(p_key, fallback_agent_id=agent_id).get("wb_kind", "decision")
+        seat_wb_kind = str((sess.seat_states.get(agent_id) or {}).get("wb_kind") or "").strip().lower()
+        default_kind = (
+            seat_wb_kind
+            if seat_wb_kind in VALID_WB_KINDS
+            else get_persona_spec(p_key, fallback_agent_id=agent_id).get("wb_kind", DEFAULT_SEAT_WB_KINDS.get(agent_id, "decision"))
+        )
         if default_kind not in VALID_WB_KINDS:
-            default_kind = "decision"
+            default_kind = DEFAULT_SEAT_WB_KINDS.get(agent_id, "decision")
 
         # 实时识别正文中 [放弃原方案：...] 与 [修正原方案：旧 -> 新] 标记，立即归入弃案清单防污染白板
         seat_disp = self._seat_name(sess, agent_id)
@@ -5496,6 +5373,127 @@ class RoundtableOrchestrator:
         finally:
             ws_lock.release()
 
+    def _verify_execution_consistency_contract_locked(
+        self,
+        sess: MeetingSession,
+        *,
+        expected_wb_version: Optional[int],
+        checked_action_ids: Optional[List[str]],
+        expected_workspace_dir: Optional[str],
+        acknowledged_absent_agents: Optional[List[str]],
+        require_consistency_contract: bool,
+    ) -> Tuple[List[dict], Set[str]]:
+        def _conflict_details(reason: str, **extra) -> dict:
+            snap = sess.to_snapshot()
+            out = {
+                "reason": reason,
+                "session": snap,
+                "whiteboard": copy.deepcopy(sess.whiteboard),
+            }
+            out.update(extra)
+            return out
+
+        self._refresh_epistemic_status(sess)
+        wb_items_now = sess.whiteboard.get("items") or []
+        checked_actions = [
+            it
+            for it in wb_items_now
+            if isinstance(it, dict)
+            and it.get("kind") == "action"
+            and bool(it.get("checked", False))
+            and str(it.get("text") or "").strip()
+        ]
+        if len(checked_actions) < 1:
+            raise ExecutionAdmissionConflictError(
+                "尚无已勾选待执行任务（checked_action_count = 0），请先在会议白板核对并勾选至少 1 项任务后再启动执行",
+                status_code=409,
+                details=_conflict_details("no_checked_tasks", checked_action_count=0),
+            )
+
+        ack_set: Set[str] = (
+            {str(x).strip().lower() for x in acknowledged_absent_agents if str(x).strip()}
+            if isinstance(acknowledged_absent_agents, list)
+            else set()
+        )
+        absent_list = sess.whiteboard.get("absent_seats") or []
+        still_unacked = [
+            ab
+            for ab in absent_list
+            if isinstance(ab, dict)
+            and ab.get("abnormal", True)
+            and not ab.get("acknowledged", False)
+            and str(ab.get("agent_id") or "").strip().lower() not in ack_set
+        ]
+        if still_unacked:
+            ab_names = "、".join(str(ab.get("seat_name") or ab.get("name") or ab.get("agent_id")) for ab in still_unacked)
+            raise ExecutionAdmissionConflictError(
+                f"存在未逐席确认的异常缺席席位（{ab_names}），请逐项勾选确认已知悉对应缺席风险后再执行交付",
+                status_code=409,
+                details=_conflict_details("unacknowledged_absent_seats", absent_seats=still_unacked),
+            )
+
+        if require_consistency_contract:
+            if (
+                expected_wb_version is None
+                or checked_action_ids is None
+                or expected_workspace_dir is None
+                or acknowledged_absent_agents is None
+            ):
+                raise ExecutionAdmissionConflictError(
+                    "执行请求缺少一致性版本契约字段（expected_wb_version / checked_action_ids / expected_workspace_dir / acknowledged_absent_agents）",
+                    status_code=409,
+                    details=_conflict_details("missing_execution_contract"),
+                )
+            cur_wb_ver = max(1, int(sess.whiteboard.get("wb_version") or 1))
+            if int(expected_wb_version) != cur_wb_ver:
+                raise ExecutionAdmissionConflictError(
+                    f"白板版本已发生变更（客户端 v{expected_wb_version} != 服务端 v{cur_wb_ver}），已为您同步最新白板快照，请核对后重新确认执行",
+                    status_code=409,
+                    details=_conflict_details(
+                        "wb_version_mismatch",
+                        expected_wb_version=int(expected_wb_version),
+                        actual_wb_version=cur_wb_ver,
+                    ),
+                )
+            actual_checked_ids = [str(it.get("id") or "") for it in checked_actions]
+            req_checked_ids = [str(x).strip() for x in checked_action_ids if str(x).strip()]
+            if req_checked_ids != actual_checked_ids:
+                raise ExecutionAdmissionConflictError(
+                    "待执行勾选任务集合已发生变化，已同步最新白板快照，请重新核对勾选范围后再执行",
+                    status_code=409,
+                    details=_conflict_details(
+                        "checked_actions_mismatch",
+                        expected_checked_action_ids=req_checked_ids,
+                        actual_checked_action_ids=actual_checked_ids,
+                    ),
+                )
+            raw_cur_ws = sess.workspace_dir or ""
+            cur_bound, cur_real_ws = is_real_bound_workspace(raw_cur_ws)
+            norm_actual_ws = os.path.realpath(cur_real_ws) if cur_bound else ""
+            raw_exp_ws = str(expected_workspace_dir or "").strip()
+            exp_bound, exp_real_ws = is_real_bound_workspace(raw_exp_ws)
+            norm_exp_ws = (
+                os.path.realpath(exp_real_ws)
+                if exp_bound
+                else (
+                    os.path.realpath(os.path.expanduser(raw_exp_ws))
+                    if raw_exp_ws and os.path.isdir(os.path.expanduser(raw_exp_ws))
+                    else raw_exp_ws
+                )
+            )
+            if norm_exp_ws != norm_actual_ws:
+                raise ExecutionAdmissionConflictError(
+                    "会话绑定工作区已发生漂移，已同步最新会话快照，请重新核对目标目录后再执行",
+                    status_code=409,
+                    details=_conflict_details(
+                        "workspace_dir_mismatch",
+                        expected_workspace_dir=norm_exp_ws,
+                        actual_workspace_dir=norm_actual_ws,
+                    ),
+                )
+
+        return checked_actions, ack_set
+
     async def admit_and_start_execution(
         self,
         sess: MeetingSession,
@@ -5503,27 +5501,39 @@ class RoundtableOrchestrator:
         allow_workspace_write: bool = False,
         executor_id: Optional[str] = None,
         verify_command: Optional[str] = None,
-        acknowledge_absent: bool = False,
+        expected_wb_version: Optional[int] = None,
+        checked_action_ids: Optional[List[str]] = None,
+        expected_workspace_dir: Optional[str] = None,
+        acknowledged_absent_agents: Optional[List[str]] = None,
+        require_consistency_contract: bool = False,
     ) -> dict:
-        """
-        单飞预约、零勾选任务硬拦截、缺席席位知悉门禁、写前字节证明与孤儿进程围栏同步准入契约：
-        1. 会话短锁内零等待校验 idle、无未决 rollbackable/recovery_required、已勾选待执行任务数 >= 1 且无未确认异常缺席席位；
-        2. 锁外获取非阻塞跨进程 flock(LOCK_EX | LOCK_NB)，完成 lstat + O_NOFOLLOW + <=128MiB 写前 CAS 清单 fsync 落盘；
-           任何违规立即回退状态至 idle、释放 flock 并抛 409（保证工作区字节与业务 stage 零变化）；
-        3. 短锁内二次核验未被 stop 取消后绑定 run_id 转入 running，返回 202 Accepted（含 operation_id, run_id, backup_id）。
-        """
-        raw_ws = sess.workspace_dir or self.settings.workspace_dir
-        bound_ok, real_ws = is_real_bound_workspace(raw_ws)
-        do_real_write = bool(allow_workspace_write and bound_ok)
-        if allow_workspace_write and not bound_ok:
-            raise ExecutionAdmissionConflictError(
-                "尚未绑定真实的本地项目目录，无法开启写入工作区模式",
-                status_code=409,
-                details={"reason": "unbound_workspace"},
-            )
+        ws_lock: Optional[WorkspaceWriteLock] = None
+        backup: Optional[WorkspaceBackup] = None
+        backup_id = ""
+        operation_id = f"op_{uuid.uuid4().hex[:12]}"
+        run_id = f"run_{uuid.uuid4().hex[:12]}"
 
-        # 步骤 1：会话短锁内零等待预约与前置治理闸门
         async with sess.session_lock:
+            raw_ws = sess.workspace_dir or ""
+            bound_ok, real_ws = is_real_bound_workspace(raw_ws)
+            do_real_write = bool(allow_workspace_write and bound_ok)
+            if allow_workspace_write and not bound_ok:
+                raise ExecutionAdmissionConflictError(
+                    "尚未绑定真实的本地项目目录，无法开启写入工作区模式",
+                    status_code=409,
+                    details={"reason": "unbound_workspace", "session": sess.to_snapshot(), "whiteboard": copy.deepcopy(sess.whiteboard)},
+                )
+            if allow_workspace_write and bound_ok and self._is_within_runtime_code_root(real_ws):
+                raise ExecutionAdmissionConflictError(
+                    "当前绑定目录为 AI圆桌 运行态源码根目录（runtime_code_root），仅允许只读研讨与只读预演，禁止原地热写入",
+                    status_code=403,
+                    details={
+                        "reason": "runtime_code_root_write_blocked",
+                        "runtime_code_root": self.runtime_code_root,
+                        "session": sess.to_snapshot(),
+                        "whiteboard": copy.deepcopy(sess.whiteboard),
+                    },
+                )
             if sess.exec_state != "idle" or sess.is_busy:
                 raise ExecutionAdmissionConflictError(
                     "当前会话已有正在准备或运行中的任务，请勿重复并发提交",
@@ -5532,77 +5542,79 @@ class RoundtableOrchestrator:
                         "reason": "session_busy",
                         "operation_id": sess.active_operation_id,
                         "run_id": sess.active_run_id,
+                        "session": sess.to_snapshot(),
+                        "whiteboard": copy.deepcopy(sess.whiteboard),
                     },
                 )
             if sess.recovery_required:
                 raise ExecutionAdmissionConflictError(
                     "当前会话存在上次崩溃中断未恢复的写快照，请先确认哈希完成恢复",
                     status_code=409,
-                    details={"reason": "recovery_required"},
+                    details={"reason": "recovery_required", "session": sess.to_snapshot(), "whiteboard": copy.deepcopy(sess.whiteboard)},
                 )
             if do_real_write and sess.has_unacked_rollbackable():
                 raise ExecutionAdmissionConflictError(
                     "存在上一轮未决的可回滚写入快照（rollbackable），请先回滚或确认归档后再发起新一轮写入",
                     status_code=409,
-                    details={"reason": "pending_rollbackable_snapshot"},
+                    details={"reason": "pending_rollbackable_snapshot", "session": sess.to_snapshot(), "whiteboard": copy.deepcopy(sess.whiteboard)},
                 )
 
-            wb_items_now = sess.whiteboard.get("items") or []
-            checked_actions = [
-                it for it in wb_items_now
-                if isinstance(it, dict)
-                and it.get("kind") == "action"
-                and bool(it.get("checked", False))
-                and str(it.get("text") or "").strip()
-            ]
-            if len(checked_actions) < 1:
-                raise ExecutionAdmissionConflictError(
-                    "尚无已勾选待执行任务（checked_action_count = 0），请先在会议白板核对并勾选至少 1 项任务后再启动执行",
-                    status_code=409,
-                    details={"reason": "no_checked_tasks", "checked_action_count": 0},
+            frozen_ws = os.path.realpath(real_ws) if bound_ok else self.runner._effective_workspace_cwd(raw_ws)
+            if bound_ok:
+                probe_lock = WorkspaceWriteLock(
+                    frozen_ws,
+                    session_id=sess.session_id,
+                    run_id=run_id,
+                    operation_id=operation_id,
+                    runtime_home=Path(self.data_dir),
                 )
-
-            absent_list = sess.whiteboard.get("absent_seats") or []
-            unacked_abnormal = [
-                ab for ab in absent_list
-                if isinstance(ab, dict) and ab.get("abnormal", True) and not ab.get("acknowledged", False)
-            ]
-            if unacked_abnormal:
-                if acknowledge_absent:
-                    for ab in unacked_abnormal:
-                        ab["acknowledged"] = True
-                else:
-                    ab_names = "、".join(str(ab.get("seat_name") or ab.get("agent_id")) for ab in unacked_abnormal)
+                try:
+                    probe_lock.try_acquire()
+                except WorkspaceLockBusyError as lock_exc:
                     raise ExecutionAdmissionConflictError(
-                        f"存在未完成发言的异常缺席席位（{ab_names}），请先就地恢复重试，或显式确认已知悉缺席风险后再执行交付",
+                        str(lock_exc),
                         status_code=409,
-                        details={"reason": "unacknowledged_absent_seats", "absent_seats": unacked_abnormal},
-                    )
+                        details={
+                            "reason": "workspace_locked",
+                            "holder": lock_exc.holder,
+                            "session": sess.to_snapshot(),
+                            "whiteboard": copy.deepcopy(sess.whiteboard),
+                        },
+                    ) from lock_exc
+                ws_lock = probe_lock
+
+            try:
+                _, ack_set = self._verify_execution_consistency_contract_locked(
+                    sess,
+                    expected_wb_version=expected_wb_version,
+                    checked_action_ids=checked_action_ids,
+                    expected_workspace_dir=expected_workspace_dir,
+                    acknowledged_absent_agents=acknowledged_absent_agents,
+                    require_consistency_contract=require_consistency_contract,
+                )
+                if not do_real_write and ws_lock is not None:
+                    ws_lock.release()
+                    ws_lock = None
+            except BaseException:
+                if ws_lock is not None:
+                    ws_lock.release()
+                    ws_lock = None
+                raise
+
+            if ack_set:
+                for ab in sess.whiteboard.get("absent_seats") or []:
+                    if isinstance(ab, dict) and str(ab.get("agent_id") or "").strip().lower() in ack_set:
+                        ab["acknowledged"] = True
 
             target_exec = executor_id if executor_id in AGENT_ORDER else sess.effective_executor_agent()
-            operation_id = f"op_{uuid.uuid4().hex[:12]}"
-            run_id = f"run_{uuid.uuid4().hex[:12]}"
-            frozen_ws = os.path.realpath(real_ws) if bound_ok else self.runner._effective_workspace_cwd(raw_ws)
             frozen_cfg_ver = self.config_ver
             sess.active_operation_id = operation_id
             sess.active_run_id = ""
             sess.exec_state = "preparing"
             sess.cancelled_operations.discard(operation_id)
 
-        # 步骤 2：锁外获取跨进程非阻塞排他锁 + 写前 CAS 字节清单 fsync 落盘
-        ws_lock: Optional[WorkspaceWriteLock] = None
-        backup: Optional[WorkspaceBackup] = None
-        backup_id = ""
         if do_real_write:
-            ws_lock = WorkspaceWriteLock(
-                frozen_ws,
-                session_id=sess.session_id,
-                run_id=run_id,
-                operation_id=operation_id,
-                runtime_home=Path(self.data_dir),
-            )
             try:
-                ws_lock.try_acquire()
                 backup = await asyncio.to_thread(
                     WorkspaceBackup.capture,
                     frozen_ws,
@@ -5620,16 +5632,6 @@ class RoundtableOrchestrator:
                     state="prepared",
                     meta={"operation_id": operation_id, "executor_id": target_exec, "config_ver": frozen_cfg_ver},
                 )
-            except WorkspaceLockBusyError as lock_exc:
-                async with sess.session_lock:
-                    if sess.active_operation_id == operation_id:
-                        sess.exec_state = "idle"
-                        sess.active_operation_id = ""
-                raise ExecutionAdmissionConflictError(
-                    str(lock_exc),
-                    status_code=409,
-                    details={"reason": "workspace_locked", "holder": lock_exc.holder},
-                ) from lock_exc
             except WorkspaceAdmissionError as adm_exc:
                 if ws_lock is not None:
                     ws_lock.release()
@@ -5640,7 +5642,7 @@ class RoundtableOrchestrator:
                 raise ExecutionAdmissionConflictError(
                     str(adm_exc),
                     status_code=409,
-                    details={"reason": adm_exc.reason, "offending_path": adm_exc.offending_path},
+                    details={"reason": adm_exc.reason, "offending_path": adm_exc.offending_path, "session": sess.to_snapshot()},
                 ) from adm_exc
             except Exception as unexpected_exc:
                 if ws_lock is not None:
@@ -5655,7 +5657,6 @@ class RoundtableOrchestrator:
                     details={"reason": "prepare_failed"},
                 ) from unexpected_exc
 
-        # 步骤 3：短锁内二次核验准备期间未被 stop 取消，绑定 run_id 转入 running 并启动受护栏异步执行协程
         async with sess.session_lock:
             if operation_id in sess.cancelled_operations or sess.exec_state != "preparing" or sess.active_operation_id != operation_id:
                 if backup is not None:
@@ -5677,6 +5678,31 @@ class RoundtableOrchestrator:
                     status_code=409,
                     details={"reason": "cancelled_during_prepare", "operation_id": operation_id},
                 )
+            try:
+                self._verify_execution_consistency_contract_locked(
+                    sess,
+                    expected_wb_version=expected_wb_version,
+                    checked_action_ids=checked_action_ids,
+                    expected_workspace_dir=expected_workspace_dir,
+                    acknowledged_absent_agents=acknowledged_absent_agents,
+                    require_consistency_contract=require_consistency_contract,
+                )
+            except BaseException:
+                if backup is not None:
+                    await asyncio.to_thread(backup.discard_prepared_unused)
+                    self.store.record_exec_recovery(
+                        run_id=run_id,
+                        session_id=sess.session_id,
+                        workspace_realpath=frozen_ws,
+                        backup_dir=str(backup.backup_dir),
+                        state="aborted_clean",
+                    )
+                if ws_lock is not None:
+                    ws_lock.release()
+                if sess.active_operation_id == operation_id:
+                    sess.exec_state = "idle"
+                    sess.active_operation_id = ""
+                raise
 
             sess.executor_agent = target_exec
             sess.active_run_id = run_id
@@ -5685,7 +5711,7 @@ class RoundtableOrchestrator:
             eff_verify_cmd = (
                 verify_command
                 if verify_command is not None
-                else getattr(self.settings, "post_exec_verify_cmd", "")
+                else self.get_verify_cmd_for_workspace(frozen_ws)
             )
             sess.active_task = asyncio.create_task(
                 self._run_guarded_execution(
@@ -5788,12 +5814,14 @@ class RoundtableOrchestrator:
 
             if not ok:
                 status_code = int(report.get("status_code", 409))
-                # 保留 last_backup 与 can_rollback = True
                 sess.whiteboard["can_rollback"] = backup.is_rollbackable
                 return status_code, {
                     "ok": False,
                     "error": msg,
                     "conflict_paths": list(report.get("conflict_paths") or []),
+                    "permission_only_conflicts": list(report.get("permission_only_conflicts") or []),
+                    "content_conflicts": list(report.get("content_conflicts") or []),
+                    "conflict_kind": str(report.get("conflict_kind") or "content_changed"),
                     "rollbackable": backup.is_rollbackable,
                 }
 

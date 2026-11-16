@@ -242,21 +242,29 @@ class SessionAttachmentManager:
         sdir = self._session_dir(session_id)
         return [self.public_meta(it) for it in self._load_index(sdir)]
 
-    def save_base64_attachment(
-        self, session_id: str, *, filename: str, data_base64: str, declared_mime: str = "",
-    ) -> dict:
-        with self._index_lock:
-            return self._save_base64_attachment(session_id, filename=filename, data_base64=data_base64, declared_mime=declared_mime)
-
-    def _save_base64_attachment(
+    def save_raw_attachment(
         self,
         session_id: str,
         *,
         filename: str,
-        data_base64: str,
+        raw_bytes: bytes,
         declared_mime: str = "",
     ) -> dict:
-        sdir = self._session_dir(session_id)
+        """线程安全保存 application/octet-stream 原始二进制流附件字节（供 asyncio.to_thread 流式落盘调用）。"""
+        if not isinstance(raw_bytes, (bytes, bytearray, memoryview)):
+            raise ValueError("附件原始字节类型无效")
+        buf = bytes(raw_bytes)
+        with self._index_lock:
+            return self._save_raw_bytes_locked(
+                session_id,
+                filename=filename,
+                raw_bytes=buf,
+                declared_mime=declared_mime,
+            )
+
+    def save_base64_attachment(
+        self, session_id: str, *, filename: str, data_base64: str, declared_mime: str = "",
+    ) -> dict:
         b64_str = str(data_base64 or "").strip()
         if not b64_str:
             raise ValueError("附件内容为空")
@@ -270,6 +278,23 @@ class SessionAttachmentManager:
         except Exception as exc:
             raise ValueError("附件 Base64 编码格式无效") from exc
 
+        with self._index_lock:
+            return self._save_raw_bytes_locked(
+                session_id,
+                filename=filename,
+                raw_bytes=raw_bytes,
+                declared_mime=declared_mime,
+            )
+
+    def _save_raw_bytes_locked(
+        self,
+        session_id: str,
+        *,
+        filename: str,
+        raw_bytes: bytes,
+        declared_mime: str = "",
+    ) -> dict:
+        sdir = self._session_dir(session_id)
         size_b = len(raw_bytes)
         if size_b <= 0:
             raise ValueError("禁止上传 0 字节空文件")

@@ -264,11 +264,65 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
             @"bootId": self.bootId ?: @"",
             @"port": @(self.serverPort),
         }, nil);
+    } else if ([action isEqualToString:@"reissueBootstrap"]) {
+        [self requestFreshBootstrapCodeWithCompletion:^(NSString *freshCode, NSString *errMsg) {
+            if (freshCode.length > 0) {
+                replyHandler(@{@"code": freshCode, @"bootId": self.bootId ?: @""}, nil);
+            } else {
+                replyHandler(nil, errMsg ?: @"重签一次性兑换码失败");
+            }
+        }];
     } else if ([action isEqualToString:@"pickFolder"]) {
         [self chooseFolderWithCompletion:^(NSString *chosen) { replyHandler(chosen, nil); }];
     } else {
         replyHandler(nil, @"未知的桌面操作");
     }
+}
+
+- (void)requestFreshBootstrapCodeWithCompletion:(void (^)(NSString * _Nullable, NSString * _Nullable))completion {
+    if (self.serverPort <= 0 || self.bootToken.length == 0) {
+        completion(nil, @"本地服务尚未就绪");
+        return;
+    }
+    NSURL *reissueUrl = buildLocalURL(self.serverPort, @"/api/auth/reissue-bootstrap");
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:reissueUrl
+                                                       cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
+                                                   timeoutInterval:2.0];
+    req.HTTPMethod = @"POST";
+    [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    [req setValue:[NSString stringWithFormat:@"127.0.0.1:%d", self.serverPort] forHTTPHeaderField:@"Host"];
+    [req setValue:self.bootToken forHTTPHeaderField:@"X-Roundtable-Token"];
+    req.HTTPBody = [@"{}" dataUsingEncoding:NSUTF8StringEncoding];
+
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req
+                                     completionHandler:^(NSData *data, NSURLResponse *resp, NSError *error) {
+        NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)resp;
+        NSString *code = nil;
+        if (!error && httpResp.statusCode == 200 && data) {
+            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if ([json isKindOfClass:[NSDictionary class]] && [json[@"bootstrap_code"] isKindOfClass:[NSString class]]) {
+                code = json[@"bootstrap_code"];
+            }
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion(code, error.localizedDescription);
+        });
+    }] resume];
+}
+
+- (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView {
+    [self requestFreshBootstrapCodeWithCompletion:^(NSString *freshCode, NSString *errMsg) {
+        NSURL *baseAppUrl = buildLocalURL(self.serverPort, @"/");
+        if (freshCode.length > 0) {
+            NSString *withHash = [NSString stringWithFormat:@"%@#bootstrap=%@", baseAppUrl.absoluteString, freshCode];
+            NSURL *reloadUrl = [NSURL URLWithString:withHash];
+            if (reloadUrl) {
+                [webView loadRequest:[NSURLRequest requestWithURL:reloadUrl]];
+                return;
+            }
+        }
+        [webView loadRequest:[NSURLRequest requestWithURL:baseAppUrl]];
+    }];
 }
 
 - (void)stopBackendProcess {

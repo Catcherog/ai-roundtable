@@ -1430,13 +1430,16 @@ button:not(:disabled):active {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  min-width: 0;
+  flex: 0 0 auto;
+  max-width: 236px;
+  overflow: hidden;
 }
 
 .ws-unbind-mini-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
   height: 24px;
   padding: 0 8px;
   border-radius: 999px;
@@ -1465,9 +1468,13 @@ button:not(:disabled):active {
 #headerEpistemicBadge {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 5.5px;
+  flex: 0 0 auto;
+  max-width: 176px;
+  overflow: hidden;
+  text-overflow: ellipsis;
   height: 25px;
-  padding: 0 10px;
+  padding: 0 9px;
   border-radius: 999px;
   background: var(--bg-elevated);
   border: 1px solid var(--border-strong);
@@ -1936,6 +1943,121 @@ button:not(:disabled):active {
 [data-theme="dark"] .wb-abandoned-item {
   background: rgba(22, 28, 42, 0.76);
 }
+
+/* ==================== 10. 顶栏防挤压重叠、Markdown 文件芯片/任务复选框与决议态白板置顶优化 ==================== */
+
+/* 当右侧四阶段进度胶囊可见时，隐藏左侧同义重复阶段胶囊，释放议题标题横向空间 */
+.stage-top-row:has(#stageStepper:not(.hidden)) #stageStatusPill {
+  display: none;
+}
+
+/* 中窄窗口下收起顶栏重复认知胶囊（次顶栏席位卡与白板横幅已完整展示），保证议题标题清晰可读 */
+@media (max-width: 1520px) {
+  .stage-top-row:has(#stageStepper:not(.hidden)) #headerEpistemicBadge {
+    display: none;
+  }
+}
+
+/* Markdown 本地文件链接芯片与外链样式（消除裸露 file:/// 长路径） */
+.msg-body code.md-file-link,
+.wb-pool-text code.md-file-link,
+.wb-abandoned-title code.md-file-link {
+  display: inline;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: calc(var(--fs-code) - 0.3px);
+  font-weight: 640;
+  padding: 1.5px 6.5px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent-primary) 7%, var(--code-bg));
+  color: var(--accent-primary);
+  border: 1px solid color-mix(in srgb, var(--accent-primary) 24%, var(--border-subtle));
+  word-break: break-all;
+}
+
+.wb-pool-text code,
+.wb-abandoned-title code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.8px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--code-bg);
+  color: var(--code-text);
+}
+
+.msg-body a.md-ext-link,
+.wb-pool-text a.md-ext-link,
+.wb-abandoned-title a.md-ext-link {
+  color: var(--accent-primary);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--accent-primary) 42%, transparent);
+  text-underline-offset: 2.5px;
+  font-weight: 620;
+  word-break: break-all;
+}
+
+.msg-body a.md-ext-link:hover,
+.wb-pool-text a.md-ext-link:hover {
+  color: var(--accent-primary-hover);
+  text-decoration-color: currentColor;
+}
+
+/* Markdown 任务列表线性复选框（取代 • [ ] 双重符号） */
+.msg-body li.md-task-li {
+  list-style: none;
+  margin-left: -18px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.msg-body .md-task-box {
+  width: 15.5px;
+  height: 15.5px;
+  margin-top: 5px;
+  border-radius: 4.5px;
+  border: 1.45px solid var(--border-strong);
+  background: var(--bg-panel-solid);
+  color: var(--astra-color);
+  font-size: 10.5px;
+  font-weight: 800;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.msg-body .md-task-box.checked {
+  border-color: var(--astra-color);
+  background: var(--astra-bg);
+}
+
+.msg-body li.md-task-li.is-checked .md-task-text {
+  color: var(--text-secondary);
+}
+
+/* 白板单分区超高列表内滚保护 + 已形成决议阶段「待勾选执行任务清单」自动置顶 */
+.wb-card-pool {
+  max-height: 336px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+#wbActionList.wb-card-pool {
+  max-height: 380px;
+}
+
+.wb-pane.is-action-priority > #wbToolbar { order: -10; }
+.wb-pane.is-action-priority > #wbEpistemicBanner { order: -9; }
+.wb-pane.is-action-priority > #wbConflictBanner { order: -8; }
+.wb-pane.is-action-priority > #wbCardAbsent { order: -7; }
+.wb-pane.is-action-priority > #wbTopicCard { order: -6; }
+.wb-pane.is-action-priority > #wbCardAction {
+  order: -5;
+  border-color: var(--astra-border);
+  box-shadow: inset 0 1px 0 var(--island-highlight), 0 6px 18px -8px rgba(13, 148, 112, 0.18);
+}
+.wb-pane.is-action-priority > #wbAdaptiveExportBar { order: -4; }
 
 @media (prefers-reduced-motion: reduce) {
   .ws-unbind-mini-btn,

@@ -268,6 +268,7 @@ class AsyncHTTPServer:
             f"Content-Length: {len(body)}\r\n"
             f"Cache-Control: no-store\r\n"
             f"X-Content-Type-Options: nosniff\r\n"
+            f"X-Roundtable-Boot-Id: {self.boot_id}\r\n"
             f"Connection: close\r\n\r\n"
         ).encode("utf-8")
         writer.write(head + body)
@@ -325,10 +326,9 @@ class AsyncHTTPServer:
         await self._send_bytes(writer, 200, target.read_bytes(), content_type=ctype, head_only=head_only)
 
     @staticmethod
-    def _pick_macos_folder_sync() -> str:
-        if sys.platform != "darwin":
-            return ""
-        script = 'POSIX path of (choose folder with prompt "请选择 AI圆桌 新建会议默认绑定的项目工作区目录：")'
+    def _pick_macos_folder_detailed_sync(prompt: str = "请选择 AI圆桌 绑定的本地项目工作区目录：") -> Tuple[str, bool, str]:
+        safe_prompt = str(prompt or "请选择项目目录").replace('\\', '\\\\').replace('"', '\\"')
+        script = f'POSIX path of (choose folder with prompt "{safe_prompt}")'
         try:
             res = subprocess.run(
                 ["osascript", "-e", script],
@@ -337,12 +337,31 @@ class AsyncHTTPServer:
                 stderr=subprocess.PIPE,
                 timeout=60.0,
             )
-            if res.returncode == 0:
-                chosen = res.stdout.decode("utf-8", errors="replace").strip()
-                return chosen.rstrip("/") if chosen != "/" else chosen
-            return ""
-        except Exception:
-            return ""
+        except FileNotFoundError as exc:
+            return "", False, f"未找到 macOS osascript 组件：{exc}"
+        except subprocess.TimeoutExpired:
+            return "", False, "macOS 目录选择对话框响应超时"
+        except Exception as exc:
+            return "", False, f"唤起 macOS 目录选择对话框失败：{exc}"
+
+        if res.returncode == 0:
+            chosen = res.stdout.decode("utf-8", errors="replace").strip()
+            if chosen:
+                return (chosen.rstrip("/") if chosen != "/" else chosen), False, ""
+            return "", True, ""
+        err_str = res.stderr.decode("utf-8", errors="replace").strip()
+        if "-128" in err_str or "user canceled" in err_str.lower() or "取消" in err_str:
+            return "", True, ""
+        return "", False, f"macOS 目录选择调用失败：{err_str or f'exit={res.returncode}'}"
+
+    @classmethod
+    def _pick_system_folder_sync(cls, prompt: str = "请选择 AI圆桌 绑定的本地项目工作区目录：") -> Tuple[str, bool, str]:
+        if sys.platform == "darwin":
+            return cls._pick_macos_folder_detailed_sync(prompt)
+        if os.name == "nt" or sys.platform == "win32":
+            from backend.drivers import windows_support
+            return windows_support.pick_folder_sta(prompt)
+        return "", False, f"当前操作系统平台（{sys.platform}）暂不支持原生系统目录选择对话框，请通过桌面宿主打开"
 
     async def _route_api(
         self,
@@ -356,7 +375,7 @@ class AsyncHTTPServer:
         if method == "POST" and path == "/api/auth/bootstrap":
             data, jerr = self._parse_json_strict(body_bytes)
             if jerr is not None or data is None:
-                await self._send_json(writer, 400, {"error": jerr or "参数错误"})
+                await self._send_json(writer, 400, {"error": jerr or "参数错误", "boot_id": self.boot_id})
                 return
             code = str(data.get("code") or "").strip()
             if (
@@ -365,7 +384,7 @@ class AsyncHTTPServer:
                 or self._bootstrap_redeemed
                 or not hmac.compare_digest(code.encode("utf-8"), self._bootstrap_code.encode("utf-8"))
             ):
-                await self._send_json(writer, 401, {"error": "引导兑换码无效或已被单次核销"})
+                await self._send_json(writer, 401, {"error": "引导兑换码无效或已被单次核销", "boot_id": self.boot_id})
                 return
             self._bootstrap_redeemed = True
             self._bootstrap_code = ""
@@ -381,10 +400,25 @@ class AsyncHTTPServer:
             return
 
         if "token" in query_params or "access_token" in query_params:
-            await self._send_json(writer, 401, {"error": "禁止通过 URL 查询串传递鉴权令牌"})
+            await self._send_json(writer, 401, {"error": "禁止通过 URL 查询串传递鉴权令牌", "boot_id": self.boot_id})
             return
         if not self._verify_token(headers):
-            await self._send_json(writer, 401, {"error": "缺少或无效的 X-Roundtable-Token 凭据"})
+            await self._send_json(writer, 401, {"error": "缺少或无效的 X-Roundtable-Token 凭据", "boot_id": self.boot_id})
+            return
+
+        if method == "POST" and path == "/api/auth/reissue-bootstrap":
+            fresh_code = secrets.token_hex(24)
+            self._bootstrap_code = fresh_code
+            self._bootstrap_redeemed = False
+            await self._send_json(
+                writer,
+                200,
+                {
+                    "ok": True,
+                    "bootstrap_code": fresh_code,
+                    "boot_id": self.boot_id,
+                },
+            )
             return
 
         if method == "GET" and path == "/api/status":
@@ -394,6 +428,7 @@ class AsyncHTTPServer:
                 200,
                 {
                     "boot_id": self.boot_id,
+                    "driver_catalog": sys_status.get("driver_catalog"),
                     "system": sys_status,
                     "sessions": self.orchestrator.list_sessions(),
                     "default_session_id": self.orchestrator.default_session_id,
@@ -418,12 +453,16 @@ class AsyncHTTPServer:
                 await self._send_json(writer, 400, {"error": jerr or "参数错误"})
                 return
             if "workspace_dir" in data and data["workspace_dir"]:
-                ok_ws, ws_err = self.orchestrator.validate_safe_workspace_path(str(data["workspace_dir"]))
+                ok_ws, ws_err, ws_details = self.orchestrator.validate_safe_workspace_path_detailed(str(data["workspace_dir"]))
                 if not ok_ws:
-                    await self._send_json(writer, 400, {"error": ws_err})
+                    await self._send_json(writer, 400, {"error": ws_err, **ws_details})
                     return
             active_sid = str(data.get("active_session_id", "")).strip()
-            updated = self.orchestrator.update_runtime_config(data, active_session_id=active_sid)
+            try:
+                updated = self.orchestrator.update_runtime_config(data, active_session_id=active_sid)
+            except ExecutionAdmissionConflictError as conf_exc:
+                await self._send_json(writer, conf_exc.status_code, conf_exc.to_dict())
+                return
             for sess in self.orchestrator.sessions.values():
                 for st in sess.seat_states.values():
                     await self.orchestrator.broadcast(sess, "seat_update", st)
@@ -443,17 +482,66 @@ class AsyncHTTPServer:
                     {"error": "pick-folder 禁止接收 direct_path 参数；切换会话目录请调用 POST /api/sessions/{sid}/workspace"},
                 )
                 return
+            bind_scope = str(data.get("bind_scope") or "default_only").strip().lower()
+            if bind_scope not in ("default_only", "session"):
+                await self._send_json(writer, 400, {"error": "bind_scope 仅支持 'default_only' 或 'session'"})
+                return
+            target_sid = str(data.get("session_id") or "").strip()
+            target_sess = None
+            if bind_scope == "session":
+                if not target_sid:
+                    await self._send_json(writer, 400, {"error": "bind_scope='session' 时必须提供目标 session_id"})
+                    return
+                target_sess = self.orchestrator.get_session(target_sid)
+                if not target_sess:
+                    await self._send_json(writer, 404, {"error": f"未找到会议会话 {target_sid}"})
+                    return
+
+            prompt_txt = (
+                "请选择绑定至当前活跃圆桌会话的项目工作区目录："
+                if bind_scope == "session"
+                else "请选择 AI圆桌 新建会议默认绑定的项目工作区目录："
+            )
             loop = asyncio.get_running_loop()
-            selected = await loop.run_in_executor(None, self._pick_macos_folder_sync)
-            if not selected:
+            selected, cancelled, pick_err = await loop.run_in_executor(None, self._pick_system_folder_sync, prompt_txt)
+            if cancelled:
                 await self._send_json(writer, 200, {"ok": False, "cancelled": True})
                 return
-            ok_ws, ws_err = self.orchestrator.validate_safe_workspace_path(selected)
-            if not ok_ws:
-                await self._send_json(writer, 400, {"error": ws_err})
+            if pick_err or not selected:
+                err_code = 400 if "暂不支持" in (pick_err or "") else 500
+                await self._send_json(writer, err_code, {"ok": False, "cancelled": False, "error": pick_err or "系统目录选择器未能返回有效路径"})
                 return
+
+            ok_ws, ws_err, ws_details = self.orchestrator.validate_safe_workspace_path_detailed(selected)
+            if not ok_ws:
+                await self._send_json(writer, 400, {"error": ws_err, **ws_details})
+                return
+
+            if bind_scope == "session" and target_sess is not None:
+                confirm_abandon = data.get("confirm_abandon_rollback") is True
+                st_code, sw_resp = await self.orchestrator.switch_session_workspace(
+                    target_sess,
+                    selected,
+                    confirm_abandon_rollback=confirm_abandon,
+                )
+                if st_code != 200:
+                    await self._send_json(writer, st_code, {**sw_resp, "selected_path": selected})
+                    return
+                await self._send_json(
+                    writer,
+                    200,
+                    {
+                        "ok": True,
+                        "bind_scope": "session",
+                        "path": sw_resp.get("workspace_dir") or selected,
+                        "session": sw_resp.get("session"),
+                        "system": self.orchestrator.get_system_status(),
+                    },
+                )
+                return
+
             updated = self.orchestrator.update_default_workspace_only(selected)
-            await self._send_json(writer, 200, {"ok": True, "path": selected, "system": updated})
+            await self._send_json(writer, 200, {"ok": True, "bind_scope": "default_only", "path": selected, "system": updated})
             return
 
         if method == "POST" and path == "/api/cli/test":
@@ -539,21 +627,34 @@ class AsyncHTTPServer:
                     return
 
                 if method == "POST" and sub_action == "":
-                    att_req, jerr = self._parse_json_strict(body_bytes)
-                    if jerr is not None or att_req is None:
-                        await self._send_json(writer, 400, {"error": jerr or "附件请求 JSON 非法"})
-                        return
-                    fname = str(att_req.get("filename") or "attachment").strip()
-                    dmime = str(att_req.get("mime_type") or "").strip()
-                    b64 = str(att_req.get("data_base64") or "").strip()
+                    ctype_low = str(headers.get("content-type") or "").split(";", 1)[0].strip().lower()
                     try:
-                        saved = await asyncio.to_thread(
-                            self.attachments.save_base64_attachment,
-                            sid,
-                            filename=fname,
-                            data_base64=b64,
-                            declared_mime=dmime,
-                        )
+                        if ctype_low == "application/octet-stream":
+                            raw_hdr_name = headers.get("x-attachment-filename", "")
+                            fname = urllib.parse.unquote(raw_hdr_name).strip() or "attachment"
+                            dmime = str(headers.get("x-attachment-mime") or "").strip()
+                            saved = await asyncio.to_thread(
+                                self.attachments.save_raw_attachment,
+                                sid,
+                                filename=fname,
+                                raw_bytes=body_bytes,
+                                declared_mime=dmime,
+                            )
+                        else:
+                            att_req, jerr = self._parse_json_strict(body_bytes)
+                            if jerr is not None or att_req is None:
+                                await self._send_json(writer, 400, {"error": jerr or "附件请求 JSON 非法"})
+                                return
+                            fname = str(att_req.get("filename") or "attachment").strip()
+                            dmime = str(att_req.get("mime_type") or "").strip()
+                            b64 = str(att_req.get("data_base64") or "").strip()
+                            saved = await asyncio.to_thread(
+                                self.attachments.save_base64_attachment,
+                                sid,
+                                filename=fname,
+                                data_base64=b64,
+                                declared_mime=dmime,
+                            )
                         if self.orchestrator.get_session(sid) is not sess:
                             await asyncio.to_thread(self.attachments.delete_session_attachments, sid)
                             await self._send_json(writer, 404, {"error": "会话已删除"})
@@ -583,16 +684,11 @@ class AsyncHTTPServer:
                     return
 
                 if method == "DELETE" and sub_action:
-                    removed = await asyncio.to_thread(self.attachments.delete_attachment, sid, sub_action)
+                    removed = await self.orchestrator.delete_session_attachment(sess, sub_action)
                     if not removed:
                         await self._send_json(writer, 404, {"error": "未找到目标附件"})
                         return
-                    sess_atts = sess.whiteboard.get("session_attachments")
-                    if isinstance(sess_atts, list):
-                        sess.whiteboard["session_attachments"] = [
-                            x for x in sess_atts if isinstance(x, dict) and x.get("id") != sub_action
-                        ]
-                    await self._send_json(writer, 200, {"ok": True, "deleted_id": sub_action})
+                    await self._send_json(writer, 200, {"ok": True, "deleted_id": sub_action, "rev": sess.rev})
                     return
 
             if method == "GET" and action == "":
@@ -661,7 +757,12 @@ class AsyncHTTPServer:
 
             if method == "POST" and action == "workspace":
                 target_ws = str(payload.get("workspace_dir") or "").strip()
-                status_code, resp_dict = await self.orchestrator.switch_session_workspace(sess, target_ws)
+                confirm_abandon = payload.get("confirm_abandon_rollback") is True
+                status_code, resp_dict = await self.orchestrator.switch_session_workspace(
+                    sess,
+                    target_ws,
+                    confirm_abandon_rollback=confirm_abandon,
+                )
                 await self._send_json(writer, status_code, resp_dict)
                 return
 
@@ -859,14 +960,27 @@ class AsyncHTTPServer:
                 allow_write = payload["allow_workspace_write"]
                 executor_id = str(payload.get("executor_id", "")).strip().lower() or None
                 verify_cmd = str(payload.get("verify_command", "")).strip() or None
-                acknowledge_absent = bool(payload.get("acknowledge_absent", False))
+
+                raw_wb_ver = payload.get("expected_wb_version")
+                exp_wb_ver = int(raw_wb_ver) if (isinstance(raw_wb_ver, int) and type(raw_wb_ver) is not bool) else None
+                raw_chk_ids = payload.get("checked_action_ids")
+                chk_ids = [str(x) for x in raw_chk_ids] if isinstance(raw_chk_ids, list) else None
+                raw_exp_ws = payload.get("expected_workspace_dir")
+                exp_ws = str(raw_exp_ws) if isinstance(raw_exp_ws, str) else None
+                raw_ack_abs = payload.get("acknowledged_absent_agents")
+                ack_abs_list = [str(x) for x in raw_ack_abs] if isinstance(raw_ack_abs, list) else None
+
                 try:
                     admitted = await self.orchestrator.admit_and_start_execution(
                         sess,
                         allow_workspace_write=allow_write,
                         executor_id=executor_id,
                         verify_command=verify_cmd,
-                        acknowledge_absent=acknowledge_absent,
+                        expected_wb_version=exp_wb_ver,
+                        checked_action_ids=chk_ids,
+                        expected_workspace_dir=exp_ws,
+                        acknowledged_absent_agents=ack_abs_list,
+                        require_consistency_contract=True,
                     )
                 except ExecutionAdmissionConflictError as conf_exc:
                     await self._send_json(writer, conf_exc.status_code, conf_exc.to_dict())
@@ -914,6 +1028,7 @@ class AsyncHTTPServer:
             "Cache-Control: no-cache, no-store\r\n"
             "Connection: keep-alive\r\n"
             "X-Content-Type-Options: nosniff\r\n"
+            f"X-Roundtable-Boot-Id: {self.boot_id}\r\n"
             "X-Accel-Buffering: no\r\n\r\n"
         ).encode("utf-8")
         writer.write(head)
@@ -988,7 +1103,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="AI圆桌 本地多 CLI 实时会议安全服务")
     parser.add_argument("--host", default="127.0.0.1", help="监听地址 (默认 127.0.0.1)")
     parser.add_argument("--port", type=int, default=8765, help="监听端口 (默认 8765)")
-    parser.add_argument("--workspace", default=str(ROOT_DIR), help="新建会话默认工作目录")
+    parser.add_argument("--workspace", default="", help="新建会话默认工作目录（默认未绑定纯研讨模式）")
     parser.add_argument("--notify-parent", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--wait-for-parent", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()

@@ -1,9 +1,12 @@
 /**
- * AI圆桌 v4 — 多模态文件/图片附件管线、8席空心线性矢量徽标水合、悬浮胶囊输入舱与配置芯片控制器
- * 视觉统一准则：全套 1.65px 圆头空心线性 SVG（以线代面），零 Emoji / 裸符号混排，100% 兼容现有 DOM 契约。
+ * AI圆桌 v4/v5 — 单源显式 Store 多模态附件控制器、局部空心线性矢量徽标水合器与动态驱动目录芯片组件
+ * 架构基线：
+ * 1. 无全局请求拦截、无全文档 DOM 监听，全部状态统一收口至 app.js 单源显式 Store；
+ * 2. 通过局部渲染钩子按需水合单张发言卡、白板区或顶栏徽章，6 席并发流式输出零全树重排；
+ * 3. 模型快选芯片与推理档位胶囊完全由 /api/status 下发的单源 driver_catalog 动态渲染。
  */
 
-const SEAT_VECTOR_ICONS = {
+export const SEAT_VECTOR_ICONS = {
   carbon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 3.5 20.5 8 12 12.5 3.5 8 12 3.5"></polygon><polyline points="3.5 12.8 12 17.2 20.5 12.8"></polyline><polyline points="5.5 17 12 20.5 18.5 17"></polyline></svg>`,
   grok: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20.8s7.2-3.6 7.2-9.2V5.4L12 2.8 4.8 5.4v6.2c0 5.6 7.2 9.2 7.2 9.2z"></path><circle cx="12" cy="11.4" r="2.5"></circle></svg>`,
   astra: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><polyline points="7.2 8.2 3.2 12 7.2 15.8"></polyline><polyline points="16.8 8.2 20.8 12 16.8 15.8"></polyline><line x1="13.6" y1="5.2" x2="10.4" y2="18.8"></line></svg>`,
@@ -14,7 +17,7 @@ const SEAT_VECTOR_ICONS = {
   system: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.4"></circle><circle cx="12" cy="12" r="2.8"></circle></svg>`,
 };
 
-const LINEAR_UI_ICONS = {
+export const LINEAR_UI_ICONS = {
   paperclip: `<svg class="v4-inline-svg" viewBox="0 0 24 24" width="13.5" height="13.5" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.2 11.2l-8.8 8.8a5.8 5.8 0 0 1-8.2-8.2l8.8-8.8a3.9 3.9 0 0 1 5.5 5.5l-8.8 8.8a1.95 1.95 0 0 1-2.76-2.76l8.1-8.1"></path></svg>`,
   close: `<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="6" y1="6" x2="18" y2="18"></line><line x1="18" y1="6" x2="6" y2="18"></line></svg>`,
   adopt: `<svg class="v4-inline-svg" viewBox="0 0 24 24" width="12.5" height="12.5" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"></circle><polyline points="8.4 12.2 11 14.8 15.8 9.6"></polyline></svg>`,
@@ -22,27 +25,6 @@ const LINEAR_UI_ICONS = {
   pin: `<svg class="v4-inline-svg" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8.5 4h7l-1.2 6.2L17.5 13H6.5l3.2-2.8z"></path><line x1="12" y1="13" x2="12" y2="20"></line></svg>`,
   edit: `<svg class="v4-inline-svg" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 19.5l1.4-4.8L15.2 5.4a1.8 1.8 0 0 1 2.5 2.5L8.4 17.2z"></path><line x1="4.5" y1="20.5" x2="19.5" y2="20.5"></line></svg>`,
   copy: `<svg class="v4-inline-svg" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8.5" y="8.5" width="11" height="11" rx="2.2"></rect><path d="M5.5 15.5H5a2 2 0 0 1-2-2v-8.5a2 2 0 0 1 2-2h8.5a2 2 0 0 1 2 2v.5"></path></svg>`,
-};
-
-const MODEL_CHIPS_BY_DRIVER = {
-  agy: [
-    { value: "gemini-4-carbon", label: "Carbon" },
-    { value: "gemini-4-argon", label: "Argon" },
-    { value: "gemini-4-hydrogen", label: "Hydrogen" },
-  ],
-  grok: [
-    { value: "grok-4.7", label: "Grok 4.7" },
-  ],
-  codex: [
-    { value: "gpt-6-astra", label: "GPT-6 Astra" },
-    { value: "gpt-6.1-sol", label: "GPT-6.1 Sol" },
-  ],
-  auto: [
-    { value: "", label: "跟随驱动默认" },
-    { value: "gemini-4-carbon", label: "Carbon" },
-    { value: "gpt-6-astra", label: "Astra" },
-    { value: "grok-4.7", label: "Grok 4.7" },
-  ],
 };
 
 const MODE_SHORT_LABELS = {
@@ -55,12 +37,11 @@ const MODE_SHORT_LABELS = {
 
 const SEAT_CAPS = ["Carbon", "Grok", "Astra", "Vega", "Titan", "Prism"];
 
-const v4State = {
-  token: "",
-  activeSessionId: "",
-  pendingAttachments: [], // [{ id, name, kind, mime_type, size_human, width, height, line_count, previewUrl, uploading }]
-  blobUrlCache: new Map(), // key: `${sid}:${attId}` -> objectURL
-  msgAttachmentsById: new Map(), // msgId -> attachments[]
+const storeBridge = {
+  state: null,
+  authState: null,
+  onUploadStateChange: null,
+  initialized: false,
   dragDepth: 0,
 };
 
@@ -90,117 +71,188 @@ function notifyToast(msg, kind = "info") {
   }, 2800);
 }
 
-/* ==================== 1. 透明拦截增强 fetch：同步鉴权令牌、会话 ID 与附件自动挂载 ==================== */
-
-const rawFetch = window.fetch.bind(window);
-
-window.fetch = async function patchedRoundtableFetch(input, init = {}) {
-  const urlStr = typeof input === "string" ? input : input?.url || "";
-  const hdrs = init?.headers || {};
-  const tok =
-    hdrs["X-Roundtable-Token"] ||
-    hdrs["x-roundtable-token"] ||
-    (hdrs instanceof Headers ? hdrs.get("X-Roundtable-Token") : "");
-  if (tok) {
-    v4State.token = String(tok);
-  }
-
-  const sessStreamMatch = urlStr.match(/\/api\/sessions\/([^/?#]+)\/stream/);
-  if (sessStreamMatch && sessStreamMatch[1]) {
-    const nextSid = decodeURIComponent(sessStreamMatch[1]);
-    if (v4State.activeSessionId && v4State.activeSessionId !== nextSid) {
-      v4State.pendingAttachments = [];
-      renderPendingAttachmentTray();
-    }
-    v4State.activeSessionId = nextSid;
-    setTimeout(() => syncSessionMessageAttachments(nextSid), 260);
-  }
-
-  // 在发起研讨 / 插话 / 追问请求时，自动附加待发送附件 ID 列表
-  const sendMatch = urlStr.match(/\/api\/sessions\/([^/?#]+)\/(start|interrupt|followup)$/);
-  const readyPending = v4State.pendingAttachments.filter((a) => a.id && !a.uploading);
-  let injectedAttsSnapshot = null;
-
-  if (sendMatch && init?.method?.toUpperCase() === "POST" && readyPending.length > 0 && typeof init.body === "string") {
-    try {
-      const parsedBody = JSON.parse(init.body);
-      parsedBody.attachment_ids = readyPending.map((a) => a.id);
-      if (sendMatch[2] === "start" && !String(parsedBody.topic || "").trim()) {
-        parsedBody.topic = `请结合上传的附件（${readyPending.map((a) => a.name).slice(0, 3).join("、")}）开展协同研讨并给出落地方案。`;
-      } else if (sendMatch[2] !== "start" && !String(parsedBody.message || "").trim()) {
-        parsedBody.message = `补充上传了参考附件（${readyPending.map((a) => a.name).slice(0, 3).join("、")}），请结合附件内容继续评估。`;
-      }
-      init = { ...init, body: JSON.stringify(parsedBody) };
-      injectedAttsSnapshot = [...readyPending];
-    } catch {
-      // 保持原请求体
-    }
-  }
-
-  const resp = await rawFetch(input, init);
-
-  // 捕获 bootstrap 返回令牌或创建新会话 ID
-  if (resp.ok && urlStr.includes("/api/auth/bootstrap")) {
-    resp
-      .clone()
-      .json()
-      .then((d) => {
-        if (d?.token) v4State.token = String(d.token);
-      })
-      .catch(() => {});
-  } else if (resp.ok && urlStr === "/api/status") {
-    resp
-      .clone()
-      .json()
-      .then((d) => {
-        if (!v4State.activeSessionId && d?.default_session_id) {
-          v4State.activeSessionId = String(d.default_session_id);
-        }
-      })
-      .catch(() => {});
-  } else if (resp.ok && injectedAttsSnapshot && sendMatch) {
-    const sid = decodeURIComponent(sendMatch[1]);
-    v4State.pendingAttachments = v4State.pendingAttachments.filter(
-      (p) => !injectedAttsSnapshot.some((sent) => sent.id === p.id)
-    );
-    renderPendingAttachmentTray();
-    setTimeout(() => syncSessionMessageAttachments(sid), 240);
-  }
-
-  return resp;
-};
-
-/* ==================== 2. 多模态文件与图片读取、上传与预览灯箱 ==================== */
-
-function readFileAsBase64(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const res = String(reader.result || "");
-      const comma = res.indexOf(",");
-      resolve(comma >= 0 ? res.slice(comma + 1) : res);
-    };
-    reader.onerror = () => reject(new Error(`读取文件失败：${file.name}`));
-    reader.readAsDataURL(file);
-  });
+export function bindV4StoreBridge({ state, authState, onUploadStateChange }) {
+  storeBridge.state = state;
+  storeBridge.authState = authState;
+  storeBridge.onUploadStateChange = typeof onUploadStateChange === "function" ? onUploadStateChange : null;
+  if (!Array.isArray(state.pendingAttachments)) state.pendingAttachments = [];
+  if (!(state.blobUrlCache instanceof Map)) state.blobUrlCache = new Map();
+  if (!(state.msgAttachmentsById instanceof Map)) state.msgAttachmentsById = new Map();
 }
+
+function getPendingAttachments() {
+  return storeBridge.state?.pendingAttachments || [];
+}
+
+function setPendingAttachments(nextList) {
+  if (storeBridge.state) {
+    storeBridge.state.pendingAttachments = nextList;
+  }
+}
+
+function getBlobCache() {
+  return storeBridge.state?.blobUrlCache || new Map();
+}
+
+function getMsgAttachmentMap() {
+  return storeBridge.state?.msgAttachmentsById || new Map();
+}
+
+function getCurrentSessionId() {
+  return String(storeBridge.state?.currentSessionId || "");
+}
+
+function getAuthToken() {
+  return String(storeBridge.authState?.token || "");
+}
+
+function emitUploadStateChanged() {
+  if (storeBridge.onUploadStateChange) {
+    storeBridge.onUploadStateChange();
+  }
+}
+
+export function hasUploadingAttachments() {
+  return getPendingAttachments().some((a) => a && a.uploading === true);
+}
+
+export function getReadyPendingAttachments(forSessionId = "") {
+  const sid = forSessionId || getCurrentSessionId();
+  return getPendingAttachments().filter(
+    (a) => a && a.id && !a.uploading && (!a.sessionId || !sid || a.sessionId === sid)
+  );
+}
+
+function isBlobReferencedInSessionMessages(blobUrl, sessionId) {
+  if (!blobUrl || !blobUrl.startsWith("blob:")) return false;
+  const blobCache = getBlobCache();
+  const msgMap = getMsgAttachmentMap();
+  for (const [, atts] of msgMap.entries()) {
+    if (!Array.isArray(atts)) continue;
+    for (const att of atts) {
+      if (att?.id && blobCache.get(`${sessionId}:${att.id}`) === blobUrl) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function safeRevokeObjectUrl(url) {
+  if (typeof url === "string" && url.startsWith("blob:")) {
+    try {
+      URL.revokeObjectURL(url);
+    } catch {
+      // ignore revoke errors
+    }
+  }
+}
+
+export function revokePendingAttachmentUrl(att, sessionId = "") {
+  if (!att) return;
+  const sid = sessionId || att.sessionId || getCurrentSessionId();
+  const cache = getBlobCache();
+  const cacheKey = sid && att.id ? `${sid}:${att.id}` : "";
+  const url = att.previewUrl || (cacheKey ? cache.get(cacheKey) : "");
+  if (url && !isBlobReferencedInSessionMessages(url, sid)) {
+    safeRevokeObjectUrl(url);
+    if (cacheKey && cache.get(cacheKey) === url) {
+      cache.delete(cacheKey);
+    }
+  }
+}
+
+export function clearPendingAttachmentsOnSend(sentIds, sessionId) {
+  const sentSet = new Set(sentIds || []);
+  const kept = [];
+  for (const item of getPendingAttachments()) {
+    if (sentSet.has(item.id)) {
+      if (item.previewUrl && !isBlobReferencedInSessionMessages(item.previewUrl, sessionId)) {
+        // 保留在 blobUrlCache 供即将到达的本会话消息画廊直接复用，不泄露跨会话引用
+        if (sessionId && item.id) {
+          getBlobCache().set(`${sessionId}:${item.id}`, item.previewUrl);
+        } else {
+          safeRevokeObjectUrl(item.previewUrl);
+        }
+      }
+    } else {
+      kept.push(item);
+    }
+  }
+  setPendingAttachments(kept);
+  renderPendingAttachmentTray();
+  emitUploadStateChanged();
+}
+
+export function resetAttachmentsForSessionSwitch(nextSessionId) {
+  const prevSid = getCurrentSessionId();
+  for (const item of getPendingAttachments()) {
+    if (item?.previewUrl) {
+      safeRevokeObjectUrl(item.previewUrl);
+    }
+    if (item?.id && (item.sessionId || prevSid)) {
+      getBlobCache().delete(`${item.sessionId || prevSid}:${item.id}`);
+    }
+  }
+  setPendingAttachments([]);
+
+  const cache = getBlobCache();
+  for (const [key, url] of Array.from(cache.entries())) {
+    if (!nextSessionId || !key.startsWith(`${nextSessionId}:`)) {
+      safeRevokeObjectUrl(url);
+      cache.delete(key);
+    }
+  }
+  getMsgAttachmentMap().clear();
+  renderPendingAttachmentTray();
+  emitUploadStateChanged();
+}
+
+export function handleRemoteAttachmentDeleted(attId, sessionId = "") {
+  const sid = sessionId || getCurrentSessionId();
+  const cur = getPendingAttachments();
+  const target = cur.find((x) => x.id === attId);
+  if (target) {
+    revokePendingAttachmentUrl(target, sid);
+    setPendingAttachments(cur.filter((x) => x.id !== attId));
+    renderPendingAttachmentTray();
+    emitUploadStateChanged();
+  }
+  if (sid && attId) {
+    const cKey = `${sid}:${attId}`;
+    const cachedUrl = getBlobCache().get(cKey);
+    if (cachedUrl) {
+      safeRevokeObjectUrl(cachedUrl);
+      getBlobCache().delete(cKey);
+    }
+  }
+}
+
+/* ==================== 多模态二进制流直传、预览与删除闭环 ==================== */
 
 async function fetchAttachmentBlobUrl(sessionId, attId, existingPreview = "") {
   if (existingPreview) return existingPreview;
+  const cache = getBlobCache();
   const cacheKey = `${sessionId}:${attId}`;
-  if (v4State.blobUrlCache.has(cacheKey)) {
-    return v4State.blobUrlCache.get(cacheKey);
+  if (cache.has(cacheKey)) {
+    return cache.get(cacheKey);
   }
-  if (!v4State.token || !sessionId || !attId) return "";
+  const token = getAuthToken();
+  if (!token || !sessionId || !attId) return "";
   try {
-    const res = await rawFetch(`/api/sessions/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(attId)}/raw`, {
-      method: "GET",
-      headers: { "X-Roundtable-Token": v4State.token },
-    });
+    const res = await fetch(
+      `/api/sessions/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(attId)}/raw`,
+      {
+        method: "GET",
+        headers: { "X-Roundtable-Token": token },
+      }
+    );
     if (!res.ok) return "";
+    if (getCurrentSessionId() !== sessionId) return "";
     const blob = await res.blob();
+    if (getCurrentSessionId() !== sessionId) return "";
     const objUrl = URL.createObjectURL(blob);
-    v4State.blobUrlCache.set(cacheKey, objUrl);
+    cache.set(cacheKey, objUrl);
     return objUrl;
   } catch {
     return "";
@@ -210,8 +262,12 @@ async function fetchAttachmentBlobUrl(sessionId, attId, existingPreview = "") {
 export async function handleSelectedFiles(fileList) {
   const files = Array.from(fileList || []).filter(Boolean);
   if (!files.length) return;
-  const sid = v4State.activeSessionId;
-  if (!sid) {
+  if (storeBridge.state?.snapshotLoading) {
+    notifyToast("正在同步会话快照，请稍候添加附件", "warn");
+    return;
+  }
+  const targetSessionId = getCurrentSessionId();
+  if (!targetSessionId) {
     notifyToast("正在初始化本地会话，请稍候再试", "warn");
     return;
   }
@@ -224,65 +280,82 @@ export async function handleSelectedFiles(fileList) {
     const tempKey = `tmp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     const isImg = /^image\/(png|jpeg|webp|gif)$/i.test(file.type);
     const localPreviewUrl = isImg ? URL.createObjectURL(file) : "";
+    const fallbackName = `粘贴截图_${new Date().toTimeString().slice(0, 8).replace(/:/g, "")}.png`;
+    const fileName = file.name || fallbackName;
     const placeholder = {
       tempKey,
       id: "",
-      name: file.name || `粘贴截图_${new Date().toTimeString().slice(0, 8).replace(/:/g, "")}.png`,
+      sessionId: targetSessionId,
+      name: fileName,
       kind: isImg ? "image" : "doc",
       mime_type: file.type || "application/octet-stream",
       size_human: file.size < 1024 ? `${file.size} B` : `${(file.size / 1024).toFixed(1)} KB`,
       width: 0,
       height: 0,
       line_count: 0,
-      ext: (file.name.match(/\.[A-Za-z0-9]+$/) || [""])[0],
+      ext: (fileName.match(/\.[A-Za-z0-9]+$/) || [""])[0],
       previewUrl: localPreviewUrl,
       uploading: true,
     };
-    v4State.pendingAttachments.push(placeholder);
+    getPendingAttachments().push(placeholder);
     renderPendingAttachmentTray();
+    emitUploadStateChanged();
 
     try {
-      const b64 = await readFileAsBase64(file);
-      const res = await rawFetch(`/api/sessions/${encodeURIComponent(sid)}/attachments`, {
+      const rawBuf = await file.arrayBuffer();
+      const token = getAuthToken();
+      const res = await fetch(`/api/sessions/${encodeURIComponent(targetSessionId)}/attachments`, {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
-          ...(v4State.token ? { "X-Roundtable-Token": v4State.token } : {}),
+          "Content-Type": "application/octet-stream",
+          "X-Attachment-Filename": encodeURIComponent(placeholder.name),
+          "X-Attachment-Mime": placeholder.mime_type || "application/octet-stream",
+          ...(token ? { "X-Roundtable-Token": token } : {}),
         },
-        body: JSON.stringify({
-          filename: placeholder.name,
-          mime_type: file.type || "",
-          data_base64: b64,
-        }),
+        body: rawBuf,
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data?.attachment?.id) {
         throw new Error(data.error || `上传失败 (${res.status})`);
       }
       const saved = data.attachment;
-      if (localPreviewUrl) {
-        v4State.blobUrlCache.set(`${sid}:${saved.id}`, localPreviewUrl);
+      // 跨会话归属二次核验：若上传期间用户已切走会话，立即回收本地预览 URL 并不污染新会话托盘
+      if (getCurrentSessionId() !== targetSessionId) {
+        safeRevokeObjectUrl(localPreviewUrl);
+        continue;
       }
-      const idx = v4State.pendingAttachments.findIndex((x) => x.tempKey === tempKey);
+      if (localPreviewUrl) {
+        getBlobCache().set(`${targetSessionId}:${saved.id}`, localPreviewUrl);
+      }
+      const list = getPendingAttachments();
+      const idx = list.findIndex((x) => x.tempKey === tempKey);
       if (idx >= 0) {
-        // 去重同 ID 附件
-        const dupIdx = v4State.pendingAttachments.findIndex((x, i) => i !== idx && x.id === saved.id);
+        const dupIdx = list.findIndex((x, i) => i !== idx && x.id === saved.id);
         if (dupIdx >= 0) {
-          v4State.pendingAttachments.splice(idx, 1);
+          safeRevokeObjectUrl(localPreviewUrl);
+          list.splice(idx, 1);
         } else {
-          v4State.pendingAttachments[idx] = {
+          list[idx] = {
             ...saved,
+            sessionId: targetSessionId,
             previewUrl: localPreviewUrl,
             uploading: false,
           };
         }
+      } else {
+        safeRevokeObjectUrl(localPreviewUrl);
       }
       renderPendingAttachmentTray();
+      emitUploadStateChanged();
       ensureSendableWithAttachmentOnly();
     } catch (err) {
-      v4State.pendingAttachments = v4State.pendingAttachments.filter((x) => x.tempKey !== tempKey);
-      renderPendingAttachmentTray();
-      notifyToast(err.message || `上传附件 ${file.name} 失败`, "err");
+      safeRevokeObjectUrl(localPreviewUrl);
+      if (getCurrentSessionId() === targetSessionId) {
+        setPendingAttachments(getPendingAttachments().filter((x) => x.tempKey !== tempKey));
+        renderPendingAttachmentTray();
+        emitUploadStateChanged();
+      }
+      notifyToast(err.message || `上传附件 ${fileName} 失败`, "err");
     }
   }
 }
@@ -290,23 +363,26 @@ export async function handleSelectedFiles(fileList) {
 function ensureSendableWithAttachmentOnly() {
   const inp = $id("topicInput");
   if (!inp) return;
-  if (v4State.pendingAttachments.some((a) => a.id && !a.uploading) && !inp.placeholder.includes("可直接点击")) {
+  if (getReadyPendingAttachments().length > 0 && !inp.placeholder.includes("可直接点击")) {
     inp.placeholder = "已就绪附件 · 可补充说明，或直接按 Enter / 点击右侧按钮开启多模态研讨";
   }
 }
 
-function renderPendingAttachmentTray() {
+export function renderPendingAttachmentTray() {
   const tray = $id("v4AttachmentTray");
   if (!tray) return;
-  if (!v4State.pendingAttachments.length) {
+  const list = getPendingAttachments();
+  if (!list.length) {
     tray.classList.add("hidden");
     tray.innerHTML = "";
     return;
   }
   tray.classList.remove("hidden");
-  tray.innerHTML = v4State.pendingAttachments
+  tray.innerHTML = list
     .map((att, idx) => {
-      const extLabel = String(att.ext || "").replace(".", "").toUpperCase().slice(0, 4) || (att.kind === "code" ? "CODE" : "FILE");
+      const extLabel =
+        String(att.ext || "").replace(".", "").toUpperCase().slice(0, 4) ||
+        (att.kind === "code" ? "CODE" : "FILE");
       const metaParts = [];
       if (att.uploading) {
         metaParts.push("上传校验中…");
@@ -336,9 +412,12 @@ function renderPendingAttachmentTray() {
   tray.querySelectorAll("[data-v4-zoom-idx]").forEach((imgEl) => {
     imgEl.onclick = (e) => {
       e.stopPropagation();
-      const item = v4State.pendingAttachments[Number(imgEl.dataset.v4ZoomIdx)];
+      const item = getPendingAttachments()[Number(imgEl.dataset.v4ZoomIdx)];
       if (item?.previewUrl) {
-        openImageLightbox(item.previewUrl, `${item.name} (${item.width && item.height ? `${item.width}×${item.height} · ` : ""}${item.size_human || ""})`);
+        openImageLightbox(
+          item.previewUrl,
+          `${item.name} (${item.width && item.height ? `${item.width}×${item.height} · ` : ""}${item.size_human || ""})`
+        );
       }
     };
   });
@@ -346,21 +425,30 @@ function renderPendingAttachmentTray() {
   tray.querySelectorAll("[data-v4-rm-idx]").forEach((btn) => {
     btn.onclick = async (e) => {
       e.stopPropagation();
+      const targetSid = getCurrentSessionId();
+      const listNow = getPendingAttachments();
       const idx = Number(btn.dataset.v4RmIdx);
-      const removed = v4State.pendingAttachments[idx];
-      v4State.pendingAttachments.splice(idx, 1);
+      const removed = listNow[idx];
+      if (!removed) return;
+      listNow.splice(idx, 1);
+      revokePendingAttachmentUrl(removed, targetSid);
       renderPendingAttachmentTray();
-      if (removed?.id && v4State.activeSessionId && v4State.token) {
-        rawFetch(`/api/sessions/${encodeURIComponent(v4State.activeSessionId)}/attachments/${encodeURIComponent(removed.id)}`, {
-          method: "DELETE",
-          headers: { "X-Roundtable-Token": v4State.token },
-        }).catch(() => {});
+      emitUploadStateChanged();
+      const token = getAuthToken();
+      if (removed.id && targetSid && token) {
+        fetch(
+          `/api/sessions/${encodeURIComponent(targetSid)}/attachments/${encodeURIComponent(removed.id)}`,
+          {
+            method: "DELETE",
+            headers: { "X-Roundtable-Token": token },
+          }
+        ).catch(() => {});
       }
     };
   });
 }
 
-function openImageLightbox(src, caption = "") {
+export function openImageLightbox(src, caption = "") {
   const modal = $id("v4LightboxModal");
   const img = $id("v4LightboxImg");
   const cap = $id("v4LightboxCaption");
@@ -370,84 +458,71 @@ function openImageLightbox(src, caption = "") {
   modal.classList.remove("hidden");
 }
 
-function closeImageLightbox() {
+export function closeImageLightbox() {
   const modal = $id("v4LightboxModal");
   if (modal) modal.classList.add("hidden");
 }
 
-async function syncSessionMessageAttachments(sessionId) {
-  if (!sessionId || !v4State.token) return;
-  try {
-    const res = await rawFetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
-      method: "GET",
-      headers: { "X-Roundtable-Token": v4State.token },
-    });
-    if (!res.ok) return;
-    const data = await res.json();
-    const msgs = data?.session?.messages || [];
-    for (const m of msgs) {
-      if (m?.id && Array.isArray(m.attachments) && m.attachments.length > 0) {
-        v4State.msgAttachmentsById.set(m.id, m.attachments);
-      }
-    }
-    await decorateMessageAttachmentGalleries();
-  } catch {
-    // 忽略后台拉取异常
+export async function decorateMessageCardAttachments(cardEl, msgObj, fixedSessionId = "") {
+  if (!cardEl || !msgObj?.id) return;
+  const sid = fixedSessionId || getCurrentSessionId();
+  const atts = Array.isArray(msgObj.attachments)
+    ? msgObj.attachments
+    : getMsgAttachmentMap().get(msgObj.id);
+  if (!Array.isArray(atts) || !atts.length) return;
+
+  getMsgAttachmentMap().set(msgObj.id, atts);
+  let gallery = cardEl.querySelector(".v4-msg-attachments");
+  if (gallery && Number(gallery.dataset.attCount || "0") === atts.length && gallery.childElementCount > 0) {
+    return;
   }
-}
+  if (!gallery) {
+    gallery = document.createElement("div");
+    gallery.className = "v4-msg-attachments";
+    cardEl.appendChild(gallery);
+  }
+  gallery.dataset.attCount = String(atts.length);
 
-async function decorateMessageAttachmentGalleries() {
-  const sid = v4State.activeSessionId;
-  for (const [msgId, atts] of v4State.msgAttachmentsById.entries()) {
-    const card = document.getElementById(`msg-${msgId}`);
-    if (!card || !Array.isArray(atts) || !atts.length) continue;
-    let gallery = card.querySelector(".v4-msg-attachments");
-    if (gallery && Number(gallery.dataset.attCount || "0") === atts.length) continue;
-    if (!gallery) {
-      gallery = document.createElement("div");
-      gallery.className = "v4-msg-attachments";
-      card.appendChild(gallery);
-    }
-    gallery.dataset.attCount = String(atts.length);
-
-    const parts = [];
-    for (const att of atts) {
-      if (att.kind === "image") {
-        const blobUrl = await fetchAttachmentBlobUrl(sid, att.id);
-        if (blobUrl) {
-          const cap = `${att.name}${att.width && att.height ? ` · ${att.width}×${att.height}` : ""}`;
-          parts.push(
-            `<div class="v4-msg-img-card" data-lightbox-src="${escapeAttr(blobUrl)}" data-lightbox-cap="${escapeAttr(cap)}">` +
+  const parts = [];
+  for (const att of atts) {
+    if (att.kind === "image") {
+      const blobUrl = await fetchAttachmentBlobUrl(sid, att.id);
+      if (getCurrentSessionId() !== sid) return;
+      if (blobUrl) {
+        const cap = `${att.name}${att.width && att.height ? ` · ${att.width}×${att.height}` : ""}`;
+        parts.push(
+          `<div class="v4-msg-img-card" data-lightbox-src="${escapeAttr(blobUrl)}" data-lightbox-cap="${escapeAttr(cap)}">` +
             `<img src="${escapeAttr(blobUrl)}" alt="${escapeAttr(att.name)}" />` +
             `<div class="v4-msg-img-cap">${escapeAttr(att.name)}</div>` +
             `</div>`
-          );
-          continue;
-        }
+        );
+        continue;
       }
-      const meta = att.line_count > 0 ? `${att.line_count} 行` : att.size_human || "";
-      parts.push(
-        `<span class="v4-msg-doc-pill">` +
+    }
+    const meta = att.line_count > 0 ? `${att.line_count} 行` : att.size_human || "";
+    parts.push(
+      `<span class="v4-msg-doc-pill">` +
         `${LINEAR_UI_ICONS.paperclip}<span>${escapeAttr(att.name)}</span>` +
         (meta ? `<em>${escapeAttr(meta)}</em>` : "") +
         `</span>`
-      );
-    }
-    gallery.innerHTML = parts.join("");
-    gallery.querySelectorAll("[data-lightbox-src]").forEach((node) => {
-      node.onclick = (e) => {
-        e.stopPropagation();
-        openImageLightbox(node.dataset.lightboxSrc, node.dataset.lightboxCap);
-      };
-    });
+    );
   }
+  if (!cardEl.isConnected || getCurrentSessionId() !== sid) return;
+  gallery.innerHTML = parts.join("");
+  gallery.querySelectorAll("[data-lightbox-src]").forEach((node) => {
+    node.onclick = (e) => {
+      e.stopPropagation();
+      openImageLightbox(node.dataset.lightboxSrc, node.dataset.lightboxCap);
+    };
+  });
 }
 
-/* ==================== 3. 8 席空心线性矢量徽标与白板操作微图标水合器 ==================== */
+/* ==================== 局部空心线性矢量徽标与白板微图标水合器（零全文档轮询） ==================== */
 
-function hydrateVectorIcons() {
-  // 1. 顶栏与设置弹窗席位徽章（注意 app.js syncDynamicRosterNames 会重置 textContent，水合器自动实时恢复 SVG）
-  document.querySelectorAll("[data-seat-icon]").forEach((node) => {
+export function hydrateVectorIcons(scopeRoot = document) {
+  const root = scopeRoot && typeof scopeRoot.querySelectorAll === "function" ? scopeRoot : document;
+
+  root.querySelectorAll("[data-seat-icon]").forEach((node) => {
     const key = node.dataset.seatIcon;
     const svg = SEAT_VECTOR_ICONS[key];
     if (svg && !node.querySelector("svg")) {
@@ -455,8 +530,11 @@ function hydrateVectorIcons() {
     }
   });
 
-  // 2. 消息流发言卡片迷你头像与右侧操作微图标
-  document.querySelectorAll(".msg-card").forEach((card) => {
+  const msgCards =
+    root.classList && root.classList.contains("msg-card")
+      ? [root]
+      : Array.from(root.querySelectorAll(".msg-card"));
+  for (const card of msgCards) {
     const av = card.querySelector(".msg-avatar-mini");
     if (av && !av.querySelector("svg")) {
       for (const key of Object.keys(SEAT_VECTOR_ICONS)) {
@@ -470,10 +548,9 @@ function hydrateVectorIcons() {
     if (copyBtn && !copyBtn.querySelector("svg")) {
       copyBtn.innerHTML = `${LINEAR_UI_ICONS.copy}<span>复制</span>`;
     }
-  });
+  }
 
-  // 3. 右侧会议白板来源迷你徽章（将单汉字圆点升级为同源线性微缩 SVG）及操作按钮微图标
-  document.querySelectorAll(".wb-seat-mini-badge").forEach((badge) => {
+  root.querySelectorAll(".wb-seat-mini-badge").forEach((badge) => {
     const dot = badge.querySelector(".mini-seat-dot");
     if (!dot || dot.querySelector("svg")) return;
     for (const key of Object.keys(SEAT_VECTOR_ICONS)) {
@@ -484,7 +561,7 @@ function hydrateVectorIcons() {
     }
   });
 
-  document.querySelectorAll(".wb-pool-actions").forEach((bar) => {
+  root.querySelectorAll(".wb-pool-actions").forEach((bar) => {
     const pinBtn = bar.querySelector("[data-wb-act='pin']");
     if (pinBtn && !pinBtn.querySelector("svg")) {
       const lbl = pinBtn.textContent.trim();
@@ -508,22 +585,79 @@ function hydrateVectorIcons() {
     }
   });
 
-  // 4. 侧栏历史删除、源码胶囊移除与任务勾选框统一水合为线性 SVG
-  document.querySelectorAll(".session-del-btn, .chip-file-remove").forEach((btn) => {
+  root.querySelectorAll(".session-del-btn, .chip-file-remove").forEach((btn) => {
     if (!btn.querySelector("svg")) {
       btn.innerHTML = LINEAR_UI_ICONS.close;
     }
   });
-  document.querySelectorAll(".wb-task-check.checked").forEach((chk) => {
+  root.querySelectorAll(".wb-task-check.checked").forEach((chk) => {
     if (!chk.querySelector("svg")) {
       chk.innerHTML = `<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="5 12.5 9.6 17 19 7.5"></polyline></svg>`;
     }
   });
 }
 
-/* ==================== 4. 配置中心「模型快选芯片」与「档位分段胶囊」双向同步 ==================== */
+/* ==================== 单源 driver_catalog 动态模型快选芯片与档位胶囊 ==================== */
 
-function renderSeatModelAndEffortChips(seatCap) {
+function formatModelShortLabel(modelId, specLabel = "") {
+  if (specLabel) return specLabel;
+  const clean = String(modelId || "").trim();
+  if (!clean) return "跟随驱动默认";
+  if (clean.startsWith("gemini-4-")) {
+    const suffix = clean.slice("gemini-4-".length);
+    return suffix.charAt(0).toUpperCase() + suffix.slice(1);
+  }
+  if (clean === "grok-4.7") return "Grok 4.7";
+  if (clean === "gpt-6-astra") return "GPT-6 Astra";
+  if (clean === "gpt-6.1-sol") return "GPT-6.1 Sol";
+  return clean;
+}
+
+function buildDynamicModelChipsForDriver(driverKey) {
+  const catalog = storeBridge.state?.system?.driver_catalog;
+  const driversMap = catalog?.drivers || {};
+  const drv = String(driverKey || "auto").toLowerCase();
+
+  if (drv !== "auto" && driversMap[drv]) {
+    const dEntry = driversMap[drv];
+    if (Array.isArray(dEntry.recommended_models) && dEntry.recommended_models.length > 0) {
+      return dEntry.recommended_models.map((item) =>
+        typeof item === "string"
+          ? { value: item, label: formatModelShortLabel(item) }
+          : { value: String(item.value || item.id || ""), label: formatModelShortLabel(item.value || item.id, item.label) }
+      );
+    }
+    const modelsObj = dEntry.models || {};
+    const concreteKeys = Object.keys(modelsObj).filter(
+      (k) =>
+        k &&
+        !k.includes("*") &&
+        !k.includes("(") &&
+        !k.startsWith("gemini-pro-orchestrator") &&
+        modelsObj[k]?.supports_effort !== false
+    );
+    if (concreteKeys.length > 0) {
+      return concreteKeys.map((k) => ({
+        value: k,
+        label: formatModelShortLabel(k, modelsObj[k]?.label || ""),
+      }));
+    }
+  }
+
+  // auto 驱动：聚合各已声明驱动的默认代表模型
+  const autoChips = [{ value: "", label: "跟随驱动默认" }];
+  const seen = new Set([""]);
+  for (const dk of Object.keys(driversMap)) {
+    const defModel = String(driversMap[dk]?.default_model || "").trim();
+    if (defModel && !seen.has(defModel)) {
+      seen.add(defModel);
+      autoChips.push({ value: defModel, label: formatModelShortLabel(defModel) });
+    }
+  }
+  return autoChips;
+}
+
+export function renderSeatModelAndEffortChips(seatCap) {
   const drvSel = $id(`cfg${seatCap}Driver`);
   const modelInp = $id(`cfg${seatCap}Model`);
   const chipBar = $id(`v4ModelChips${seatCap}`);
@@ -533,13 +667,14 @@ function renderSeatModelAndEffortChips(seatCap) {
   if (!drvSel || !modelInp || !chipBar || !discSel || !effortSeg) return;
 
   const drv = drvSel.value || "auto";
-  const chips = MODEL_CHIPS_BY_DRIVER[drv] || MODEL_CHIPS_BY_DRIVER.auto;
+  const chips = buildDynamicModelChipsForDriver(drv);
   const curModel = modelInp.value.trim();
   const matchesPreset = chips.some((c) => c.value.toLowerCase() === curModel.toLowerCase());
 
   chipBar.innerHTML = chips
     .map((c) => {
-      const isAct = c.value.toLowerCase() === curModel.toLowerCase() || (!curModel && c.value === chips[0].value);
+      const isAct =
+        c.value.toLowerCase() === curModel.toLowerCase() || (!curModel && chips[0] && c.value === chips[0].value);
       return `<button type="button" class="v4-model-chip${isAct ? " active" : ""}" data-chip-model="${escapeAttr(c.value)}">${escapeAttr(c.label)}</button>`;
     })
     .join("");
@@ -557,7 +692,6 @@ function renderSeatModelAndEffortChips(seatCap) {
     };
   });
 
-  // 同步合法推理档位胶囊条，并默认将执行档位对齐讨论档位
   if (discSel.disabled || !discSel.options.length || (discSel.options.length === 1 && !discSel.options[0].value)) {
     effortSeg.innerHTML = `<span class="v4-effort-muted-tag">自动省略档位</span>`;
   } else {
@@ -593,19 +727,17 @@ function renderSeatModelAndEffortChips(seatCap) {
   }
 }
 
-function refreshAllModalSeatChips() {
+export function refreshAllModalSeatChips() {
   SEAT_CAPS.forEach((cap) => renderSeatModelAndEffortChips(cap));
 }
 
-/* ==================== 5. 输入舱策略胶囊摘要同步与纯附件直发支持 ==================== */
-
-function syncComposerStrategySummary() {
+export function syncComposerStrategySummary() {
   const txtEl = $id("v4StrategySummaryText");
   const autoDot = $id("v4AutoExecDot");
   if (!txtEl) return;
 
   const activeModeBtn = document.querySelector("#inlineModeSelect .mode-seg-pill.active");
-  const modeKey = activeModeBtn?.dataset.collabOpt || "deep_deliberation";
+  const modeKey = activeModeBtn?.dataset.collabOpt || storeBridge.state?.collabMode || "deep_deliberation";
   const modeLabel = MODE_SHORT_LABELS[modeKey] || "深度研讨";
 
   const ringCountTxt = ($id("ringSeatCountLabel")?.textContent || "3 席").replace("参会", "").trim();
@@ -616,35 +748,20 @@ function syncComposerStrategySummary() {
   autoDot?.classList.toggle("hidden", !autoOn);
 }
 
-function closeV4Popovers() {
+export function closeV4Popovers() {
   $id("v4AttachPopover")?.classList.add("hidden");
   $id("v4PlusAttachBtn")?.setAttribute("aria-expanded", "false");
   $id("v4ModePopover")?.classList.add("hidden");
   $id("v4ModeTriggerPill")?.setAttribute("aria-expanded", "false");
 }
 
-/* ==================== 6. 事件绑定与生命周期启动 ==================== */
+export function initV4Enhancements() {
+  if (storeBridge.initialized) return;
+  storeBridge.initialized = true;
 
-function initV4Enhancements() {
-  hydrateVectorIcons();
+  hydrateVectorIcons(document);
   syncComposerStrategySummary();
 
-  // 监听 DOM 变化，实时水合新增发言卡/白板 SVG 图标、挂载消息附件画廊并刷新策略胶囊文案
-  const obsTarget = document.body;
-  let rafScheduled = false;
-  const observer = new MutationObserver(() => {
-    if (rafScheduled) return;
-    rafScheduled = true;
-    requestAnimationFrame(() => {
-      rafScheduled = false;
-      hydrateVectorIcons();
-      syncComposerStrategySummary();
-      decorateMessageAttachmentGalleries();
-    });
-  });
-  observer.observe(obsTarget, { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
-
-  // 1. Launchpad 展开/收起 4–6 席高阶预设
   const morePresetsBtn = $id("v4ToggleMorePresetsBtn");
   morePresetsBtn?.addEventListener("click", () => {
     const extras = document.querySelectorAll(".v4-extra-scenario");
@@ -655,7 +772,6 @@ function initV4Enhancements() {
     if (span) span.textContent = isNowOpen ? "收起 4–6 席高阶阵容" : "展开 4–6 席高阶阵容";
   });
 
-  // 2. 结构化纯文本槽位胶囊（零系统文件弹窗副作用，点击仅向输入舱追加结构化维度引导）
   document.querySelectorAll("[data-prompt-slot]").forEach((pill) => {
     pill.addEventListener("click", () => {
       const inp = $id("topicInput");
@@ -672,7 +788,6 @@ function initV4Enhancements() {
     });
   });
 
-  // 3. [+] 菜单与快捷附件按钮
   const fileInp = $id("v4HiddenFileInput");
   const imgInp = $id("v4HiddenImageInput");
 
@@ -715,7 +830,6 @@ function initV4Enhancements() {
     }
   });
 
-  // 4. 剪贴板 ⌘V 直接粘贴截图或文件
   document.addEventListener("paste", async (e) => {
     const activeTag = document.activeElement?.tagName || "";
     const inModalInput = document.activeElement?.closest("#settingsModal") && activeTag === "INPUT";
@@ -736,12 +850,11 @@ function initV4Enhancements() {
     }
   });
 
-  // 5. 全窗口拖拽添加图片与文件
   const dropOverlay = $id("v4DropOverlay");
   window.addEventListener("dragenter", (e) => {
     if (!e.dataTransfer?.types?.includes("Files")) return;
     e.preventDefault();
-    v4State.dragDepth += 1;
+    storeBridge.dragDepth += 1;
     dropOverlay?.classList.remove("hidden");
   });
   window.addEventListener("dragover", (e) => {
@@ -751,41 +864,20 @@ function initV4Enhancements() {
   });
   window.addEventListener("dragleave", (e) => {
     if (!e.dataTransfer?.types?.includes("Files")) return;
-    v4State.dragDepth = Math.max(0, v4State.dragDepth - 1);
-    if (v4State.dragDepth === 0) {
+    storeBridge.dragDepth = Math.max(0, storeBridge.dragDepth - 1);
+    if (storeBridge.dragDepth === 0) {
       dropOverlay?.classList.add("hidden");
     }
   });
   window.addEventListener("drop", async (e) => {
     if (!e.dataTransfer?.files?.length) return;
     e.preventDefault();
-    v4State.dragDepth = 0;
+    storeBridge.dragDepth = 0;
     dropOverlay?.classList.add("hidden");
     await handleSelectedFiles(e.dataTransfer.files);
     $id("topicInput")?.focus();
   });
 
-  // 6. 纯附件免填字一键发送支持（当输入框为空但已挂有就绪附件时自动填入语义引导词）
-  const prefillIfAttachmentOnly = () => {
-    const inp = $id("topicInput");
-    const ready = v4State.pendingAttachments.filter((a) => a.id && !a.uploading);
-    if (inp && !inp.value.trim() && ready.length > 0) {
-      inp.value = `请结合所附文件/截图（${ready.map((a) => a.name).slice(0, 3).join("、")}）进行协同分析并给出具体方案。`;
-      inp.dispatchEvent(new Event("input", { bubbles: true }));
-    }
-  };
-  $id("primaryActionBtn")?.addEventListener("click", prefillIfAttachmentOnly, true);
-  $id("topicInput")?.addEventListener(
-    "keydown",
-    (e) => {
-      if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
-        prefillIfAttachmentOnly();
-      }
-    },
-    true
-  );
-
-  // 7. 策略与阵容速调胶囊浮层
   $id("v4ModeTriggerPill")?.addEventListener("click", (e) => {
     e.stopPropagation();
     const pop = $id("v4ModePopover");
@@ -802,7 +894,6 @@ function initV4Enhancements() {
     $id("railSettingsBtn")?.click();
   });
 
-  // 8. 配置中心：三分导航兼容映射 + 模型芯片联动
   $id("settingsModal")?.addEventListener("roundtable:settings-open", refreshAllModalSeatChips);
 
   SEAT_CAPS.forEach((cap) => {
@@ -818,7 +909,6 @@ function initV4Enhancements() {
     });
   });
 
-  // 9. 图片预览灯箱关闭与全局快捷键（⌘U 添加附件 / Esc 关闭浮层与灯箱）
   $id("v4LightboxCloseBtn")?.addEventListener("click", closeImageLightbox);
   $id("v4LightboxModal")?.addEventListener("click", (e) => {
     if (e.target === $id("v4LightboxModal")) closeImageLightbox();
@@ -835,7 +925,6 @@ function initV4Enhancements() {
     }
   });
 
-  // 扩展原生菜单钩子 window.__roundtableMenu('attachFiles')
   const prevMenuHook = window.__roundtableMenu;
   window.__roundtableMenu = function patchedRoundtableMenu(cmd) {
     if (cmd === "attachFiles") {

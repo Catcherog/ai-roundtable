@@ -15,6 +15,7 @@ from typing import Dict, List, Optional, Tuple
 from .process_watchdog import (
     SupervisedProcessHandle,
     is_process_group_alive,
+    sanitize_subprocess_env,
     spawn_supervised_cli,
     terminate_and_reap_process_group,
 )

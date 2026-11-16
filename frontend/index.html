@@ -1557,6 +1557,13 @@
                 <span class="modal-sec-title">本地项目工作区目录 (<code>cwd</code>) 与自动验证钩子</span>
                 <span class="modal-sec-hint">写前自动生成无 Git 依赖 CAS 快照 · 支持一键原子回滚</span>
               </div>
+              <div class="exec-mode-header" style="margin-bottom: 8px;">
+                <span class="exec-mode-label">目录绑定作用范围</span>
+                <div class="segmented-control" id="cfgWsBindScopeSeg">
+                  <button type="button" class="seg-btn active" data-ws-bind-scope="session" title="走会话工作区状态机闸门绑定至当前活跃会话">绑定至当前会话</button>
+                  <button type="button" class="seg-btn" data-ws-bind-scope="default_only" title="仅更新新建会话默认工作区，不改动当前活跃会话">仅设为新建默认</button>
+                </div>
+              </div>
               <div class="input-with-btn">
                 <input type="text" id="cfgWorkspaceDir" class="text-input" placeholder="/Users/yourname/project" />
                 <button type="button" id="browseWorkspaceBtn" class="mini-outline-btn">选择文件夹…</button>

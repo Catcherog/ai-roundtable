@@ -50,6 +50,44 @@ def count_file_lines_cached(full_path: str, st: Optional[os.stat_result] = None)
     return lines
 
 
+def _read_git_index_bytes(real_ws: str) -> bytes:
+    """纯标准库读取 .git/index 原始字节（支持 worktree/submodule gitdir 文件），零子进程开销。"""
+    dot_git = os.path.join(real_ws, ".git")
+    git_dir = ""
+    try:
+        if os.path.isdir(dot_git):
+            git_dir = dot_git
+        elif os.path.isfile(dot_git):
+            raw_ptr = open(dot_git, "r", encoding="utf-8", errors="ignore").read(1024).strip()
+            if raw_ptr.startswith("gitdir:"):
+                cand = raw_ptr.split(":", 1)[1].strip()
+                git_dir = cand if os.path.isabs(cand) else os.path.normpath(os.path.join(real_ws, cand))
+        if not git_dir:
+            return b""
+        idx_path = os.path.join(git_dir, "index")
+        if os.path.isfile(idx_path) and os.path.getsize(idx_path) <= 32 * 1024 * 1024:
+            with open(idx_path, "rb") as f:
+                return f.read()
+    except OSError:
+        return b""
+    return b""
+
+
+def is_untracked_output_dir(real_ws: str, rel_dir_posix: str, git_index_bytes: Optional[bytes] = None) -> bool:
+    """判断 output/ 构建归档目录是否未纳入 Git 版本控制（未跟踪时默认忽略）。"""
+    clean_rel = rel_dir_posix.strip("/")
+    if not clean_rel:
+        return False
+    base_name = clean_rel.rsplit("/", 1)[-1]
+    if base_name != "output":
+        return False
+    idx_buf = _read_git_index_bytes(real_ws) if git_index_bytes is None else git_index_bytes
+    if not idx_buf:
+        return True
+    needle = (clean_rel + "/").encode("utf-8")
+    return needle not in idx_buf
+
+
 def scan_workspace_index_cached(
     real_ws: str,
     ignored_dirs: set,
@@ -66,6 +104,7 @@ def scan_workspace_index_cached(
         if not force and hit and (now - hit[0]) < _WS_INDEX_TTL_SEC:
             return list(hit[1])
 
+    git_idx_bytes = _read_git_index_bytes(real_ws)
     collected: List[dict] = []
     for root_d, dirs, files in os.walk(real_ws):
         rel_dir = os.path.relpath(root_d, real_ws)
@@ -73,13 +112,15 @@ def scan_workspace_index_cached(
         if depth > max_depth:
             dirs[:] = []
             continue
-        dirs[:] = sorted(
-            d
-            for d in dirs
-            if not d.startswith(".")
-            and not d.endswith(".app")
-            and d not in ignored_dirs
-        )
+        kept_dirs: List[str] = []
+        for d in sorted(dirs):
+            if d.startswith(".") or d.endswith(".app") or d in ignored_dirs:
+                continue
+            cand_rel_posix = d if rel_dir == "." else f"{rel_dir.replace(os.sep, '/')}/{d}"
+            if d == "output" and is_untracked_output_dir(real_ws, cand_rel_posix, git_idx_bytes):
+                continue
+            kept_dirs.append(d)
+        dirs[:] = kept_dirs
         for fname in sorted(files):
             if fname.startswith("."):
                 continue

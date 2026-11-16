@@ -434,13 +434,20 @@ async def run_all_tests() -> None:
                 body=json.dumps({"op": "add", "kind": "action", "author": "chair", "text": "执行工作区变更回归核验"}).encode("utf-8"),
             )
             wb_act1_items = [it for it in json.loads(b_add_act1.decode("utf-8"))["whiteboard"]["items"] if it["kind"] == "action"]
-            await raw_http_request(
+            _, _, b_chk_act1 = await raw_http_request(
                 port,
                 "POST",
                 "/api/sessions/legacy01/whiteboard",
                 headers=auth_hdr,
                 body=json.dumps({"op": "toggle_check", "item_id": wb_act1_items[0]["id"], "checked": True}).encode("utf-8"),
             )
+            wb_chk1 = json.loads(b_chk_act1.decode("utf-8"))["whiteboard"]
+            exec_contract_1 = {
+                "expected_wb_version": wb_chk1["wb_version"],
+                "checked_action_ids": [wb_act1_items[0]["id"]],
+                "expected_workspace_dir": str(legacy_ws),
+                "acknowledged_absent_agents": [],
+            }
 
             escape_link = legacy_ws / "escape_etc_hosts"
             escape_link.symlink_to("/etc/hosts")
@@ -450,7 +457,7 @@ async def run_all_tests() -> None:
                 "POST",
                 "/api/sessions/legacy01/execute",
                 headers=auth_hdr,
-                body=json.dumps({"allow_workspace_write": True, "executor_id": "astra"}).encode("utf-8"),
+                body=json.dumps({"allow_workspace_write": True, "executor_id": "astra", **exec_contract_1}).encode("utf-8"),
             )
             assert st_sym == 409, f"Escaping symlink must fail with 409, got {st_sym}: {b_sym}"
             assert (legacy_ws / "app.py").read_bytes() == before_app_bytes
@@ -482,13 +489,20 @@ async def run_all_tests() -> None:
                 body=json.dumps({"op": "add", "kind": "action", "author": "chair", "text": "并发锁竞争验证任务"}).encode("utf-8"),
             )
             wb_act2_items = [it for it in json.loads(b_add_act2.decode("utf-8"))["whiteboard"]["items"] if it["kind"] == "action"]
-            await raw_http_request(
+            _, _, b_chk_act2 = await raw_http_request(
                 port,
                 "POST",
                 f"/api/sessions/{sid2}/whiteboard",
                 headers=auth_hdr,
                 body=json.dumps({"op": "toggle_check", "item_id": wb_act2_items[0]["id"], "checked": True}).encode("utf-8"),
             )
+            wb_chk2 = json.loads(b_chk_act2.decode("utf-8"))["whiteboard"]
+            exec_contract_2 = {
+                "expected_wb_version": wb_chk2["wb_version"],
+                "checked_action_ids": [wb_act2_items[0]["id"]],
+                "expected_workspace_dir": str(legacy_ws),
+                "acknowledged_absent_agents": [],
+            }
 
             orig_hashes = {
                 "app.py": hashlib.sha256((legacy_ws / "app.py").read_bytes()).hexdigest(),
@@ -503,7 +517,7 @@ async def run_all_tests() -> None:
                 "POST",
                 "/api/sessions/legacy01/execute",
                 headers=auth_hdr,
-                body=json.dumps({"allow_workspace_write": True, "executor_id": "astra"}).encode("utf-8"),
+                body=json.dumps({"allow_workspace_write": True, "executor_id": "astra", **exec_contract_1}).encode("utf-8"),
             )
             assert st_ex1 == 202, f"Expected 202 Accepted, got {st_ex1}: {b_ex1}"
 
@@ -514,7 +528,7 @@ async def run_all_tests() -> None:
                 "POST",
                 f"/api/sessions/{sid2}/execute",
                 headers=auth_hdr,
-                body=json.dumps({"allow_workspace_write": True, "executor_id": "astra"}).encode("utf-8"),
+                body=json.dumps({"allow_workspace_write": True, "executor_id": "astra", **exec_contract_2}).encode("utf-8"),
             )
             lock_reject_ms = (time.monotonic() - t_lock0) * 1000
             assert st_ex2 == 409 and lock_reject_ms < 450, f"Expected 409, got {st_ex2} in {lock_reject_ms:.1f}ms | ex1_logs={app.orchestrator.get_session('legacy01').whiteboard.get('exec_logs')} | ex1_msgs={app.orchestrator.get_session('legacy01').messages[-1:]}"

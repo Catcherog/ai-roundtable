@@ -171,9 +171,9 @@ async def run_v5_verification() -> None:
                 sys.exit(0)
 
             if mode == "absent_fail_grok":
-                if "风险" in prompt or "审计" in prompt or "反方" in prompt or "Grok" in prompt or "grok" in prompt:
-                    sys.stderr.write("Simulated seat crash\\n")
-                    sys.exit(2)
+                # The separate mock_codex_hetero executable fails for Grok.  Matching
+                # general risk/audit words here also fails Carbon when its prompt
+                # mentions those words, making the intended one-seat scenario invalid.
                 print("主席位正常完成立论。\\n\\n[白板要点]\\n- 任务：修复服务异常处理逻辑")
                 sys.exit(0)
 
@@ -516,7 +516,8 @@ async def run_v5_verification() -> None:
             assert act_items3 and all(it.get("checked") is False for it in act_items3), (
                 f"新增任务必须默认 checked=False，实际: {act_items3}"
             )
-            assert len(wb3.get("absent_seats") or []) >= 1, f"grok 异常退出必须记入 absent_seats，实际: {wb3}"
+            absent_ids3 = {x.get("agent_id") for x in wb3.get("absent_seats") or []}
+            assert absent_ids3 == {"grok"}, f"应仅模拟 grok 异常缺席，实际: {absent_ids3}"
 
             st_no_chk, d_no_chk = await api_json(
                 port,
@@ -552,16 +553,24 @@ async def run_v5_verification() -> None:
                 token,
                 "POST",
                 f"/api/sessions/{sid3}/whiteboard",
-                {"op": "acknowledge_absent"},
+                {"op": "acknowledge_absent", "acknowledged_absent_agents": ["grok"]},
             )
             assert st_ack_abs == 200, f"acknowledge_absent 失败: {d_ack_abs}"
+            wb3_after_ack = d_ack_abs["whiteboard"]
 
             st_ex_ok, d_ex_ok = await api_json(
                 port,
                 token,
                 "POST",
                 f"/api/sessions/{sid3}/execute",
-                {"allow_workspace_write": False, "executor_id": "astra"},
+                {
+                    "allow_workspace_write": False,
+                    "executor_id": "astra",
+                    "expected_wb_version": wb3_after_ack["wb_version"],
+                    "checked_action_ids": [target_act_id],
+                    "expected_workspace_dir": str(proj_dir),
+                    "acknowledged_absent_agents": ["grok"],
+                },
             )
             assert st_ex_ok == 202, f"确认缺席后 /execute 应返回 202，实际 {st_ex_ok}: {d_ex_ok}"
             await wait_session_idle(port, token, sid3)

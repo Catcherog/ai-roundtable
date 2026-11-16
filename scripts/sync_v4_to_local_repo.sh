@@ -68,7 +68,7 @@ fi
 AI_ROUNDTABLE_HOME="${qa_tmp}/bench" python3 "${TARGET_REPO}/scripts/check_cli.py" --bench
 
 if [[ "$(uname -s)" == "Darwin" ]]; then
-  echo "==> [4/5] 正在使用 clang 编译原生 AI圆桌.app (v4.0.0 + 新版图标 + WKOpenPanel)..."
+  echo "==> [4/5] 正在使用 clang 编译原生 AI圆桌.app (v4 + 新版图标 + WKOpenPanel)..."
   bash "${TARGET_REPO}/scripts/build_macos_app.sh"
   built="${TARGET_REPO}/AI圆桌.app"
   desktop_app="${HOME}/Desktop/AI圆桌.app"
@@ -86,7 +86,7 @@ if [[ "$(uname -s)" == "Darwin" ]]; then
     exit 1
   fi
   rm -rf "${install_dir}"
-  echo "✔ AI圆桌 v4.0.0 已就绪：${desktop_app}"
+  echo "✔ AI圆桌 v4 已就绪：${desktop_app}"
 else
   echo "==> [4/5] 当前非 macOS 环境，跳过 clang 原生 App 编译。"
 fi

@@ -7,6 +7,21 @@
  * 4. 极简开局引导舱（5 大场景预设）+ 一体化席位配置浮层 + 60fps 合成器级微动效
  */
 
+import {
+  bindV4StoreBridge,
+  clearPendingAttachmentsOnSend,
+  decorateMessageCardAttachments,
+  getReadyPendingAttachments,
+  handleRemoteAttachmentDeleted,
+  hasUploadingAttachments,
+  hydrateVectorIcons,
+  initV4Enhancements,
+  refreshAllModalSeatChips,
+  renderPendingAttachmentTray,
+  resetAttachmentsForSessionSwitch,
+  syncComposerStrategySummary,
+} from "./v4_ui.js";
+
 const STORAGE_KEYS = {
   theme: "ai_rt_theme",
   palette: "ai_rt_palette",
@@ -26,12 +41,49 @@ const SEAT_CAP_PAIRS = [
   ["prism", "Prism", "席位六"],
 ];
 
-// AI_ROUNDTABLE_V3_UPGRADE_20261114 — 内存态控制面鉴权凭据（严禁落 localStorage / Cookie / URL Query）
+// 控制面鉴权凭据（仅允许内存态及同源 sessionStorage 恢复同标签刷新，严禁落 localStorage / Cookie / URL Query）
+const SESSION_AUTH_KEY = "ai_rt_session_auth";
 const authState = {
   token: "",
   bootId: "",
   ready: false,
 };
+
+function readSessionStorageAuth() {
+  try {
+    const raw = window.sessionStorage?.getItem(SESSION_AUTH_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || !parsed.token) return null;
+    return {
+      token: String(parsed.token || "").trim(),
+      bootId: String(parsed.bootId || "").trim(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeSessionStorageAuth(token, bootId) {
+  try {
+    const cleanTok = String(token || "").trim();
+    if (!cleanTok) return;
+    window.sessionStorage?.setItem(
+      SESSION_AUTH_KEY,
+      JSON.stringify({ token: cleanTok, bootId: String(bootId || "").trim() })
+    );
+  } catch {
+    // 忽略隐私窗口或受限沙箱异常
+  }
+}
+
+function clearSessionStorageAuth() {
+  try {
+    window.sessionStorage?.removeItem(SESSION_AUTH_KEY);
+  } catch {
+    // 忽略异常
+  }
+}
 
 const AGENT_NAMES = {
   carbon: "架构师",
@@ -384,6 +436,7 @@ const state = {
   recoveryRequired: false,
   recoveryPlan: null,
   rollbackConflicts: [],
+  rollbackConflictDetail: null,
   postExecVerifyFailed: false,
   postExecVerifyCmd: "",
   rosterPreset: "role_experts",
@@ -407,7 +460,24 @@ const state = {
   artifactType: "code_patch",
   presetSwitching: false,
   userToggledRightPane: false,
+  snapshotLoading: false,
+  pendingAttachments: [],
+  blobUrlCache: new Map(),
+  msgAttachmentsById: new Map(),
+  checkedAbsentSeats: new Set(),
+  writeAuthScope: { sessionId: "", workspaceDir: "" },
+  workspaceBindScope: "session",
+  settingsSaveDraft: null,
+  sseRetryAttempt: 0,
 };
+
+bindV4StoreBridge({
+  state,
+  authState,
+  onUploadStateChange: () => {
+    renderStageAndHeader();
+  },
+});
 
 const el = (id) => document.getElementById(id);
 
@@ -442,6 +512,113 @@ function showToast(message, kind = "info", durationMs = 3000) {
   }, durationMs);
 }
 
+async function redeemBootstrapCode(code) {
+  const cleanCode = String(code || "").trim();
+  if (!cleanCode) return false;
+  const res = await fetch("/api/auth/bootstrap", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code: cleanCode }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.token) {
+    throw new Error(data.error || "引导兑换码已失效，请从终端输出重新打开一次性引导链接");
+  }
+  const prevBoot = authState.bootId;
+  authState.token = String(data.token);
+  authState.bootId = String(data.boot_id || res.headers?.get?.("X-Roundtable-Boot-Id") || "");
+  authState.ready = true;
+  if (prevBoot && authState.bootId && prevBoot !== authState.bootId) {
+    state.sseLastRev = 0;
+    state.seatConfigRev = 0;
+  }
+  writeSessionStorageAuth(authState.token, authState.bootId);
+  return true;
+}
+
+async function probeCachedTokenAgainstServer(candidateToken, expectedBootId = "") {
+  const tok = String(candidateToken || "").trim();
+  if (!tok) return false;
+  try {
+    const res = await fetch("/api/status", {
+      method: "GET",
+      headers: { "X-Roundtable-Token": tok },
+      cache: "no-store",
+    });
+    const hdrBoot = String(res.headers?.get?.("X-Roundtable-Boot-Id") || "").trim();
+    const data = await res.json().catch(() => ({}));
+    const srvBoot = String(hdrBoot || data?.boot_id || data?.system?.boot_id || "").trim();
+    if (!res.ok) {
+      clearSessionStorageAuth();
+      if (srvBoot && expectedBootId && srvBoot !== expectedBootId) {
+        state.sseLastRev = 0;
+        state.seatConfigRev = 0;
+      }
+      return false;
+    }
+    if (expectedBootId && srvBoot && expectedBootId !== srvBoot) {
+      // 服务进程已重启（boot_id 变化）：立即作废旧凭据并清空 SSE 游标
+      clearSessionStorageAuth();
+      authState.token = "";
+      authState.bootId = srvBoot;
+      authState.ready = false;
+      state.sseLastRev = 0;
+      state.seatConfigRev = 0;
+      return false;
+    }
+    authState.token = tok;
+    authState.bootId = srvBoot || expectedBootId;
+    authState.ready = true;
+    writeSessionStorageAuth(authState.token, authState.bootId);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function recoverControlPlaneToken() {
+  const nativeBridge = window.webkit?.messageHandlers?.roundtableNative || window.roundtableDesktop;
+  if (nativeBridge && typeof nativeBridge.postMessage === "function") {
+    try {
+      const reissued = await nativeBridge.postMessage({ action: "reissueBootstrap" });
+      if (reissued && typeof reissued === "object" && reissued.token) {
+        authState.token = String(reissued.token);
+        authState.bootId = String(reissued.bootId || reissued.boot_id || authState.bootId || "");
+        authState.ready = true;
+        writeSessionStorageAuth(authState.token, authState.bootId);
+        return true;
+      }
+      const freshCode =
+        typeof reissued === "string"
+          ? reissued
+          : reissued?.bootstrap_code || reissued?.code || "";
+      if (freshCode) {
+        return await redeemBootstrapCode(freshCode);
+      }
+    } catch {
+      // 继续尝试 getBootAuth 或同源 sessionStorage
+    }
+    try {
+      const nativeAuth = await nativeBridge.postMessage({ action: "getBootAuth" });
+      if (nativeAuth && nativeAuth.token) {
+        const ok = await probeCachedTokenAgainstServer(
+          String(nativeAuth.token),
+          String(nativeAuth.bootId || "")
+        );
+        if (ok) return true;
+      }
+    } catch {
+      // 忽略异常
+    }
+  }
+
+  const cached = readSessionStorageAuth();
+  if (cached && cached.token) {
+    return await probeCachedTokenAgainstServer(cached.token, cached.bootId);
+  }
+  return false;
+}
+
 async function initControlPlaneAuth() {
   // 1. 先检查 URL Fragment (#bootstrap=...)，第一时间抹除浏览器地址栏，杜绝泄露
   const rawHash = window.location.hash || "";
@@ -454,7 +631,7 @@ async function initControlPlaneAuth() {
     }
   }
 
-  // 2. macOS 原生 WKWebView 主框架受信任源凭据桥
+  // 2. 原生桌面宿主（macOS WKWebView / Windows WebView2）受信任源凭据桥
   const nativeBridge = window.webkit?.messageHandlers?.roundtableNative || window.roundtableDesktop;
   if (nativeBridge && typeof nativeBridge.postMessage === "function") {
     try {
@@ -463,27 +640,30 @@ async function initControlPlaneAuth() {
         authState.token = String(nativeAuth.token);
         authState.bootId = String(nativeAuth.bootId || "");
         authState.ready = true;
+        writeSessionStorageAuth(authState.token, authState.bootId);
         return;
       }
     } catch {
-      // 回退至 Web 引导码核销流程
+      // 回退至一次性兑换码或 WebView 崩溃重签发流程
     }
   }
 
-  // 3. 纯浏览器开发模式：单次核销 #bootstrap 兑换码换取内存态 X-Roundtable-Token
+  // 3. 纯浏览器模式首次打开：单次核销 #bootstrap 兑换码并写入同源 sessionStorage
   if (bootstrapCode) {
-    const res = await fetch("/api/auth/bootstrap", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code: bootstrapCode }),
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || !data.token) {
-      throw new Error(data.error || "引导兑换码已失效，请从终端输出重新打开一次性引导链接");
-    }
-    authState.token = String(data.token);
-    authState.bootId = String(data.boot_id || "");
-    authState.ready = true;
+    await redeemBootstrapCode(bootstrapCode);
+    return;
+  }
+
+  // 4. 同标签页刷新免 401 锁死恢复：比对 sessionStorage 与服务端当前 boot_id
+  const cached = readSessionStorageAuth();
+  if (cached && cached.token) {
+    const reused = await probeCachedTokenAgainstServer(cached.token, cached.bootId);
+    if (reused) return;
+  }
+
+  // 5. 桌面宿主 WebView 异常崩溃重载兜底：向受控控制通道申请全新一次性兑换码
+  if (nativeBridge && typeof nativeBridge.postMessage === "function") {
+    await recoverControlPlaneToken();
   }
 }
 
@@ -498,9 +678,25 @@ async function apiFetch(path, options = {}) {
     headers: mergedHeaders,
   };
   const res = await fetch(path, opts);
+  const hdrBootId = String(res.headers?.get?.("X-Roundtable-Boot-Id") || "").trim();
   const data = await res.json().catch(() => ({}));
-  if (data && typeof data.boot_id === "string" && data.boot_id) {
-    authState.bootId = data.boot_id;
+  const incomingBootId = String(
+    hdrBootId || (data && typeof data.boot_id === "string" ? data.boot_id : "") || data?.system?.boot_id || ""
+  ).trim();
+  if (incomingBootId) {
+    if (authState.bootId && incomingBootId !== authState.bootId) {
+      clearSessionStorageAuth();
+      authState.token = "";
+      authState.bootId = incomingBootId;
+      authState.ready = false;
+      state.sseLastRev = 0;
+      state.seatConfigRev = 0;
+    } else if (!authState.bootId) {
+      authState.bootId = incomingBootId;
+      if (authState.token) {
+        writeSessionStorageAuth(authState.token, incomingBootId);
+      }
+    }
   }
   if (!res.ok) {
     const err = new Error(data.error || `请求失败 (${res.status})`);
@@ -666,10 +862,16 @@ const CLIENT_SCENARIO_PACKS = {
   },
 };
 
-function getCheckedActionCount() {
+function getCheckedActionIds() {
   const items = state.whiteboard?.items;
-  if (!Array.isArray(items)) return 0;
-  return items.filter((it) => it && it.kind === "action" && it.checked === true).length;
+  if (!Array.isArray(items)) return [];
+  return items
+    .filter((it) => it && it.kind === "action" && it.checked === true && String(it.text || "").trim())
+    .map((it) => String(it.id));
+}
+
+function getCheckedActionCount() {
+  return getCheckedActionIds().length;
 }
 
 function hasExportableSessionContent() {
@@ -753,6 +955,7 @@ function syncCollabModeUI(modeKey, autoExec = state.autoPreviewExec) {
 
   syncAutoPreviewUI(state.autoPreviewExec);
   syncScenarioPresetHighlight();
+  syncComposerStrategySummary();
 }
 
 function syncAutoPreviewUI(on) {
@@ -764,6 +967,7 @@ function syncAutoPreviewUI(on) {
       btn.setAttribute("aria-pressed", state.autoPreviewExec ? "true" : "false");
     }
   });
+  syncComposerStrategySummary();
 }
 
 function detectActiveScenarioKey() {
@@ -1138,14 +1342,17 @@ function getEffortSpecForModel(driverKey, modelName, seatId = "") {
     driverKey === "auto"
       ? state.system?.agents?.[seatId]?.effective_driver || "agy"
       : driverKey || "agy";
+  const singleSourceCatalog = state.system?.driver_catalog;
   const rawCatalog = state.system?.model_effort_catalog;
   const drvMap =
+    singleSourceCatalog?.drivers?.[effDrv]?.models ||
     rawCatalog?.drivers?.[effDrv]?.models ||
     rawCatalog?.[effDrv] ||
     FALLBACK_MODEL_EFFORT_CATALOG[effDrv] ||
     FALLBACK_MODEL_EFFORT_CATALOG.agy;
-  const cleanModel =
-    String(modelName || "").trim().toLowerCase() || (DRIVER_DEFAULTS[effDrv]?.model || "").toLowerCase();
+  const catalogDefaultModel =
+    singleSourceCatalog?.drivers?.[effDrv]?.default_model || DRIVER_DEFAULTS[effDrv]?.model || "";
+  const cleanModel = String(modelName || "").trim().toLowerCase() || catalogDefaultModel.toLowerCase();
 
   if (cleanModel && drvMap[cleanModel]) {
     return drvMap[cleanModel];
@@ -1197,20 +1404,22 @@ function refreshSeatEffortSelectInModal(seatCap, autoResetModelOnDriverChange = 
 
   const drv = drvSel.value || "auto";
   const dSpec = DRIVER_DEFAULTS[drv] || DRIVER_DEFAULTS.auto;
+  const catalogDrv = state.system?.driver_catalog?.drivers?.[drv] || null;
+  const defaultModelForDrv = catalogDrv?.default_model || dSpec.model || "";
   if (dSpec.listId) {
     modelInp.setAttribute("list", dSpec.listId);
   } else {
     modelInp.removeAttribute("list");
   }
 
-  if (autoResetModelOnDriverChange && dSpec.model) {
+  if (autoResetModelOnDriverChange && defaultModelForDrv) {
     const curM = modelInp.value.trim().toLowerCase();
     const exclusiveMismatch =
       (drv === "agy" && (curM.startsWith("grok") || curM.startsWith("gpt-"))) ||
       (drv === "grok" && (curM.startsWith("gemini") || curM.startsWith("gpt-") || curM.includes("orchestrator"))) ||
       (drv === "codex" && (curM.startsWith("gemini") || curM.startsWith("grok") || curM.includes("orchestrator")));
     if (!curM || exclusiveMismatch) {
-      modelInp.value = dSpec.model;
+      modelInp.value = defaultModelForDrv;
     }
   }
 
@@ -1232,6 +1441,7 @@ function refreshSeatEffortSelectInModal(seatCap, autoResetModelOnDriverChange = 
       ? `(最高 ${spec.allowed[spec.allowed.length - 1]})`
       : "(无需档位)";
   }
+  refreshAllModalSeatChips();
 }
 
 function syncPacingControlsInModal(mode, idleSec, turnSec, refChars) {
@@ -1273,8 +1483,37 @@ function stripInternalStatusLines(rawText) {
     .trim();
 }
 
+function decodeSafeLocalUriLabel(escapedHref) {
+  const rawHref = String(escapedHref || "").replace(/&amp;/g, "&").replace(/&quot;/g, '"');
+  const stripped = rawHref.replace(/^file:\/\//i, "");
+  try {
+    return decodeURIComponent(stripped);
+  } catch {
+    return stripped;
+  }
+}
+
 function formatInlineMarkdown(escapedLine) {
-  let s = escapedLine;
+  const linkTokens = [];
+  let s = String(escapedLine || "").replace(
+    /\[([^\[\]\n]+)\]\(([^)\s]+)\)/g,
+    (_, rawLabel, rawHref) => {
+      const cleanLabel = String(rawLabel || "").replace(/^`(.+)`$/, "$1").trim() || rawLabel;
+      const unescapedHref = String(rawHref || "").replace(/&amp;/g, "&");
+      let html = "";
+      if (/^(?:file:\/\/|\/|\.\.?\/)/i.test(unescapedHref)) {
+        const tip = escapeHtml(decodeSafeLocalUriLabel(rawHref));
+        html = `<code class="md-file-link" title="本地路径：${tip}">${cleanLabel}</code>`;
+      } else if (/^https?:\/\//i.test(unescapedHref)) {
+        html = `<a class="md-ext-link" href="${rawHref}" target="_blank" rel="noopener noreferrer">${cleanLabel}</a>`;
+      } else {
+        html = `<code class="md-file-link">${cleanLabel}</code>`;
+      }
+      const tok = `\x00MDLINK_${linkTokens.length}\x00`;
+      linkTokens.push(html);
+      return tok;
+    }
+  );
   s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
   s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   s = s.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
@@ -1300,6 +1539,9 @@ function formatInlineMarkdown(escapedLine) {
     /@([A-Za-z0-9_\u4e00-\u9fa5./-]+\.[A-Za-z0-9]{1,10}(?::[Ll]?\d+(?:-[Ll]?\d+)?)?)/g,
     '<span class="file-mention-tag">@$1</span>'
   );
+  if (linkTokens.length) {
+    s = s.replace(/\x00MDLINK_(\d+)\x00/g, (_, idx) => linkTokens[Number(idx)] || "");
+  }
   return s;
 }
 
@@ -1407,6 +1649,26 @@ function renderMarkdown(raw) {
     if (bqMatch) {
       flushList();
       out.push(`<blockquote>${formatInlineMarkdown(escapeHtml(bqMatch[1]))}</blockquote>`);
+      continue;
+    }
+
+    const taskMatch = trimLn.match(/^(?:[-*•]|\d+[.)、])\s+\[([ xX✓✔])\]\s+(.+)$/);
+    if (taskMatch) {
+      if (inOl) {
+        out.push("</ol>");
+        inOl = false;
+      }
+      if (!inUl) {
+        out.push("<ul>");
+        inUl = true;
+      }
+      const isChecked = /[xX✓✔]/.test(taskMatch[1]);
+      out.push(
+        `<li class="md-task-li${isChecked ? " is-checked" : ""}">` +
+          `<span class="md-task-box${isChecked ? " checked" : ""}" aria-hidden="true">${isChecked ? "✓" : ""}</span>` +
+          `<span class="md-task-text">${formatInlineMarkdown(escapeHtml(taskMatch[2]))}</span>` +
+        `</li>`
+      );
       continue;
     }
 
@@ -1834,6 +2096,8 @@ function createOrUpdateMessageCard(msgInput, options = {}) {
     errorPanelHtml;
 
   bindCardInteractiveEvents(card, msg);
+  hydrateVectorIcons(card);
+  decorateMessageCardAttachments(card, msg, state.currentSessionId || "");
   if (!state.userScrolledUp && !skipEnterAnim) {
     scrollToBottom(false);
   }
@@ -2209,15 +2473,22 @@ function showWbConflictBanner(message, draftText, retryForceFn) {
 }
 
 async function postWhiteboardMutation(payload, draftTextForConflict = "", options = {}) {
-  if (!state.currentSessionId) return null;
+  const targetSessionId = state.currentSessionId;
+  if (!targetSessionId) return null;
+  if (state.snapshotLoading) {
+    showToast("正在加载新会话完整快照，请稍候修改白板", "warn", 2000);
+    return null;
+  }
   try {
-    const res = await apiFetch(`/api/sessions/${state.currentSessionId}/whiteboard`, {
+    const res = await apiFetch(`/api/sessions/${targetSessionId}/whiteboard`, {
       method: "POST",
       body: JSON.stringify(payload),
     });
+    if (targetSessionId !== state.currentSessionId) return null;
     const wb = res.whiteboard;
     if (wb?.conflict) {
       showWbConflictBanner(wb.conflict_message, draftTextForConflict, async () => {
+        if (targetSessionId !== state.currentSessionId) return;
         const retryPayload = { ...payload };
         delete retryPayload.ver;
         delete retryPayload.expected_version;
@@ -2233,7 +2504,9 @@ async function postWhiteboardMutation(payload, draftTextForConflict = "", option
     return wb;
   } catch (err) {
     if (options.rethrow) throw err;
-    showToast(err.message || "更新会议白板失败", "err");
+    if (targetSessionId === state.currentSessionId) {
+      showToast(err.message || "更新会议白板失败", "err");
+    }
     return null;
   }
 }
@@ -2397,7 +2670,7 @@ function buildWbPoolItemElement(item, zoneKind, animateEnter) {
             isChecked ? '<svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="3.2 8.4 6.6 11.8 12.8 4.6"></polyline></svg>' : ""
           }</button>`
         : "") +
-      `<div class="wb-pool-text" title="单击直接编辑内容">${escapeHtml(item.text)}</div>` +
+      `<div class="wb-pool-text" title="单击直接编辑内容">${formatInlineMarkdown(escapeHtml(item.text))}</div>` +
     `</div>` +
     `<div class="wb-pool-meta">` +
       `<div class="wb-meta-left" style="display:inline-flex;align-items:center;gap:5px;flex-wrap:wrap;">` +
@@ -2413,6 +2686,7 @@ function buildWbPoolItemElement(item, zoneKind, animateEnter) {
   const textDiv = li.querySelector(".wb-pool-text");
   if (textDiv) {
     textDiv.onclick = (e) => {
+      if (e.target.closest("a.md-ext-link")) return;
       e.stopPropagation();
       startInlineWbItemEdit(li, item);
     };
@@ -2665,24 +2939,33 @@ function renderWhiteboard(rawWb, forceRender = false, isInitialSnapshot = false)
   if (absentListEl) {
     absentListEl.innerHTML = "";
     for (const ab of absentSeats) {
-      const aid = typeof ab === "string" ? ab : ab?.agent_id || ab?.seat || "";
-      const seatName = (typeof ab === "object" && ab?.name) || AGENT_NAMES[aid] || aid || "席位";
+      const aid = String(typeof ab === "string" ? ab : ab?.agent_id || ab?.seat || "").toLowerCase();
+      const seatName = (typeof ab === "object" && (ab?.seat_name || ab?.name)) || AGENT_NAMES[aid] || aid || "席位";
       const reason =
         (typeof ab === "object" && (ab?.reason || ab?.error)) || "本轮异常中断或超时缺席";
+      const alreadyAcked = Boolean(ab?.acknowledged);
+      const isChecked = alreadyAcked || state.checkedAbsentSeats.has(aid);
       const li = document.createElement("li");
       li.className = "wb-absent-item";
       li.innerHTML =
-        `<span><strong>${escapeHtml(seatName)}</strong> · ${escapeHtml(reason)}</span>` +
-        `<span>${wb.absent_acknowledged || ab?.acknowledged ? "已确认" : "待确认"}</span>`;
+        `<label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;">` +
+          `<input type="checkbox" data-absent-seat-chk="${escapeHtml(aid)}"${isChecked ? " checked" : ""}${alreadyAcked ? " disabled" : ""} />` +
+          `<span><strong>${escapeHtml(seatName)}</strong> · ${escapeHtml(reason)}</span>` +
+        `</label>` +
+        `<span>${alreadyAcked ? "已确认" : isChecked ? "已勾选待提交" : "请逐席勾选确认"}</span>`;
+      const chkEl = li.querySelector("[data-absent-seat-chk]");
+      chkEl?.addEventListener("change", () => {
+        if (chkEl.checked) state.checkedAbsentSeats.add(aid);
+        else state.checkedAbsentSeats.delete(aid);
+        renderWhiteboard(state.whiteboard || wb, true, false);
+      });
       absentListEl.appendChild(li);
     }
   }
   if (ackAbsentBtn) {
-    const allAcked = Boolean(
-      wb.absent_acknowledged ||
-        (absentSeats.length > 0 && absentSeats.every((x) => typeof x === "object" && x?.acknowledged))
-    );
+    const allAcked = absentSeats.length > 0 && absentSeats.every((x) => typeof x === "object" && x?.acknowledged);
     ackAbsentBtn.classList.toggle("hidden", absentSeats.length === 0 || allAcked);
+    ackAbsentBtn.textContent = "确认已勾选缺席席位";
   }
 
   // 3. 同步执行终端日志、Diff 与回滚按钮
@@ -2833,7 +3116,7 @@ function renderWhiteboard(rawWb, forceRender = false, isInitialSnapshot = false)
       li.className = "wb-abandoned-item";
       li.innerHTML =
         `<div>` +
-          `<span class="wb-abandoned-title">${escapeHtml(abText)}</span>` +
+          `<span class="wb-abandoned-title">${formatInlineMarkdown(escapeHtml(abText))}</span>` +
           (abReason || abReplaced
             ? `<span class="wb-abandoned-reason">${escapeHtml(
                 [abReason ? `原因：${abReason}` : "", abReplaced ? `替代终态：${abReplaced}` : ""]
@@ -2855,8 +3138,15 @@ function renderWhiteboard(rawWb, forceRender = false, isInitialSnapshot = false)
     });
   }
 
-  // 7. 按 state.artifactType 自适应切换执行终端与文稿导出栏，并落实零勾选/空纪要门禁
+  // 7. 按 state.artifactType 自适应切换执行终端与文稿导出栏，并在决议/执行阶段置顶待勾选任务清单
   const isDocArtifact = Boolean(state.artifactType && state.artifactType !== "code_patch");
+  const wbPane = el("pane-whiteboard");
+  if (wbPane) {
+    wbPane.classList.toggle(
+      "is-action-priority",
+      !isDocArtifact && (state.stage === "concluded" || state.stage === "executing")
+    );
+  }
   const adaptBar = el("wbAdaptiveExportBar");
   if (adaptBar) {
     adaptBar.classList.toggle("hidden", !isDocArtifact);
@@ -2879,6 +3169,7 @@ function renderWhiteboard(rawWb, forceRender = false, isInitialSnapshot = false)
     if (b) b.disabled = !canExport;
   });
 
+  hydrateVectorIcons(el("pane-whiteboard") || document);
   renderExecutorControls();
   syncAdaptiveRightCollapse();
 }
@@ -3160,13 +3451,34 @@ function renderStageAndHeader() {
     busyBanner?.classList.toggle("hidden", !state.isBusy);
     el("cueGroupLeft")?.classList.toggle("hidden", state.isBusy);
     decisionGroup?.classList.toggle("hidden", state.isBusy);
+    const concBtn = el("concludeBtn");
+    if (concBtn) {
+      concBtn.textContent = stage === "concluded" ? "重新生成决议" : "形成决议";
+    }
+  }
+
+  const wbPaneEl = el("pane-whiteboard");
+  if (wbPaneEl) {
+    const isDocArt = Boolean(state.artifactType && state.artifactType !== "code_patch");
+    wbPaneEl.classList.toggle(
+      "is-action-priority",
+      !isDocArt && (stage === "concluded" || stage === "executing")
+    );
   }
 
   if (composerBox) {
     composerBox.classList.toggle("interrupt-mode", state.isBusy);
   }
+  const uploadingAtts = hasUploadingAttachments();
   if (primaryBtn) {
-    if (state.isBusy) {
+    primaryBtn.disabled = Boolean(state.snapshotLoading || uploadingAtts);
+    if (state.snapshotLoading) {
+      primaryBtn.textContent = "同步快照中…";
+      primaryBtn.classList.remove("btn-interrupt");
+    } else if (uploadingAtts) {
+      primaryBtn.textContent = "附件上传中…";
+      primaryBtn.classList.remove("btn-interrupt");
+    } else if (state.isBusy) {
       primaryBtn.textContent = "插话控场";
       primaryBtn.classList.add("btn-interrupt");
     } else if (inMeeting) {
@@ -3178,7 +3490,12 @@ function renderStageAndHeader() {
     }
   }
   if (topicInp) {
-    if (state.isBusy) {
+    topicInp.disabled = Boolean(state.snapshotLoading);
+    if (state.snapshotLoading) {
+      topicInp.placeholder = "正在同步当前会议完整快照，请稍候…";
+    } else if (uploadingAtts) {
+      topicInp.placeholder = "附件正在流式上传校验中，完成后即可发送…";
+    } else if (state.isBusy) {
       topicInp.placeholder = "研讨进行中，随时输入新约束插话控场，或使用 @席位名 定向提问";
     } else if (inMeeting) {
       topicInp.placeholder = "输入补充追问、使用 @席位名 点名深挖，或输入 @文件路径 注入源码";
@@ -3190,6 +3507,7 @@ function renderStageAndHeader() {
     }
   }
 
+  syncComposerStrategySummary();
   renderWorkspaceBadges();
   renderQuickCueButtons();
   renderExecutorControls();
@@ -3346,6 +3664,8 @@ function renderAllSeats() {
       syncMentionChipActiveStates();
     }
   }
+  hydrateVectorIcons(el("roundtableRing") || document);
+  syncComposerStrategySummary();
 }
 
 function openPersonaPopover(agentId, anchorEl) {
@@ -3646,20 +3966,26 @@ function renderExecutorControls() {
 
   el("execWriteSafetyBanner")?.classList.toggle("hidden", !(allowWrite && ws));
 
+  const execBlocked = Boolean(state.snapshotLoading || checkedCnt < 1 || state.stage === "executing" || state.recoveryRequired);
   const execCueBtn = el("executeBtn");
   if (execCueBtn) {
     execCueBtn.classList.toggle("hidden", !isCodePatch);
-    execCueBtn.disabled = checkedCnt < 1 || state.stage === "executing" || state.recoveryRequired;
-    execCueBtn.textContent = checkedCnt < 1 ? `请先勾选白板任务` : `交由 ${execName} 执行 (${checkedCnt}) →`;
+    execCueBtn.disabled = execBlocked;
+    execCueBtn.textContent = state.snapshotLoading
+      ? "同步快照中…"
+      : checkedCnt < 1
+      ? `请先勾选白板任务`
+      : `交由 ${execName} 执行 (${checkedCnt}) →`;
   }
   if (el("runExecFromTabBtn")) {
-    el("runExecFromTabBtn").textContent =
-      state.stage === "executing"
-        ? `${execName} 执行中…`
-        : checkedCnt < 1
-        ? "尚无已勾选任务（请回白板勾选）"
-        : `启动 ${execName} 执行 (${checkedCnt} 项)`;
-    el("runExecFromTabBtn").disabled = checkedCnt < 1 || state.stage === "executing" || state.recoveryRequired;
+    el("runExecFromTabBtn").textContent = state.snapshotLoading
+      ? "同步快照中…"
+      : state.stage === "executing"
+      ? `${execName} 执行中…`
+      : checkedCnt < 1
+      ? "尚无已勾选任务（请回白板勾选）"
+      : `启动 ${execName} 执行 (${checkedCnt} 项)`;
+    el("runExecFromTabBtn").disabled = execBlocked;
   }
   el("stopExecFromTabBtn")?.classList.toggle("hidden", state.stage !== "executing");
   if (el("termTargetTitle")) {
@@ -3825,45 +4151,55 @@ function renderSystemStatus(sys) {
   renderAllSeats();
 }
 
-async function switchCurrentSessionWorkspace(targetPath) {
+async function switchCurrentSessionWorkspace(targetPath, options = {}) {
   const clean = String(targetPath ?? "").trim();
-  if (!clean) {
-    if (state.currentSessionId) {
-      const wsRes = await apiFetch(`/api/sessions/${state.currentSessionId}/workspace`, {
-        method: "POST",
-        body: JSON.stringify({ workspace_dir: "" }),
-      });
-      state.sessionWorkspaceDir = "";
-      state.workspaceBound = wsRes.workspace_bound ?? false;
-      state.workspaceIsGit = false;
-    } else {
-      state.sessionWorkspaceDir = "";
-      state.workspaceBound = false;
-      state.workspaceIsGit = false;
-    }
-    if (el("cfgWorkspaceDir")) el("cfgWorkspaceDir").value = "";
-    state.attachedFilesCache.clear();
-    refreshAttachedFilesBar();
+  const targetSessionId = options.sessionId || state.currentSessionId;
+  if (!targetSessionId) {
+    state.sessionWorkspaceDir = clean;
+    state.workspaceBound = Boolean(clean);
+    state.workspaceIsGit = false;
     renderWorkspaceBadges();
     renderStageAndHeader();
-    if (state.whiteboard) renderWhiteboard(state.whiteboard, true, false);
     return true;
   }
-  if (state.currentSessionId) {
-    const wsRes = await apiFetch(`/api/sessions/${state.currentSessionId}/workspace`, {
+
+  const postSwitch = async (confirmAbandon = false) =>
+    apiFetch(`/api/sessions/${targetSessionId}/workspace`, {
       method: "POST",
-      body: JSON.stringify({ workspace_dir: clean }),
+      body: JSON.stringify({
+        workspace_dir: clean,
+        confirm_abandon_rollback: Boolean(confirmAbandon),
+      }),
     });
-    state.sessionWorkspaceDir = wsRes.workspace_dir || clean;
-    state.workspaceBound = wsRes.workspace_bound ?? true;
-    state.workspaceIsGit = Boolean(wsRes.workspace_is_git);
+
+  let wsRes;
+  try {
+    wsRes = await postSwitch(Boolean(options.confirmAbandonRollback));
+  } catch (err) {
+    if (err.status === 409 && err.payload?.reason === "confirm_abandon_rollback_required") {
+      const okConfirm = window.confirm(
+        "当前会话持有上一工作区未归档的可回滚快照。\n确认先将该快照持久化归档（放弃回滚）并换绑至新工作区吗？"
+      );
+      if (!okConfirm) return false;
+      wsRes = await postSwitch(true);
+    } else {
+      throw err;
+    }
   }
-  const cfgRes = await apiFetch("/api/config", {
-    method: "POST",
-    body: JSON.stringify({ workspace_dir: clean }),
-  });
-  if (cfgRes.system) renderSystemStatus(cfgRes.system);
-  if (el("cfgWorkspaceDir")) el("cfgWorkspaceDir").value = clean;
+
+  if (targetSessionId !== state.currentSessionId) return true;
+
+  state.sessionWorkspaceDir = wsRes.workspace_dir ?? clean;
+  state.workspaceBound = wsRes.workspace_bound ?? Boolean(state.sessionWorkspaceDir);
+  state.workspaceIsGit = Boolean(wsRes.workspace_is_git);
+  state.postExecVerifyCmd = String(wsRes.post_exec_verify_cmd || "");
+  state.writeAuthScope = { sessionId: "", workspaceDir: "" };
+  if (el("allowWriteCheckbox")) el("allowWriteCheckbox").checked = false;
+  if (el("cfgWorkspaceDir")) el("cfgWorkspaceDir").value = state.sessionWorkspaceDir;
+  if (el("cfgPostExecVerifyCmd")) el("cfgPostExecVerifyCmd").value = state.postExecVerifyCmd;
+  if (wsRes.session) {
+    applySessionSnapshot(wsRes.session, { isReconnect: true });
+  }
   state.attachedFilesCache.clear();
   refreshAttachedFilesBar();
   renderWorkspaceBadges();
@@ -3872,31 +4208,88 @@ async function switchCurrentSessionWorkspace(targetPath) {
   return true;
 }
 
-async function pickWorkspaceFolder() {
+async function pickWorkspaceFolder(bindScopeOverride = "") {
+  const scope =
+    bindScopeOverride === "default_only" || bindScopeOverride === "session"
+      ? bindScopeOverride
+      : "session";
+  const effectiveScope = scope === "session" && !state.currentSessionId ? "default_only" : scope;
   const sessionId = state.currentSessionId;
   try {
     const native = window.webkit?.messageHandlers?.roundtableNative || window.roundtableDesktop;
-    if (native) {
-      const chosenPath = await native.postMessage({ action: "pickFolder" });
-      if (!chosenPath || sessionId !== state.currentSessionId) return;
-      await switchCurrentSessionWorkspace(chosenPath);
-      showToast(`已绑定本地工作区：${chosenPath}`, "ok", 2200);
+    if (native && typeof native.postMessage === "function") {
+      const rawChosen = await native.postMessage({ action: "pickFolder" });
+      if (rawChosen && typeof rawChosen === "object") {
+        if (rawChosen.cancelled) return;
+        if (rawChosen.error) throw new Error(String(rawChosen.error));
+      }
+      const chosenPath = String(
+        typeof rawChosen === "object" ? rawChosen?.path || "" : rawChosen || ""
+      ).trim();
+      if (!chosenPath) return;
+      if (effectiveScope === "default_only") {
+        const cfgRes = await apiFetch("/api/config", {
+          method: "POST",
+          body: JSON.stringify({ workspace_dir: chosenPath }),
+        });
+        if (cfgRes.system) renderSystemStatus(cfgRes.system);
+        if (el("cfgWorkspaceDir")) el("cfgWorkspaceDir").value = chosenPath;
+        showToast(`已更新新建会话默认工作区：${chosenPath}`, "ok", 2200);
+        return;
+      }
+      if (sessionId !== state.currentSessionId) return;
+      const switched = await switchCurrentSessionWorkspace(chosenPath, { sessionId });
+      if (switched) {
+        showToast(`已绑定当前会话工作区：${chosenPath}`, "ok", 2200);
+      }
       return;
     }
 
-    // 浏览器开发模式：调用系统目录弹窗（严禁传 direct_path），随后绑定至当前空闲会话
+    // 浏览器开发模式：显式携带 bind_scope（严禁传 direct_path），明确区分用户取消与平台异常
     const res = await apiFetch("/api/system/pick-folder", {
       method: "POST",
-      body: JSON.stringify({}),
+      body: JSON.stringify({
+        bind_scope: effectiveScope,
+        ...(effectiveScope === "session" && sessionId ? { session_id: sessionId } : {}),
+      }),
     });
-    if (res.cancelled || !res.ok || !res.path || sessionId !== state.currentSessionId) return;
+    if (res.cancelled) return;
+    if (!res.ok || !res.path) return;
     if (res.system) renderSystemStatus(res.system);
-    if (state.currentSessionId && !state.isBusy && state.stage !== "executing") {
-      await switchCurrentSessionWorkspace(res.path);
+    if (effectiveScope === "default_only") {
+      if (el("cfgWorkspaceDir")) el("cfgWorkspaceDir").value = res.path;
+      showToast(`已更新新建会话默认工作区：${res.path}`, "ok", 2200);
+      return;
     }
-    showToast(`已绑定本地工作区：${res.path}`, "ok", 2200);
+    if (sessionId !== state.currentSessionId) return;
+    state.sessionWorkspaceDir = res.path;
+    state.workspaceBound = true;
+    state.writeAuthScope = { sessionId: "", workspaceDir: "" };
+    if (el("allowWriteCheckbox")) el("allowWriteCheckbox").checked = false;
+    if (el("cfgWorkspaceDir")) el("cfgWorkspaceDir").value = res.path;
+    if (res.session) {
+      applySessionSnapshot(res.session, { isReconnect: true, expectedSessionId: sessionId });
+    }
+    state.attachedFilesCache.clear();
+    refreshAttachedFilesBar();
+    renderWorkspaceBadges();
+    renderStageAndHeader();
+    showToast(`已绑定当前会话工作区：${res.path}`, "ok", 2200);
   } catch (err) {
-    showToast(err.message || "选择目录失败", "err");
+    if (
+      err.status === 409 &&
+      err.payload?.reason === "confirm_abandon_rollback_required" &&
+      err.payload?.selected_path &&
+      sessionId &&
+      sessionId === state.currentSessionId
+    ) {
+      const switched = await switchCurrentSessionWorkspace(err.payload.selected_path, { sessionId });
+      if (switched) {
+        showToast(`已归档旧快照并绑定当前会话工作区：${err.payload.selected_path}`, "ok", 2400);
+      }
+      return;
+    }
+    showToast(err.message || "选择目录失败", "err", 3600);
   }
 }
 
@@ -4139,6 +4532,7 @@ function refreshAttachedFilesBar() {
       chip.onclick = () => pickWorkspaceFolder();
     }
   });
+  hydrateVectorIcons(bar);
 }
 
 /* ==================== 会话生命周期、发起研讨、控场与 SSE 实时流 ==================== */
@@ -4191,6 +4585,7 @@ function renderSessionList() {
     });
     listEl.appendChild(div);
   }
+  hydrateVectorIcons(listEl);
 }
 
 async function refreshSessionsListOnly() {
@@ -4245,11 +4640,31 @@ function renderExecGuardBanner() {
   }
 
   if (state.rollbackConflicts && state.rollbackConflicts.length > 0) {
+    const det = state.rollbackConflictDetail || {};
+    const permList = Array.isArray(det.permission_only_conflicts) ? det.permission_only_conflicts : [];
+    const contentList = Array.isArray(det.content_conflicts) ? det.content_conflicts : state.rollbackConflicts;
+    const kindTitle =
+      det.conflict_kind === "permission_only"
+        ? `原子回滚已拦截：仅检测到权限位变化 (${permList.length} 个文件)`
+        : det.conflict_kind === "mixed"
+        ? `原子回滚已拦截：文件内容变化 ${contentList.length} 项 · 仅权限位变化 ${permList.length} 项`
+        : `原子回滚已拦截：检测到文件内容变化 (${state.rollbackConflicts.length} 个文件)`;
+    const detailRows = [
+      ...contentList.map((p) => `<div>• [文件内容变化] ${escapeHtml(p)}</div>`),
+      ...permList.map((p) => `<div>• [仅权限位变化] ${escapeHtml(p)}</div>`),
+    ];
+    if (!detailRows.length) {
+      for (const p of state.rollbackConflicts) detailRows.push(`<div>• ${escapeHtml(p)}</div>`);
+    }
     banner.className = "exec-guard-banner";
     banner.innerHTML =
-      `<div class="exec-guard-title"><span>原子回滚已拦截：检测到事后手动修改冲突 (${state.rollbackConflicts.length} 个文件)</span></div>` +
-      `<div>为杜绝半旧半新破坏代码树，系统已整批拒绝回滚并保留快照。请先备份或还原以下冲突文件后再点击「↺ 回滚写入」，或点击「✓ 确认保留上次改动」归档快照：</div>` +
-      `<div class="exec-guard-files">${state.rollbackConflicts.map((p) => `<div>• ${escapeHtml(p)}</div>`).join("")}</div>`;
+      `<div class="exec-guard-title"><span>${escapeHtml(kindTitle)}</span></div>` +
+      `<div>校验未过已零写盘保留现场。您可以还原上述文件后重新点击「↺ 回滚写入」，或直接归档快照保留当前现场：</div>` +
+      `<div class="exec-guard-files">${detailRows.join("")}</div>` +
+      `<div class="exec-guard-actions" style="margin-top:8px;display:flex;gap:8px;">` +
+        `<button type="button" class="mini-outline-btn" data-guard-act="ack-archive">归档保留现场（/snapshot/ack → archived）</button>` +
+      `</div>`;
+    banner.querySelector('[data-guard-act="ack-archive"]')?.addEventListener("click", () => acknowledgeCurrentSnapshot());
     return;
   }
 
@@ -4310,9 +4725,12 @@ async function acknowledgeCurrentSnapshot() {
 
 function applySessionSnapshot(snap, options = {}) {
   if (!snap) return;
+  if (state.currentSessionId && options.expectedSessionId && snap.session_id !== options.expectedSessionId) {
+    return;
+  }
   const preserveNewerSeats = snap.session_id === state.currentSessionId &&
     snap.boot_id === authState.bootId && Number(snap.rev || 0) < state.seatConfigRev;
-  const isSameSessionReconnect = Boolean(options.isReconnect && snap.session_id === state.currentSessionId);
+  const isSameSessionReconnect = Boolean(options.isReconnect && snap.session_id === state.currentSessionId && !state.snapshotLoading);
   const streamEl = el("chatStream");
   const prevScrollTop = streamEl ? streamEl.scrollTop : 0;
   const prevScrolledUp = state.userScrolledUp;
@@ -4320,9 +4738,11 @@ function applySessionSnapshot(snap, options = {}) {
   const isDifferentSession = snap.session_id !== state.currentSessionId;
   if (isDifferentSession) {
     state.userToggledRightPane = false;
+    state.checkedAbsentSeats = new Set();
   }
 
   state.currentSessionId = snap.session_id;
+  state.snapshotLoading = false;
   state.stage = snap.stage || "idle";
   state.execState = snap.exec_state || "idle";
   state.isBusy = Boolean(snap.is_busy);
@@ -4333,6 +4753,17 @@ function applySessionSnapshot(snap, options = {}) {
   state.sessionWorkspaceDir = snap.workspace_dir || "";
   state.workspaceBound = snap.workspace_bound ?? null;
   state.workspaceIsGit = Boolean(snap.workspace_is_git);
+  state.postExecVerifyCmd = String(
+    snap.whiteboard?.post_exec_verify_cmd ??
+      state.system?.verify_cmds_by_workspace?.[state.sessionWorkspaceDir] ??
+      ""
+  );
+  if (
+    state.writeAuthScope.sessionId !== snap.session_id ||
+    state.writeAuthScope.workspaceDir !== state.sessionWorkspaceDir
+  ) {
+    if (el("allowWriteCheckbox")) el("allowWriteCheckbox").checked = false;
+  }
   state.recoveryRequired = Boolean(snap.recovery_required || snap.whiteboard?.recovery_required);
   if (typeof snap.rev === "number" && snap.rev > state.sseLastRev) {
     state.sseLastRev = snap.rev;
@@ -4405,156 +4836,185 @@ function applySessionSnapshot(snap, options = {}) {
   }
 }
 
+let _resyncInFlightSid = "";
+async function resyncSessionSnapshotHttp(sessionId) {
+  if (!sessionId || sessionId !== state.currentSessionId) return false;
+  if (_resyncInFlightSid === sessionId) return false;
+  _resyncInFlightSid = sessionId;
+  try {
+    const res = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: "GET" });
+    if (sessionId !== state.currentSessionId || !res?.session) return false;
+    applySessionSnapshot(res.session, { isReconnect: true, expectedSessionId: sessionId });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (_resyncInFlightSid === sessionId) {
+      _resyncInFlightSid = "";
+    }
+  }
+}
+
 function dispatchSseEventFrame(eventName, rawData, rawId, sessionId) {
   if (sessionId !== state.currentSessionId) return;
   const numericId = Number(rawId || 0);
-  if (numericId > 0) {
-    if (eventName !== "snapshot" && numericId <= state.sseLastRev) {
-      return;
-    }
-    state.sseLastRev = Math.max(state.sseLastRev, numericId);
+  // 仅做幂等去重判断，严禁在 JSON.parse 与业务状态应用成功前推进 sseLastRev 游标！
+  if (numericId > 0 && eventName !== "snapshot" && eventName !== "sync_ack" && numericId <= state.sseLastRev) {
+    return;
   }
   if (!rawData) return;
   let pkt;
   try {
     pkt = JSON.parse(rawData);
   } catch {
+    // 帧截断或 JSON 异常：保持旧 sseLastRev 不变并触发 HTTP 完整快照重同步
+    resyncSessionSnapshotHttp(sessionId);
     return;
   }
 
-  if (eventName === "snapshot") {
-    const isReconnect = state.sseConnectedSessionId === sessionId && state.messages.size > 0;
-    state.sseConnectedSessionId = sessionId;
-    if (numericId > 0) state.sseLastRev = numericId;
-    applySessionSnapshot(pkt, { isReconnect });
-    return;
-  }
-
-  if (eventName === "session_cleared") {
-    clearChatMessages();
-    updateEmptyGuideVisibility();
-    syncAdaptiveRightCollapse();
-    return;
-  }
-
-  if (eventName === "session_meta") {
-    const prevStage = state.stage;
-    state.stage = pkt.stage || state.stage;
-    state.execState = pkt.exec_state || state.execState;
-    state.isBusy = Boolean(pkt.is_busy);
-    if (typeof pkt.topic === "string") state.topic = pkt.topic;
-    if (typeof pkt.topic_locked === "boolean") state.topicLocked = pkt.topic_locked;
-    if (typeof pkt.scenario_pack === "string" && pkt.scenario_pack) state.scenarioPack = pkt.scenario_pack;
-    if (typeof pkt.artifact_type === "string" && pkt.artifact_type) state.artifactType = pkt.artifact_type;
-    if (typeof pkt.workspace_dir === "string") state.sessionWorkspaceDir = pkt.workspace_dir;
-    if (typeof pkt.workspace_bound === "boolean") state.workspaceBound = pkt.workspace_bound;
-    if (typeof pkt.workspace_is_git === "boolean") state.workspaceIsGit = pkt.workspace_is_git;
-    if (typeof pkt.recovery_required === "boolean") {
-      state.recoveryRequired = pkt.recovery_required;
-      if (state.recoveryRequired) fetchRecoveryPlanIfNeeded();
-      else renderExecGuardBanner();
+  if (pkt && typeof pkt.boot_id === "string" && pkt.boot_id) {
+    if (authState.bootId && pkt.boot_id !== authState.bootId) {
+      clearSessionStorageAuth();
+      authState.token = "";
+      authState.bootId = pkt.boot_id;
+      authState.ready = false;
+      state.sseLastRev = 0;
+      state.seatConfigRev = 0;
+      disconnectSessionStream();
+      connectSessionStream(sessionId);
+      return;
     }
-    if (numericId >= state.seatConfigRev) {
-      state.seatConfigRev = numericId;
-      if (Array.isArray(pkt.enabled_agents)) state.enabledAgents = pkt.enabled_agents;
-      if (pkt.seat_personas) state.seatPersonas = { ...state.seatPersonas, ...pkt.seat_personas };
-      if (pkt.seat_efforts) state.seatEfforts = { ...pkt.seat_efforts };
-      if (pkt.executor_agent) state.executorAgent = pkt.executor_agent;
-      if (pkt.collab_mode || typeof pkt.auto_preview_exec === "boolean") {
-        syncCollabModeUI(pkt.collab_mode || state.collabMode, pkt.auto_preview_exec);
+    if (!authState.bootId) {
+      authState.bootId = pkt.boot_id;
+    }
+  }
+
+  try {
+    if (eventName === "sync_ack") {
+      state.sseConnectedSessionId = sessionId;
+      state.snapshotLoading = false;
+      if (typeof pkt.is_busy === "boolean") state.isBusy = pkt.is_busy;
+      if (pkt.exec_state) state.execState = pkt.exec_state;
+      renderStageAndHeader();
+      if (numericId > 0) state.sseLastRev = Math.max(state.sseLastRev, numericId);
+      return;
+    }
+
+    if (eventName === "snapshot") {
+      const isReconnect =
+        state.sseConnectedSessionId === sessionId && state.messages.size > 0 && !state.snapshotLoading;
+      state.sseConnectedSessionId = sessionId;
+      applySessionSnapshot(pkt, { isReconnect, expectedSessionId: sessionId });
+      const snapRev = Math.max(numericId, Number(pkt.rev || 0));
+      if (snapRev > 0) state.sseLastRev = Math.max(state.sseLastRev, snapRev);
+      return;
+    }
+
+    if (eventName === "session_cleared") {
+      clearChatMessages();
+      updateEmptyGuideVisibility();
+      syncAdaptiveRightCollapse();
+    } else if (eventName === "session_meta") {
+      const prevStage = state.stage;
+      state.stage = pkt.stage || state.stage;
+      state.execState = pkt.exec_state || state.execState;
+      state.isBusy = Boolean(pkt.is_busy);
+      if (typeof pkt.topic === "string") state.topic = pkt.topic;
+      if (typeof pkt.topic_locked === "boolean") state.topicLocked = pkt.topic_locked;
+      if (typeof pkt.scenario_pack === "string" && pkt.scenario_pack) state.scenarioPack = pkt.scenario_pack;
+      if (typeof pkt.artifact_type === "string" && pkt.artifact_type) state.artifactType = pkt.artifact_type;
+      if (typeof pkt.workspace_dir === "string") state.sessionWorkspaceDir = pkt.workspace_dir;
+      if (typeof pkt.workspace_bound === "boolean") state.workspaceBound = pkt.workspace_bound;
+      if (typeof pkt.workspace_is_git === "boolean") state.workspaceIsGit = pkt.workspace_is_git;
+      if (typeof pkt.recovery_required === "boolean") {
+        state.recoveryRequired = pkt.recovery_required;
+        if (state.recoveryRequired) fetchRecoveryPlanIfNeeded();
+        else renderExecGuardBanner();
       }
-    }
-    if (state.whiteboard) {
-      if (pkt.epistemic_mode) state.whiteboard.epistemic_mode = pkt.epistemic_mode;
-      if (pkt.epistemic_badge) state.whiteboard.epistemic_badge = pkt.epistemic_badge;
-    }
-    if (pkt.consensus_status && el("wbConsensusTag")) {
-      el("wbConsensusTag").textContent = pkt.consensus_status;
-    }
-
-    if (state.stage === "executing") {
-      const srvStart = Number(pkt.execution_started_at || 0);
-      if (srvStart > 0) {
-        state.execStartTs = Math.floor(srvStart * 1000);
-      } else if (prevStage !== "executing") {
-        state.execStartTs = Date.now();
+      if (numericId >= state.seatConfigRev) {
+        state.seatConfigRev = numericId;
+        if (Array.isArray(pkt.enabled_agents)) state.enabledAgents = pkt.enabled_agents;
+        if (pkt.seat_personas) state.seatPersonas = { ...state.seatPersonas, ...pkt.seat_personas };
+        if (pkt.seat_efforts) state.seatEfforts = { ...pkt.seat_efforts };
+        if (pkt.executor_agent) state.executorAgent = pkt.executor_agent;
+        if (pkt.collab_mode || typeof pkt.auto_preview_exec === "boolean") {
+          syncCollabModeUI(pkt.collab_mode || state.collabMode, pkt.auto_preview_exec);
+        }
       }
-      if (prevStage !== "executing" && state.activeTab !== "terminal") {
+      if (state.whiteboard) {
+        if (pkt.epistemic_mode) state.whiteboard.epistemic_mode = pkt.epistemic_mode;
+        if (pkt.epistemic_badge) state.whiteboard.epistemic_badge = pkt.epistemic_badge;
+      }
+      if (pkt.consensus_status && el("wbConsensusTag")) {
+        el("wbConsensusTag").textContent = pkt.consensus_status;
+      }
+
+      if (state.stage === "executing") {
+        const srvStart = Number(pkt.execution_started_at || 0);
+        if (srvStart > 0) {
+          state.execStartTs = Math.floor(srvStart * 1000);
+        } else if (prevStage !== "executing") {
+          state.execStartTs = Date.now();
+        }
+        if (prevStage !== "executing" && state.activeTab !== "terminal") {
+          el("execDot")?.classList.remove("hidden");
+        }
+      } else {
+        state.execStartTs = 0;
+      }
+
+      updateEmptyGuideVisibility();
+      renderAllSeats();
+      renderStageAndHeader();
+      syncAdaptiveRightCollapse();
+      refreshSessionsListOnly();
+    } else if (eventName === "seat_update") {
+      if (pkt?.agent_id) {
+        state.seatStates[pkt.agent_id] = pkt;
+        renderSeatCard(pkt.agent_id);
+      }
+    } else if (eventName === "msg_start") {
+      createOrUpdateMessageCard(pkt, { skipEnterAnim: false });
+    } else if (eventName === "msg_status" || eventName === "msg_activity") {
+      updateMessageStreamingStatus(pkt);
+    } else if (eventName === "msg_delta") {
+      appendMessageDelta(pkt.id, pkt.delta);
+    } else if (eventName === "msg_done") {
+      createOrUpdateMessageCard(pkt, { skipEnterAnim: true });
+      refreshSessionsListOnly();
+    } else if (eventName === "attachment_deleted") {
+      handleRemoteAttachmentDeleted(pkt?.id, sessionId);
+    } else if (eventName === "whiteboard_update") {
+      renderWhiteboard(pkt, false, false);
+    } else if (eventName === "term_log") {
+      const term = el("astraTermLogs");
+      if (term && pkt?.line) {
+        if (term.textContent === "尚未触发执行任务") term.textContent = "";
+        term.textContent += (term.textContent ? "\n" : "") + pkt.line;
+        term.scrollTop = term.scrollHeight;
+      }
+    } else if (eventName === "exec_delta") {
+      const term = el("astraTermLogs");
+      if (term && pkt?.delta) {
+        if (term.textContent === "尚未触发执行任务") term.textContent = "";
+        term.textContent += pkt.delta;
+        term.scrollTop = term.scrollHeight;
+      }
+    } else if (eventName === "exec_artifact") {
+      if (el("astraDiffView")) {
+        el("astraDiffView").innerHTML = renderDiffHtml(pkt.diff || "");
+      }
+      if (state.activeTab !== "terminal") {
         el("execDot")?.classList.remove("hidden");
       }
-    } else {
-      state.execStartTs = 0;
     }
 
-    updateEmptyGuideVisibility();
-    renderAllSeats();
-    renderStageAndHeader();
-    syncAdaptiveRightCollapse();
-    refreshSessionsListOnly();
-    return;
-  }
-
-  if (eventName === "seat_update") {
-    if (pkt?.agent_id) {
-      state.seatStates[pkt.agent_id] = pkt;
-      renderSeatCard(pkt.agent_id);
+    // 游标后置原子提交：仅在帧解析与业务应用全部无异常完成后推进 sseLastRev
+    if (numericId > 0) {
+      state.sseLastRev = Math.max(state.sseLastRev, numericId);
     }
-    return;
-  }
-
-  if (eventName === "msg_start") {
-    createOrUpdateMessageCard(pkt, { skipEnterAnim: false });
-    return;
-  }
-
-  if (eventName === "msg_status" || eventName === "msg_activity") {
-    updateMessageStreamingStatus(pkt);
-    return;
-  }
-
-  if (eventName === "msg_delta") {
-    appendMessageDelta(pkt.id, pkt.delta);
-    return;
-  }
-
-  if (eventName === "msg_done") {
-    createOrUpdateMessageCard(pkt, { skipEnterAnim: true });
-    refreshSessionsListOnly();
-    return;
-  }
-
-  if (eventName === "whiteboard_update") {
-    renderWhiteboard(pkt, false, false);
-    return;
-  }
-
-  if (eventName === "term_log") {
-    const term = el("astraTermLogs");
-    if (term && pkt?.line) {
-      if (term.textContent === "尚未触发执行任务") term.textContent = "";
-      term.textContent += (term.textContent ? "\n" : "") + pkt.line;
-      term.scrollTop = term.scrollHeight;
-    }
-    return;
-  }
-
-  if (eventName === "exec_delta") {
-    const term = el("astraTermLogs");
-    if (term && pkt?.delta) {
-      if (term.textContent === "尚未触发执行任务") term.textContent = "";
-      term.textContent += pkt.delta;
-      term.scrollTop = term.scrollHeight;
-    }
-    return;
-  }
-
-  if (eventName === "exec_artifact") {
-    if (el("astraDiffView")) {
-      el("astraDiffView").innerHTML = renderDiffHtml(pkt.diff || "");
-    }
-    if (state.activeTab !== "terminal") {
-      el("execDot")?.classList.remove("hidden");
-    }
+  } catch {
+    resyncSessionSnapshotHttp(sessionId);
   }
 }
 
@@ -4576,17 +5036,20 @@ function connectSessionStream(sessionId) {
   if (state.sseConnectedSessionId !== sessionId) {
     state.sseLastRev = 0;
     state.seatConfigRev = 0;
+    state.sseRetryAttempt = 0;
   }
 
   const controller = new AbortController();
   state.sseAbortController = controller;
 
-  const setConnOnline = (online) => {
+  const setConnOnline = (online, statusHint = "") => {
     const dot = el("sseConnDot");
     if (!dot) return;
     dot.classList.toggle("online", online);
-    dot.textContent = online ? "" : "重连中";
-    dot.title = online ? "本地实时服务已连接（fetch 流式鉴权通道）" : "SSE 实时流中断，正在带 since_rev 无损重连…";
+    dot.textContent = online ? "" : statusHint || "重连中";
+    dot.title = online
+      ? "本地实时服务已连接（fetch 流式鉴权通道）"
+      : statusHint || "SSE 实时流中断，正在带 since_rev 指数退避重连…";
   };
 
   (async () => {
@@ -4595,7 +5058,7 @@ function connectSessionStream(sessionId) {
       boot_id: String(authState.bootId || ""),
     });
     try {
-      const res = await fetch(`/api/sessions/${sessionId}/stream?${qs.toString()}`, {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/stream?${qs.toString()}`, {
         method: "GET",
         headers: {
           Accept: "text/event-stream",
@@ -4604,9 +5067,59 @@ function connectSessionStream(sessionId) {
         signal: controller.signal,
         cache: "no-store",
       });
-      if (!res.ok || !res.body) {
-        throw new Error(`SSE stream HTTP ${res.status}`);
+
+      // 状态码分级处置：401/403 走鉴权恢复；404 停止死链轮询并刷新会话列表
+      if (res.status === 401 || res.status === 403) {
+        setConnOnline(false, "鉴权恢复中");
+        if (state.sseAbortController === controller) {
+          state.sseAbortController = null;
+        }
+        const recovered = await recoverControlPlaneToken();
+        if (controller.signal.aborted || state.currentSessionId !== sessionId) return;
+        if (recovered) {
+          state.sseRetryAttempt = 0;
+          connectSessionStream(sessionId);
+        } else {
+          state.snapshotLoading = false;
+          renderStageAndHeader();
+          setConnOnline(false, "鉴权失效");
+          showToast("控制面鉴权已失效（服务可能已重启），请重新打开终端引导链接或重启桌面应用", "err", 4500);
+        }
+        return;
       }
+
+      if (res.status === 404) {
+        if (state.sseAbortController === controller) {
+          state.sseAbortController = null;
+        }
+        state.snapshotLoading = false;
+        renderStageAndHeader();
+        await refreshSessionsListOnly();
+        if (controller.signal.aborted || state.currentSessionId !== sessionId) return;
+        const fallbackSid = state.sessions[0]?.session_id || "";
+        if (fallbackSid && fallbackSid !== sessionId) {
+          await switchToSession(fallbackSid);
+        }
+        return;
+      }
+
+      if (!res.ok || !res.body) {
+        const httpErr = new Error(`SSE stream HTTP ${res.status}`);
+        httpErr.status = res.status;
+        throw httpErr;
+      }
+
+      const hdrBootId = String(res.headers?.get?.("X-Roundtable-Boot-Id") || "").trim();
+      if (hdrBootId && authState.bootId && hdrBootId !== authState.bootId) {
+        authState.bootId = hdrBootId;
+        state.sseLastRev = 0;
+        state.seatConfigRev = 0;
+        if (authState.token) {
+          writeSessionStorageAuth(authState.token, hdrBootId);
+        }
+      }
+
+      state.sseRetryAttempt = 0;
       setConnOnline(true);
       const reader = res.body.getReader();
       const decoder = new TextDecoder("utf-8");
@@ -4662,21 +5175,34 @@ function connectSessionStream(sessionId) {
       setConnOnline(false);
       if (state.sseAbortController === controller) {
         state.sseAbortController = null;
+        const attempt = Math.max(0, Number(state.sseRetryAttempt || 0));
+        state.sseRetryAttempt = Math.min(10, attempt + 1);
+        const baseDelay = Math.min(15000, 600 * Math.pow(2, Math.min(5, attempt)));
+        const jitter = Math.floor(Math.random() * 450);
         state.sseReconnectTimer = setTimeout(() => {
           if (state.currentSessionId === sessionId) {
             connectSessionStream(sessionId);
           }
-        }, 1200);
+        }, baseDelay + jitter);
       }
     }
   })();
 }
 
 async function switchToSession(sessionId) {
+  if (!sessionId) return;
   closePersonaPopover();
   closeAtSuggestMenu();
+  if (state.currentSessionId !== sessionId) {
+    resetAttachmentsForSessionSwitch(sessionId);
+  }
   state.currentSessionId = sessionId;
+  state.snapshotLoading = true;
+  state.checkedAbsentSeats = new Set();
+  state.writeAuthScope = { sessionId: "", workspaceDir: "" };
+  if (el("allowWriteCheckbox")) el("allowWriteCheckbox").checked = false;
   renderSessionList();
+  renderStageAndHeader();
   connectSessionStream(sessionId);
 }
 
@@ -4684,8 +5210,9 @@ async function createNewSession() {
   if (el("allowWriteCheckbox")) {
     el("allowWriteCheckbox").checked = false;
   }
+  state.writeAuthScope = { sessionId: "", workspaceDir: "" };
   state.userToggledRightPane = false;
-  if (!state.topic && !state.whiteboard?.items?.length && state.messages.size === 0 && !state.isBusy && state.currentSessionId) {
+  if (!state.topic && !state.whiteboard?.items?.length && state.messages.size === 0 && !state.isBusy && state.currentSessionId && !state.snapshotLoading) {
     renderExecutorControls();
     syncAdaptiveRightCollapse();
     el("topicInput")?.focus();
@@ -4703,6 +5230,11 @@ async function createNewSession() {
         auto_preview_exec: state.autoPreviewExec,
       }),
     });
+    if (res.session?.session_id) {
+      resetAttachmentsForSessionSwitch(res.session.session_id);
+      state.currentSessionId = res.session.session_id;
+      state.snapshotLoading = false;
+    }
     if (Array.isArray(res.sessions)) {
       state.sessions = res.sessions;
       renderSessionList();
@@ -4732,25 +5264,44 @@ async function deleteSessionById(sessionId) {
 }
 
 async function startOrInterruptWithText(overrideText = "") {
+  if (state.snapshotLoading) {
+    showToast("正在加载新会话完整快照，请稍候发送", "warn", 2000);
+    return;
+  }
+  if (hasUploadingAttachments()) {
+    showToast("存在正在上传校验中的附件，请待上传完成后再发送", "warn", 2400);
+    return;
+  }
+  const targetSessionId = state.currentSessionId;
+  if (!targetSessionId || state.sendingSessions.has(targetSessionId)) return;
+
   const inp = el("topicInput");
   const draft = inp?.value || "";
   const inMeeting = state.messages.size > 0 || state.isBusy;
-  const text = (overrideText || draft.trim() || (!inMeeting && state.topic) || "").trim();
+  const readyAtts = getReadyPendingAttachments(targetSessionId);
+  const attIds = readyAtts.map((a) => a.id);
+  let text = (overrideText || draft.trim() || (!inMeeting && state.topic) || "").trim();
+  if (!text && readyAtts.length > 0) {
+    const namesPreview = readyAtts.map((a) => a.name).slice(0, 3).join("、");
+    text = !inMeeting
+      ? `请结合所附文件/截图（${namesPreview}）进行协同分析并给出具体方案。`
+      : `补充上传了参考附件（${namesPreview}），请结合附件内容继续评估。`;
+  }
   if (!text) {
     inp?.focus();
     return;
   }
-  const sessionId = state.currentSessionId;
-  if (!sessionId || state.sendingSessions.has(sessionId)) return;
-  state.sendingSessions.add(sessionId);
+
+  state.sendingSessions.add(targetSessionId);
   closeAtSuggestMenu();
 
   try {
     if (!inMeeting) {
-      await apiFetch(`/api/sessions/${sessionId}/start`, {
+      await apiFetch(`/api/sessions/${targetSessionId}/start`, {
         method: "POST",
         body: JSON.stringify({
           topic: text,
+          attachment_ids: attIds,
           collab_mode: state.collabMode,
           scenario_pack: state.scenarioPack,
           artifact_type: state.artifactType,
@@ -4763,12 +5314,18 @@ async function startOrInterruptWithText(overrideText = "") {
       });
     } else {
       const endpoint = state.isBusy ? "interrupt" : "followup";
-      await apiFetch(`/api/sessions/${sessionId}/${endpoint}`, {
+      await apiFetch(`/api/sessions/${targetSessionId}/${endpoint}`, {
         method: "POST",
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({
+          message: text,
+          attachment_ids: attIds,
+        }),
       });
     }
-    if (sessionId === state.currentSessionId) {
+    if (targetSessionId === state.currentSessionId) {
+      if (attIds.length > 0) {
+        clearPendingAttachmentsOnSend(attIds, targetSessionId);
+      }
       if (!overrideText && inp?.value === draft) {
         inp.value = "";
         autoGrowComposer();
@@ -4778,15 +5335,23 @@ async function startOrInterruptWithText(overrideText = "") {
       scrollToBottom(true);
     }
   } catch (err) {
-    showToast(err.message || "发送指令失败", "err", 3600);
+    if (targetSessionId === state.currentSessionId) {
+      showToast(err.message || "发送指令失败", "err", 3600);
+    }
   } finally {
-    state.sendingSessions.delete(sessionId);
+    state.sendingSessions.delete(targetSessionId);
   }
 }
 
 async function triggerExecutionNow() {
-  if (!state.currentSessionId) return;
-  const checkedCnt = getCheckedActionCount();
+  const targetSessionId = state.currentSessionId;
+  if (!targetSessionId) return;
+  if (state.snapshotLoading) {
+    showToast("正在同步会话快照，请稍候执行", "warn", 2000);
+    return;
+  }
+  const checkedIds = getCheckedActionIds();
+  const checkedCnt = checkedIds.length;
   if (checkedCnt < 1) {
     setRightCollapsed(false, true);
     switchWorkbenchTab("whiteboard");
@@ -4794,27 +5359,73 @@ async function triggerExecutionNow() {
     showToast("尚无已勾选任务（checked_action_count = 0），请先在会议白板核对并勾选至少 1 项待执行任务", "warn", 3000);
     return;
   }
-  const allowWrite = Boolean(effectiveWorkspacePath() && el("allowWriteCheckbox")?.checked) === true;
+
+  const absentSeats = Array.isArray(state.whiteboard?.absent_seats) ? state.whiteboard.absent_seats : [];
+  const ackedAbsentSet = new Set();
+  const missingAbsentNames = [];
+  for (const ab of absentSeats) {
+    if (!ab || typeof ab !== "object" || ab.abnormal === false) continue;
+    const aid = String(ab.agent_id || ab.seat || "").toLowerCase();
+    if (!aid) continue;
+    if (ab.acknowledged || state.checkedAbsentSeats.has(aid)) {
+      ackedAbsentSet.add(aid);
+    } else {
+      missingAbsentNames.push(ab.seat_name || ab.name || AGENT_NAMES[aid] || aid);
+    }
+  }
+  if (missingAbsentNames.length > 0) {
+    setRightCollapsed(false, true);
+    switchWorkbenchTab("whiteboard");
+    el("wbCardAbsent")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    showToast(`存在未逐席勾选确认的缺席席位（${missingAbsentNames.join("、")}），请先逐项勾选确认后再执行`, "warn", 3400);
+    return;
+  }
+
+  const targetWs = effectiveWorkspacePath();
+  const writeChecked = Boolean(el("allowWriteCheckbox")?.checked);
+  const scopeMatches =
+    state.writeAuthScope.sessionId === targetSessionId &&
+    state.writeAuthScope.workspaceDir === targetWs;
+  const allowWrite = Boolean(targetWs && writeChecked && scopeMatches) === true;
+  if (writeChecked && targetWs && !scopeMatches) {
+    showToast("会话或绑定目录已变更，请在执行终端重新确认『写入项目』授权", "warn", 3000);
+    if (el("allowWriteCheckbox")) el("allowWriteCheckbox").checked = false;
+    renderExecutorControls();
+    return;
+  }
+
+  const expectedWbVersion = Math.max(1, Number(state.whiteboard?.wb_version || 1));
   const execAid = state.executorAgent || "astra";
   setRightCollapsed(false, true);
   switchWorkbenchTab("terminal");
   state.rollbackConflicts = [];
+  state.rollbackConflictDetail = null;
   state.postExecVerifyFailed = false;
   renderExecGuardBanner();
   if (el("astraTermLogs")) {
-    el("astraTermLogs").textContent = `正在核验任务勾选门禁与执行锁预约（${AGENT_NAMES[execAid] || execAid} · 已勾选 ${checkedCnt} 项任务）…`;
+    el("astraTermLogs").textContent = `正在核验一致性版本契约 (v${expectedWbVersion}) 与执行锁预约（${AGENT_NAMES[execAid] || execAid} · 已勾选 ${checkedCnt} 项任务）…`;
   }
   try {
-    await apiFetch(`/api/sessions/${state.currentSessionId}/execute`, {
+    await apiFetch(`/api/sessions/${targetSessionId}/execute`, {
       method: "POST",
       body: JSON.stringify({
         allow_workspace_write: allowWrite,
         executor_id: execAid,
+        expected_wb_version: expectedWbVersion,
+        checked_action_ids: checkedIds,
+        expected_workspace_dir: targetWs,
+        acknowledged_absent_agents: Array.from(ackedAbsentSet),
       }),
     });
   } catch (err) {
+    if (targetSessionId !== state.currentSessionId) return;
     if (el("astraTermLogs")) {
       el("astraTermLogs").textContent = `准入拦截 (${err.status || 409})：${err.message}`;
+    }
+    if (err.payload?.session && err.payload.session.session_id === targetSessionId) {
+      applySessionSnapshot(err.payload.session, { isReconnect: true });
+    } else if (err.payload?.whiteboard) {
+      renderWhiteboard(err.payload.whiteboard, true, false);
     }
     if (err.payload?.reason === "unacknowledged_absent_seats") {
       switchWorkbenchTab("whiteboard");
@@ -4859,19 +5470,41 @@ function syncModalSeatMatrixSummary() {
   });
 }
 
+function syncWorkspaceBindScopeButtons(scope, syncInputValue = false) {
+  const nextScope = scope === "default_only" ? "default_only" : "session";
+  state.workspaceBindScope = nextScope;
+  document.querySelectorAll("#cfgWsBindScopeSeg [data-ws-bind-scope]").forEach((btn) => {
+    const active = btn.dataset.wsBindScope === nextScope;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+  if (syncInputValue) {
+    const targetWs =
+      nextScope === "default_only"
+        ? String(state.system?.workspace_dir || "").trim()
+        : effectiveWorkspacePath();
+    if (el("cfgWorkspaceDir")) {
+      el("cfgWorkspaceDir").value = targetWs;
+    }
+    const verifyMap = state.system?.verify_cmds_by_workspace || {};
+    if (el("cfgPostExecVerifyCmd")) {
+      el("cfgPostExecVerifyCmd").value =
+        (targetWs && verifyMap[targetWs]) ||
+        (nextScope === "session" ? state.postExecVerifyCmd : state.system?.post_exec_verify_cmd) ||
+        "";
+    }
+  }
+}
+
 function openSettingsModal(initialTab = "") {
   const modal = el("settingsModal");
   if (!modal) return;
+  state.settingsSaveDraft = null;
   switchSettingsTab(initialTab || "seats");
   const sys = state.system || {};
   const agents = sys.agents || {};
 
-  if (el("cfgWorkspaceDir")) {
-    el("cfgWorkspaceDir").value = effectiveWorkspacePath();
-  }
-  if (el("cfgPostExecVerifyCmd")) {
-    el("cfgPostExecVerifyCmd").value = sys.post_exec_verify_cmd || state.postExecVerifyCmd || "";
-  }
+  syncWorkspaceBindScopeButtons(state.currentSessionId ? "session" : "default_only", true);
   if (el("cfgSingleCliFallback")) {
     el("cfgSingleCliFallback").checked = sys.allow_single_cli_fallback !== false;
   }
@@ -4947,11 +5580,13 @@ function openSettingsModal(initialTab = "") {
 
   syncDynamicRosterNames();
   syncModalSeatMatrixSummary();
+  refreshAllModalSeatChips();
   modal.classList.remove("hidden");
   modal.dispatchEvent(new Event("roundtable:settings-open"));
 }
 
 function closeSettingsModal() {
+  state.settingsSaveDraft = null;
   el("settingsModal")?.classList.add("hidden");
 }
 
@@ -5094,6 +5729,11 @@ async function saveSettingsFromModal() {
   const btn = el("saveSettingsBtn");
   if (btn) btn.disabled = true;
 
+  // 函数入口快照锁定目标 sessionId 与完整表单草稿，支持分步幂等重试
+  const lockedSessionId = state.currentSessionId || "";
+  const bindScope = state.workspaceBindScope === "default_only" ? "default_only" : "session";
+  let activeStepLabel = "工作区绑定";
+
   try {
     const selectedSeats = [];
     document.querySelectorAll("[data-cfg-seat-enable]").forEach((chk) => {
@@ -5101,7 +5741,7 @@ async function saveSettingsFromModal() {
     });
     if (selectedSeats.length === 0) {
       showToast("请至少启用 1 个参会席位", "warn", 2400);
-      switchSettingsTab("lineup");
+      switchSettingsTab("seats");
       return;
     }
 
@@ -5131,21 +5771,57 @@ async function saveSettingsFromModal() {
       }
     }
 
-    const prevEffectiveWs = effectiveWorkspacePath();
-    if (wsVal && wsVal !== prevEffectiveWs && state.currentSessionId && !state.isBusy) {
-      await apiFetch(`/api/sessions/${state.currentSessionId}/workspace`, {
-        method: "POST",
-        body: JSON.stringify({ workspace_dir: wsVal }),
-      });
-      state.sessionWorkspaceDir = wsVal;
-      state.workspaceBound = true;
+    const fingerprint = JSON.stringify({
+      lockedSessionId,
+      bindScope,
+      wsVal,
+      verifyCmdVal,
+      singleFallback,
+      singleConc,
+      rosterPreset,
+      pacingMode,
+      idleSec,
+      turnSec,
+      maxRef,
+      selectedSeats,
+      draftAgents,
+    });
+
+    if (
+      !state.settingsSaveDraft ||
+      state.settingsSaveDraft.sessionId !== lockedSessionId ||
+      state.settingsSaveDraft.fingerprint !== fingerprint
+    ) {
+      state.settingsSaveDraft = {
+        sessionId: lockedSessionId,
+        fingerprint,
+        doneSteps: { workspace: false, config: false, seats: false },
+      };
+    }
+    const doneSteps = state.settingsSaveDraft.doneSteps;
+
+    // 步骤 1：会话工作区换绑（仅当选择绑定至当前活跃会话时走状态机闸门）
+    if (!doneSteps.workspace) {
+      activeStepLabel = "步骤 1/3（工作区换绑）";
+      if (bindScope === "session" && lockedSessionId) {
+        const curWs = lockedSessionId === state.currentSessionId ? effectiveWorkspacePath() : null;
+        if (curWs === null || wsVal !== curWs) {
+          const switched = await switchCurrentSessionWorkspace(wsVal, { sessionId: lockedSessionId });
+          if (!switched) return;
+        }
+      } else if (bindScope === "session" && !lockedSessionId) {
+        state.sessionWorkspaceDir = wsVal;
+        state.workspaceBound = Boolean(wsVal);
+      }
+      doneSteps.workspace = true;
     }
 
-    const res = await apiFetch("/api/config", {
-      method: "POST",
-      body: JSON.stringify({
-        active_session_id: state.currentSessionId || "",
-        workspace_dir: wsVal,
+    // 步骤 2：全局配置保存（已彻底剥离会话工作区状态机；仅在 default_only 时更新默认新建目录）
+    if (!doneSteps.config) {
+      activeStepLabel = "步骤 2/3（全局配置）";
+      const cfgPayload = {
+        active_session_id: lockedSessionId,
+        ...(bindScope === "default_only" ? { workspace_dir: wsVal } : {}),
         post_exec_verify_cmd: verifyCmdVal,
         allow_single_cli_fallback: singleFallback,
         roster_preset: rosterPreset,
@@ -5155,48 +5831,90 @@ async function saveSettingsFromModal() {
         turn_timeout_sec: turnSec,
         max_ref_chars: maxRef,
         agents: draftAgents,
-      }),
-    });
-
-    const nextPersonas = {};
-    const resetSeatEfforts = {};
-    for (const aid of AGENT_ORDER) {
-      nextPersonas[aid] = draftAgents[aid].persona;
-      resetSeatEfforts[aid] = "";
-    }
-
-    state.enabledAgents = selectedSeats;
-    if (!selectedSeats.includes(state.executorAgent)) {
-      state.executorAgent = selectedSeats.includes("astra") ? "astra" : selectedSeats[0];
-    }
-    state.seatPersonas = { ...state.seatPersonas, ...nextPersonas };
-    state.seatEfforts = {};
-    state.postExecVerifyCmd = verifyCmdVal;
-    state.rosterPreset = res.system?.roster_preset || rosterPreset;
-    state.singleCliConcurrency = res.system?.single_cli_concurrency || singleConc;
-
-    if (res.system) {
-      renderSystemStatus(res.system);
-    } else {
-      syncDynamicRosterNames();
-      renderAllSeats();
-    }
-
-    if (state.currentSessionId) {
-      await persistSessionSeatsPatch({
-        enabled_agents: selectedSeats,
-        executor_agent: state.executorAgent,
-        seat_personas: nextPersonas,
-        seat_efforts: resetSeatEfforts,
+      };
+      const res = await apiFetch("/api/config", {
+        method: "POST",
+        body: JSON.stringify(cfgPayload),
       });
+      if (lockedSessionId === state.currentSessionId) {
+        state.postExecVerifyCmd = verifyCmdVal;
+      }
+      state.rosterPreset = res.system?.roster_preset || rosterPreset;
+      state.singleCliConcurrency = res.system?.single_cli_concurrency || singleConc;
+      if (res.system) {
+        renderSystemStatus(res.system);
+      } else {
+        syncDynamicRosterNames();
+        renderAllSeats();
+      }
+      doneSteps.config = true;
     }
 
-    renderStageAndHeader();
-    if (state.whiteboard) renderWhiteboard(state.whiteboard, true, false);
+    // 步骤 3：锁定目标会话席位配置（保留 seatConfigRev 抵御滞后 SSE 帧回写覆盖）
+    if (!doneSteps.seats) {
+      activeStepLabel = "步骤 3/3（会话席位配置）";
+      const nextPersonas = {};
+      const resetSeatEfforts = {};
+      for (const aid of AGENT_ORDER) {
+        nextPersonas[aid] = draftAgents[aid].persona;
+        resetSeatEfforts[aid] = "";
+      }
+      const nextExec = selectedSeats.includes(state.executorAgent)
+        ? state.executorAgent
+        : selectedSeats.includes("astra")
+        ? "astra"
+        : selectedSeats[0];
+
+      if (lockedSessionId) {
+        const seatRes = await apiFetch(`/api/sessions/${encodeURIComponent(lockedSessionId)}/seats`, {
+          method: "POST",
+          body: JSON.stringify({
+            enabled_agents: selectedSeats,
+            executor_agent: nextExec,
+            seat_personas: nextPersonas,
+            seat_efforts: resetSeatEfforts,
+          }),
+        });
+        if (lockedSessionId === state.currentSessionId) {
+          if (!seatRes.rev || seatRes.rev >= state.seatConfigRev) {
+            state.seatConfigRev = Math.max(state.seatConfigRev, Number(seatRes.rev || 0));
+            state.enabledAgents = Array.isArray(seatRes.enabled_agents) ? seatRes.enabled_agents : selectedSeats;
+            state.executorAgent = seatRes.executor_agent || nextExec;
+            state.seatPersonas = { ...state.seatPersonas, ...(seatRes.seat_personas || nextPersonas) };
+            state.seatEfforts = { ...(seatRes.seat_efforts || {}) };
+            if (seatRes.seat_states) state.seatStates = seatRes.seat_states;
+          }
+          renderAllSeats();
+          renderQuickCueButtons();
+          renderExecutorControls();
+          syncScenarioPresetHighlight();
+        }
+      } else {
+        state.enabledAgents = selectedSeats;
+        state.executorAgent = nextExec;
+        state.seatPersonas = { ...state.seatPersonas, ...nextPersonas };
+        state.seatEfforts = {};
+        renderAllSeats();
+        renderQuickCueButtons();
+        renderExecutorControls();
+        syncScenarioPresetHighlight();
+      }
+      doneSteps.seats = true;
+    }
+
+    state.settingsSaveDraft = null;
+    if (lockedSessionId === state.currentSessionId) {
+      renderStageAndHeader();
+      if (state.whiteboard) renderWhiteboard(state.whiteboard, true, false);
+    }
     closeSettingsModal();
     showToast("1–6 席阵容、并发通道与系统安全策略已保存", "ok", 2200);
   } catch (err) {
-    showToast(err.message || "保存系统配置失败", "err", 3800);
+    showToast(
+      `${activeStepLabel}失败：${err.message || "保存异常"}（弹窗草稿已保留，再次点击保存仅补交未完成步骤）`,
+      "err",
+      4200
+    );
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -5452,8 +6170,35 @@ function bindEvents() {
   // 会议白板操作：单击议题编辑（运行前）、+添加条目、缺席确认、整理去重、复制纪要、导出 .md、自适应交付出口
   el("wbTopicText")?.addEventListener("click", () => startInlineTopicEdit());
   el("wbAckAbsentBtn")?.addEventListener("click", async () => {
-    const wb = await postWhiteboardMutation({ op: "acknowledge_absent" });
-    if (wb) showToast("已确认知悉缺席席位影响，执行准入已解锁", "ok", 2200);
+    const absentSeats = Array.isArray(state.whiteboard?.absent_seats) ? state.whiteboard.absent_seats : [];
+    const unackedIds = absentSeats
+      .filter((x) => x && typeof x === "object" && x.abnormal !== false && !x.acknowledged)
+      .map((x) => String(x.agent_id || x.seat || "").toLowerCase())
+      .filter(Boolean);
+    const selectedToAck = unackedIds.filter((aid) => state.checkedAbsentSeats.has(aid));
+    if (unackedIds.length > 0 && selectedToAck.length === 0) {
+      showToast("请先逐项勾选已知悉风险的异常缺席席位（禁止默认全选）", "warn", 2600);
+      return;
+    }
+    const allAckIds = [
+      ...absentSeats
+        .filter((x) => x && typeof x === "object" && x.acknowledged)
+        .map((x) => String(x.agent_id || x.seat || "").toLowerCase())
+        .filter(Boolean),
+      ...selectedToAck,
+    ];
+    const wb = await postWhiteboardMutation({
+      op: "acknowledge_absent",
+      acknowledged_absent_agents: Array.from(new Set(allAckIds)),
+    });
+    if (wb) {
+      const remaining = (wb.absent_seats || []).filter((x) => x && x.abnormal !== false && !x.acknowledged).length;
+      showToast(
+        remaining > 0 ? `已记录所选席位确认，尚余 ${remaining} 席待勾选确认` : "已逐席确认全部异常缺席席位，执行准入已解锁",
+        "ok",
+        2200
+      );
+    }
   });
 
   document.querySelectorAll("[data-wb-add]").forEach((btn) => {
@@ -5543,6 +6288,14 @@ function bindEvents() {
   document.querySelectorAll("#sandboxSegmented [data-write-mode]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const writeOn = btn.dataset.writeMode === "write";
+      const curWs = effectiveWorkspacePath();
+      if (writeOn && !curWs) {
+        showToast("请先绑定本地项目工作区后再开启写入模式", "warn", 2400);
+        return;
+      }
+      state.writeAuthScope = writeOn
+        ? { sessionId: state.currentSessionId || "", workspaceDir: curWs }
+        : { sessionId: "", workspaceDir: "" };
       if (el("allowWriteCheckbox")) el("allowWriteCheckbox").checked = writeOn;
       renderExecutorControls();
     });
@@ -5560,19 +6313,28 @@ function bindEvents() {
   el("ackSnapshotBtn")?.addEventListener("click", () => acknowledgeCurrentSnapshot());
 
   el("rollbackExecBtn")?.addEventListener("click", async () => {
-    if (!state.currentSessionId) return;
+    const targetSessionId = state.currentSessionId;
+    if (!targetSessionId || state.snapshotLoading) return;
     try {
-      const res = await apiFetch(`/api/sessions/${state.currentSessionId}/rollback`, {
+      const res = await apiFetch(`/api/sessions/${targetSessionId}/rollback`, {
         method: "POST",
         body: JSON.stringify({}),
       });
+      if (targetSessionId !== state.currentSessionId) return;
       state.rollbackConflicts = [];
+      state.rollbackConflictDetail = null;
       state.postExecVerifyFailed = false;
       renderExecGuardBanner();
-      showToast(res.message || "已按写前 CAS 字节清单原子回滚工作区", "ok", 2800);
+      showToast(
+        res.message || "已恢复绑定工作区内受管文件字节（不含 Git 提交/远端推送、家目录配置及验证命令外部副作用）",
+        "ok",
+        3400
+      );
     } catch (err) {
+      if (targetSessionId !== state.currentSessionId) return;
       if (err.status === 409 && Array.isArray(err.payload?.conflict_paths)) {
         state.rollbackConflicts = err.payload.conflict_paths;
+        state.rollbackConflictDetail = err.payload;
         renderExecGuardBanner();
       }
       showToast(err.message || "原子回滚已拦截", "err", 4200);
@@ -5639,7 +6401,14 @@ function bindEvents() {
     });
   });
 
-  el("browseWorkspaceBtn")?.addEventListener("click", () => pickWorkspaceFolder());
+  document.querySelectorAll("#cfgWsBindScopeSeg [data-ws-bind-scope]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      syncWorkspaceBindScopeButtons(btn.dataset.wsBindScope, true);
+    });
+  });
+  el("browseWorkspaceBtn")?.addEventListener("click", () =>
+    pickWorkspaceFolder(state.workspaceBindScope || "session")
+  );
   el("quickSingleCliTriadBtn")?.addEventListener("click", () => applyQuickSingleCliTriad());
   el("testCliBtn")?.addEventListener("click", () => runCliTest(false));
   el("modalTestCliBtn")?.addEventListener("click", () => runCliTest(true));
@@ -5729,6 +6498,9 @@ async function bootstrap() {
   setRightCollapsed(savedRightHidden);
 
   bindEvents();
+  initV4Enhancements();
+  hydrateVectorIcons(document);
+  renderPendingAttachmentTray();
   setInterval(tickThinkingTimers, 1000);
 
   try {
@@ -5739,7 +6511,9 @@ async function bootstrap() {
     const targetSid =
       statusRes.default_session_id || (state.sessions[0] && state.sessions[0].session_id) || "";
     state.currentSessionId = targetSid;
+    state.snapshotLoading = Boolean(targetSid);
     renderSessionList();
+    renderStageAndHeader();
     if (targetSid) {
       connectSessionStream(targetSid);
     }

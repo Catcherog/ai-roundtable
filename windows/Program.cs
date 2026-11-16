@@ -109,7 +109,22 @@ internal sealed class RoundtableWindow : Form
                 using (dialog) { if (dialog.ShowDialog(this) == DialogResult.OK) { e.ResultFilePath = dialog.FileName; e.Handled = true; } else e.Cancel = true; }
             };
             core.WebMessageReceived += NativeRequest;
-            // Only main frames at this process's loopback origin get the two native operations.
+            core.ProcessFailed += async (_, args) => {
+                if (origin == null || args.ProcessFailedKind == CoreWebView2ProcessFailedKind.RenderProcessUnresponsive) return;
+                try {
+                    using var resp = await client.PostAsJsonAsync(new Uri(origin, "api/auth/reissue-bootstrap"), new { });
+                    if (resp.IsSuccessStatusCode) {
+                        using var doc = await resp.Content.ReadFromJsonAsync<JsonDocument>();
+                        string? code = doc?.RootElement.GetProperty("bootstrap_code").GetString();
+                        if (!string.IsNullOrEmpty(code)) {
+                            core.Navigate(origin.AbsoluteUri + "#bootstrap=" + code);
+                            return;
+                        }
+                    }
+                } catch { }
+                core.Reload();
+            };
+            // Only main frames at this process's loopback origin get the native operations.
             string originJson = JsonSerializer.Serialize(origin.GetLeftPart(UriPartial.Authority));
             await core.AddScriptToExecuteOnDocumentCreatedAsync("""
                 (() => {
@@ -135,24 +150,37 @@ internal sealed class RoundtableWindow : Form
     private bool Trusted(string url) => origin != null && Uri.TryCreate(url, UriKind.Absolute, out var u)
         && u.Scheme == origin.Scheme && u.Host == origin.Host && u.Port == origin.Port && string.IsNullOrEmpty(u.UserInfo);
 
-    private void NativeRequest(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
+    private async void NativeRequest(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
     {
         if (!Trusted(e.Source)) return;
         using var payload = JsonDocument.Parse(e.WebMessageAsJson);
         var msg = payload.RootElement;
         if (msg.ValueKind != JsonValueKind.Object || !msg.TryGetProperty("id", out var id) || id.ValueKind != JsonValueKind.String ||
             !msg.TryGetProperty("action", out var cmd) || cmd.ValueKind != JsonValueKind.String) return;
+        string reqId = id.GetString()!;
         object value;
         switch (cmd.GetString())
         {
             case "getBootAuth": value = new { token, bootId, port = origin!.Port }; break;
+            case "reissueBootstrap":
+                try {
+                    using var resp = await client.PostAsJsonAsync(new Uri(origin!, "api/auth/reissue-bootstrap"), new { });
+                    using var doc = resp.IsSuccessStatusCode ? await resp.Content.ReadFromJsonAsync<JsonDocument>() : null;
+                    string? freshCode = doc?.RootElement.GetProperty("bootstrap_code").GetString();
+                    value = !string.IsNullOrEmpty(freshCode) ? new { code = freshCode, bootId } : new { code = "" };
+                } catch { value = new { code = "" }; }
+                break;
             case "pickFolder":
-                using (var folder = new FolderBrowserDialog { Description = "选择项目目录", UseDescriptionForTitle = true })
+                TopMost = true;
+                Activate();
+                try {
+                    using var folder = new FolderBrowserDialog { Description = "选择项目目录", UseDescriptionForTitle = true };
                     value = folder.ShowDialog(this) == DialogResult.OK ? folder.SelectedPath : "";
+                } finally { TopMost = false; }
                 break;
             default: return;
         }
-        if (Trusted(view.Source.AbsoluteUri)) view.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new { id = id.GetString(), value }));
+        if (Trusted(view.Source.AbsoluteUri)) view.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new { id = reqId, value }));
     }
 
     private void Fatal(string message)

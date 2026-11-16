@@ -447,19 +447,29 @@ async def run_v4_suite() -> None:
                     body=json.dumps({"op": "add", "kind": "action", "author": "chair", "text": "升级 main.py 版本号"}).encode("utf-8"),
                 )
                 cur_actions = [it for it in json.loads(b_add_v4.decode("utf-8"))["whiteboard"]["items"] if it.get("kind") == "action"]
-            await raw_http_request(
+            _, _, b_chk_v4 = await raw_http_request(
                 port,
                 "POST",
                 f"/api/sessions/{sid}/whiteboard",
                 headers=auth_hdr,
                 body=json.dumps({"op": "toggle_check", "item_id": cur_actions[0]["id"], "checked": True}).encode("utf-8"),
             )
+            wb_chk_v4 = json.loads(b_chk_v4.decode("utf-8"))["whiteboard"]
             st_ex, _, _ = await raw_http_request(
                 port,
                 "POST",
                 f"/api/sessions/{sid}/execute",
                 headers=auth_hdr,
-                body=json.dumps({"allow_workspace_write": True, "executor_id": "astra"}).encode("utf-8"),
+                body=json.dumps(
+                    {
+                        "allow_workspace_write": True,
+                        "executor_id": "astra",
+                        "expected_wb_version": wb_chk_v4["wb_version"],
+                        "checked_action_ids": [cur_actions[0]["id"]],
+                        "expected_workspace_dir": str(proj_dir),
+                        "acknowledged_absent_agents": [],
+                    }
+                ).encode("utf-8"),
             )
             assert st_ex == 202
             for _ in range(60):

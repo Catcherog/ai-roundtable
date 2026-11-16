@@ -1,4 +1,4 @@
-AI 圆桌 4.0.0
+AI 圆桌 4.0.1
 
 Windows 10/11 x64：完整解压 AI-Roundtable-Windows-x64.zip，运行 AI-Roundtable.exe。
 Apple 芯片 Mac：解压 AI-Roundtable-macOS-arm64.zip，打开 AI圆桌.app。

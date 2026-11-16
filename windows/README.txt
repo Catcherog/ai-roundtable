@@ -1,4 +1,4 @@
-AI 圆桌 · AI Roundtable 4.0.0 for Windows x64
+AI 圆桌 · AI Roundtable 4.0.1 for Windows x64
 
 解压整个 ZIP，进入 AI-Roundtable 文件夹，双击 AI-Roundtable.exe。请保留所有同级文件夹。
 本包内置 Python 和 .NET。桌面界面需要 Microsoft Edge WebView2 Evergreen Runtime。

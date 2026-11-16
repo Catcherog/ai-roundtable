@@ -35,7 +35,7 @@ In the meeting above, three seats shared one Codex CLI and answered a small ques
 
 - **Parallel seats on one CLI.** Seats that share an executable also share a concurrency limit. Each independent call gets its own temporary directory. In one Mac test, six Gemini CLI processes ran simultaneously and returned all six opening statements in 29.3 seconds. The meeting finished in 57.7 seconds including synthesis. [Test conditions and results](docs/verification.md)
 - **Reconnect without starting over.** Meeting events carry ordered revisions. A window requests the events it missed or loads a snapshot if those events have left the buffer. Messages and whiteboards are stored locally in SQLite.
-- **Rollback checks later edits.** Before a write, the app locks the workspace and records SHA-256 file snapshots. Recovery works in Git projects and ordinary folders, including ignored files. A conflicting edit is preserved and its path is shown for review.
+- **Rollback checks later edits.** Before a write, the app locks the workspace and snapshots managed files, including ordinary Git-ignored files. Untracked `output/` and `.app` directories are excluded. Binding is refused if managed regular files exceed 128 MiB. Recovery does not undo Git commits, pushes or effects outside the workspace; conflicting edits are preserved.
 - **Local orchestration.** WebView2 on Windows and WKWebView on macOS connect to an authenticated loopback service. The selected CLIs send prompts and referenced project context to their respective model providers under your account.
 
 ## Build from source

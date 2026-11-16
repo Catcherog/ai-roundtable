@@ -1,51 +1,50 @@
 """Win32 jobs, safe file reads and executable resolution for the portable desktop app."""
 import ctypes
-from ctypes import wintypes
 import errno
 import json
-import msvcrt
 import os
 from pathlib import Path
 import shutil
 import stat
+import sys
 
-kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-H, D, P = wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p
-
-
-def _api(name, result, *args):
-    fn = getattr(kernel, name)
-    fn.restype, fn.argtypes = result, args
-    return fn
-
-
-_create_job = _api("CreateJobObjectW", H, P, wintypes.LPCWSTR)
-_set_job = _api("SetInformationJobObject", wintypes.BOOL, H, ctypes.c_int, P, D)
-_query_job = _api("QueryInformationJobObject", wintypes.BOOL, H, ctypes.c_int, P, D, P)
-_assign = _api("AssignProcessToJobObject", wintypes.BOOL, H, H)
-_end_job = _api("TerminateJobObject", wintypes.BOOL, H, wintypes.UINT)
-_wait = _api("WaitForSingleObject", D, H, D)
-_close = _api("CloseHandle", wintypes.BOOL, H)
-_open_process = _api("OpenProcess", H, D, wintypes.BOOL, D)
-_create_file = _api("CreateFileW", H, wintypes.LPCWSTR, D, D, P, D, D, H)
-_get_file_info = _api("GetFileInformationByHandleEx", wintypes.BOOL, H, ctypes.c_int, P, D)
 _jobs = {}
 
+if os.name == "nt" or sys.platform == "win32":
+    from ctypes import wintypes
+    import msvcrt
 
-class BasicLimits(ctypes.Structure):
-    _fields_ = [("process_time", ctypes.c_int64), ("job_time", ctypes.c_int64), ("flags", D),
-                ("min_ws", ctypes.c_size_t), ("max_ws", ctypes.c_size_t), ("process_limit", D),
-                ("affinity", ctypes.c_size_t), ("priority", D), ("scheduling", D)]
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    H, D, P = wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p
 
+    def _api(name, result, *args):
+        fn = getattr(kernel, name)
+        fn.restype, fn.argtypes = result, args
+        return fn
 
-class ExtendedLimits(ctypes.Structure):
-    _fields_ = [("basic", BasicLimits), ("io", ctypes.c_uint64 * 6),
-                ("memory", ctypes.c_size_t * 4)]
+    _create_job = _api("CreateJobObjectW", H, P, wintypes.LPCWSTR)
+    _set_job = _api("SetInformationJobObject", wintypes.BOOL, H, ctypes.c_int, P, D)
+    _query_job = _api("QueryInformationJobObject", wintypes.BOOL, H, ctypes.c_int, P, D, P)
+    _assign = _api("AssignProcessToJobObject", wintypes.BOOL, H, H)
+    _end_job = _api("TerminateJobObject", wintypes.BOOL, H, wintypes.UINT)
+    _wait = _api("WaitForSingleObject", D, H, D)
+    _close = _api("CloseHandle", wintypes.BOOL, H)
+    _open_process = _api("OpenProcess", H, D, wintypes.BOOL, D)
+    _create_file = _api("CreateFileW", H, wintypes.LPCWSTR, D, D, P, D, D, H)
+    _get_file_info = _api("GetFileInformationByHandleEx", wintypes.BOOL, H, ctypes.c_int, P, D)
 
+    class BasicLimits(ctypes.Structure):
+        _fields_ = [("process_time", ctypes.c_int64), ("job_time", ctypes.c_int64), ("flags", D),
+                    ("min_ws", ctypes.c_size_t), ("max_ws", ctypes.c_size_t), ("process_limit", D),
+                    ("affinity", ctypes.c_size_t), ("priority", D), ("scheduling", D)]
 
-class Accounting(ctypes.Structure):
-    _fields_ = [("times", ctypes.c_int64 * 4), ("page_faults", D), ("total", D),
-                ("active", D), ("terminated", D)]
+    class ExtendedLimits(ctypes.Structure):
+        _fields_ = [("basic", BasicLimits), ("io", ctypes.c_uint64 * 6),
+                    ("memory", ctypes.c_size_t * 4)]
+
+    class Accounting(ctypes.Structure):
+        _fields_ = [("times", ctypes.c_int64 * 4), ("page_faults", D), ("total", D),
+                    ("active", D), ("terminated", D)]
 
 
 def attach_job(pid):
@@ -189,3 +188,67 @@ def split_command(text):
         return list(args[:count.value])
     finally:
         _api("LocalFree", H, H)(ctypes.cast(args, H))
+
+
+def pick_folder_sta(prompt: str = "请选择 AI圆桌 绑定的本地项目工作区目录："):
+    """
+    PowerShell STA 模式 System.Windows.Forms.FolderBrowserDialog 选目录兜底实现：
+    返回 (selected_path, cancelled, error_message)，严格区分用户取消与平台调用异常。
+    """
+    import subprocess
+
+    ps_exe = shutil.which("powershell.exe") or shutil.which("pwsh.exe") or "powershell.exe"
+    safe_prompt = str(prompt or "请选择项目工作区目录").replace("'", "''")
+    ps_script = (
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+        "Add-Type -AssemblyName System.Windows.Forms; "
+        "Add-Type -AssemblyName System.Drawing; "
+        "$owner = New-Object System.Windows.Forms.Form; "
+        "$owner.TopMost = $true; $owner.ShowInTaskbar = $false; "
+        "$owner.Width = 1; $owner.Height = 1; $owner.Opacity = 0; "
+        "$owner.StartPosition = 'CenterScreen'; $owner.Show(); $owner.Activate(); "
+        "$dlg = New-Object System.Windows.Forms.FolderBrowserDialog; "
+        f"$dlg.Description = '{safe_prompt}'; "
+        "$dlg.ShowNewFolderButton = $true; "
+        "try { "
+        "  $res = $dlg.ShowDialog($owner); "
+        "  if ($res -eq [System.Windows.Forms.DialogResult]::OK -and $dlg.SelectedPath) { "
+        "    [Console]::Out.WriteLine('SELECTED:' + $dlg.SelectedPath) "
+        "  } else { "
+        "    [Console]::Out.WriteLine('CANCELLED') "
+        "  } "
+        "} finally { $dlg.Dispose(); $owner.Close(); $owner.Dispose() }"
+    )
+    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        proc = subprocess.run(
+            [ps_exe, "-NoProfile", "-NonInteractive", "-Sta", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=90.0,
+            creationflags=creation_flags,
+        )
+    except FileNotFoundError as exc:
+        return "", False, f"未检测到 PowerShell 可执行程序，无法唤起 Windows 系统目录对话框 ({exc})"
+    except subprocess.TimeoutExpired:
+        return "", False, "Windows 目录选择对话框响应超时"
+    except Exception as exc:
+        return "", False, f"唤起 Windows 目录选择对话框异常：{exc}"
+
+    out_txt = (proc.stdout or b"").decode("utf-8", errors="replace").strip()
+    err_txt = (proc.stderr or b"").decode("utf-8", errors="replace").strip()
+    if proc.returncode != 0:
+        detail = err_txt or out_txt or f"exit={proc.returncode}"
+        return "", False, f"Windows 目录选择组件调用失败：{detail[:240]}"
+    for line in reversed(out_txt.splitlines()):
+        clean = line.strip()
+        if clean.startswith("SELECTED:"):
+            chosen = clean[len("SELECTED:") :].strip()
+            if len(chosen) > 3 and chosen[-1] in ("\\", "/"):
+                chosen = chosen.rstrip("\\/")
+            if chosen:
+                return chosen, False, ""
+        if clean in ("CANCELLED", "CANCEL"):
+            return "", True, ""
+    return "", False, f"Windows 目录选择器返回了无法解析的响应：{out_txt[:160] or err_txt[:160] or 'empty'}"

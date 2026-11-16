@@ -195,6 +195,19 @@ class SupervisedProcessHandle:
             pass
 
 
+def sanitize_subprocess_env(raw_env: Optional[Dict[str, str]]) -> Dict[str, str]:
+    """强制剥离控制面回环鉴权密钥变量，杜绝向 CLI 或验证子进程泄露凭据。"""
+    clean = dict(raw_env) if raw_env is not None else os.environ.copy()
+    for key in list(clean.keys()):
+        if key in (
+            "AI_ROUNDTABLE_BOOT_TOKEN",
+            "AI_ROUNDTABLE_BOOTSTRAP_CODE",
+            "AI_ROUNDTABLE_BOOT_ID",
+        ) or key.upper().startswith("AI_ROUNDTABLE_BOOT_"):
+            clean.pop(key, None)
+    return clean
+
+
 async def spawn_supervised_cli(
     cmd: List[str],
     *,
@@ -207,6 +220,8 @@ async def spawn_supervised_cli(
     wait_release: bool = False,
 ) -> SupervisedProcessHandle:
     """拉起带 Pipe-EOF 生命线与独立进程组围栏的受监管 CLI 子进程。"""
+    env = sanitize_subprocess_env(env)
+    cwd = os.path.realpath(os.path.expanduser(cwd))
     r_fd, w_fd = os.pipe()
     if os.name == "nt":
         proc = None

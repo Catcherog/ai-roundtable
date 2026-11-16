@@ -13,7 +13,11 @@ import shlex
 import time
 from typing import Dict, Optional
 
-from ..drivers.process_watchdog import spawn_supervised_cli, terminate_and_reap_process_group
+from ..drivers.process_watchdog import (
+    sanitize_subprocess_env,
+    spawn_supervised_cli,
+    terminate_and_reap_process_group,
+)
 
 
 async def run_post_execution_verification(
@@ -23,7 +27,7 @@ async def run_post_execution_verification(
     env: Dict[str, str],
     timeout_sec: float = 60.0,
 ) -> dict:
-    """在独立受监管进程组中执行只读后置验证命令并返回结构化核验报告。"""
+    """在独立受监管进程组中以非 Shell 参数数组（shell=False）执行只读后置验证命令并返回结构化核验报告。"""
     cleaned = str(verify_cmd or "").strip()
     if not cleaned:
         return {
@@ -35,12 +39,23 @@ async def run_post_execution_verification(
             "command": "",
         }
 
+    locked_cwd = os.path.realpath(os.path.expanduser(str(workspace_realpath or "").strip()))
+    if not locked_cwd or not os.path.isdir(locked_cwd):
+        return {
+            "enabled": True,
+            "passed": False,
+            "exit_code": 2,
+            "elapsed_ms": 0,
+            "output": f"验证命令目标工作区不存在或未绑定：{workspace_realpath}",
+            "command": cleaned,
+        }
+
     try:
         if os.name == "nt":
             from ..drivers.windows_support import split_command
             argv = split_command(cleaned)
         else:
-            argv = shlex.split(cleaned)
+            argv = shlex.split(cleaned, posix=True)
     except ValueError as exc:
         return {
             "enabled": True,
@@ -54,13 +69,14 @@ async def run_post_execution_verification(
     if not argv:
         return {"enabled": False, "passed": True, "exit_code": 0, "elapsed_ms": 0, "output": "", "command": ""}
 
+    sanitized_env = sanitize_subprocess_env(env)
     t0 = time.perf_counter()
     handle = None
     try:
         handle = await spawn_supervised_cli(
             argv,
-            cwd=workspace_realpath,
-            env=env,
+            cwd=locked_cwd,
+            env=sanitized_env,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
