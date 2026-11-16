@@ -40,6 +40,12 @@ async function until(fn, ms=30000) {
     await js("document.querySelector('[data-settings-tab=lineup]').click();document.querySelector('[data-modal-lineup="+key+"]').click();");await save();
     await until(()=>js("document.getElementById('ringSeatCountLabel').textContent.startsWith('"+count+"')"));if(count===6)await openSettings();
   }
+  // Exercise a v4 attachment through the actual WebView2 window and packaged backend.
+  await js("const d=new DataTransfer();d.items.add(new File(['windows release fixture\\n'],'windows-release-probe.py',{type:'text/plain'}));window.dispatchEvent(new DragEvent('drop',{dataTransfer:d,bubbles:true,cancelable:true}));");
+  await until(()=>js("!!document.querySelector('#v4AttachmentTray .v4-att-card:not(.is-uploading) .v4-att-name[title=\"windows-release-probe.py\"]')"));
+  await js("document.querySelector('#v4AttachmentTray .v4-att-remove').click()");
+  await until(()=>js("!document.querySelector('#v4AttachmentTray .v4-att-card')"));
+  console.log('PASS WebView2 attachment drop, authenticated upload and removal');
   const stored=JSON.parse(fs.readFileSync(path.join(state,'config.json'),'utf8'));assert.equal(stored.agents.carbon.model,'gemini-4-argon');assert.deepEqual(errors,[]);
   console.log('PASS native Windows EXE, WebView2 trust bridge, live SSE, saved model after reload, six-to-three roster');
  }finally{
