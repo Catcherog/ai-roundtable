@@ -19,8 +19,9 @@ import sqlite3
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, Iterator, List, Optional, Tuple
 
 
 class RoundtableSQLiteStore:
@@ -202,10 +203,14 @@ class RoundtableSQLiteStore:
         self._write_queue.put(None)
         self._writer_thread.join(timeout=3.0)
 
-    def _read_conn(self) -> sqlite3.Connection:
+    @contextmanager
+    def _read_conn(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(str(self.db_path), timeout=5.0)
-        conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            conn.row_factory = sqlite3.Row
+            yield conn
+        finally:
+            conn.close()
 
     def migrate_legacy_sessions_json_if_needed(self, legacy_json_path: Path) -> bool:
         """幂等迁移旧版 sessions.json 至单库 SQLite（仅在未迁移且库为空时执行一次）。"""

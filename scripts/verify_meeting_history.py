@@ -6,6 +6,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -29,7 +30,7 @@ async def check(root):
                           "updated_ts": 2+i} for i in range(59)]
     (root / "sessions.json").write_text(json.dumps(legacy))
     # Re-use an actual previous-version table with no deleted_at column.
-    with sqlite3.connect(root / "state.sqlite3") as con:
+    with closing(sqlite3.connect(root / "state.sqlite3")) as con:
         con.execute("CREATE TABLE sessions(session_id TEXT PRIMARY KEY,updated_ts REAL NOT NULL,rev INTEGER NOT NULL "
                     "DEFAULT 0,header_json TEXT NOT NULL,whiteboard_json TEXT NOT NULL)")
 
@@ -48,6 +49,14 @@ async def check(root):
 
     path = "/api/sessions/" + sid
     try:
+        with app.orchestrator.store._read_conn() as read_connection:
+            assert read_connection.execute("SELECT 1").fetchone()[0] == 1
+        try:
+            read_connection.execute("SELECT 1")
+        except sqlite3.ProgrammingError:
+            pass
+        else:
+            raise AssertionError("A completed history read still holds the SQLite file open")
         assert len((await call("GET", "/api/sessions"))["sessions"]) == 60
         session = app.orchestrator.sessions[sid]
         assert len(session.messages) == 550 and session.messages[0]["content"] == "发言 0"
@@ -96,7 +105,7 @@ async def check(root):
         remaining = json.loads((root/"sessions.json").read_text())
         assert len(remaining) == 59 and all(r["session_id"] != sid for r in remaining)
         app.orchestrator.store.upsert_session_incremental(record, rewrite_all_messages=True, wait=True)
-        with sqlite3.connect(root/"state.sqlite3") as con:
+        with closing(sqlite3.connect(root/"state.sqlite3")) as con:
             for table in ("sessions","session_messages","exec_recovery"):
                 assert not con.execute(f"SELECT 1 FROM {table} WHERE session_id=?", (sid,)).fetchone()
         assert not (await call("GET","/api/sessions/trash"))["sessions"]

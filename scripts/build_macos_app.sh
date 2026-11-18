@@ -62,7 +62,7 @@ cat > "${CONTENTS_DIR}/Info.plist" <<'PLIST'
   <key>CFBundleShortVersionString</key>
   <string>4.0.2</string>
   <key>CFBundleVersion</key>
-  <string>9</string>
+  <string>10</string>
   <key>LSMinimumSystemVersion</key>
   <string>12.0</string>
   <key>NSHighResolutionCapable</key>
