@@ -1039,9 +1039,19 @@ body {
   transition: opacity 0.14s ease;
 }
 
-.session-item:hover .session-del-btn {
+.session-item:hover .session-del-btn, .session-item:focus-within .session-del-btn {
   opacity: 1;
 }
+
+.history-trash { margin: 6px 0; font-size: var(--fs-meta); color: var(--text-secondary); }
+.history-trash summary { cursor: pointer; }
+.history-trash-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 0; }
+.history-trash-row span { overflow-wrap: anywhere; }
+.history-trash-row button { flex-shrink: 0; }
+.history-trash-row span { flex: 1; }
+.history-purge-confirm { padding: 8px; border: 1px solid var(--danger-color); border-radius: 8px; }
+.history-purge-confirm label { display: block; }
+.history-purge-confirm input { margin: 5px 0; }
 
 .session-del-btn:hover {
   background: var(--danger-bg);

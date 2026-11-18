@@ -194,6 +194,10 @@
           <input type="text" id="sessionSearchInput" class="session-search-input" placeholder="搜索历史议题…" />
         </div>
         <div id="sessionList" class="session-list"></div>
+        <details id="historyTrash" class="history-trash">
+          <summary>最近删除</summary>
+          <div id="historyTrashList" aria-live="polite"></div>
+        </details>
       </div>
 
       <details class="sidebar-advanced-fold expanded-sidebar-only" id="sidebarAdvancedFold">
@@ -1106,6 +1110,8 @@
         <option value="grok-4.7">Grok 4.7 · 支持至 xhigh</option>
       </datalist>
       <datalist id="codexModelPresets">
+        <option value="gpt-6.2-astra">GPT-6.2 Astra · 支持至 max</option>
+        <option value="gpt-6.2-sol">GPT-6.2 Sol · 支持至 max</option>
         <option value="gpt-6-astra">GPT-6 Astra · 支持至 max</option>
         <option value="gpt-6.1-sol">GPT-6.1 Sol · 支持至 xhigh</option>
       </datalist>

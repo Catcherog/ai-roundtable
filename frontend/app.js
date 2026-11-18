@@ -4096,7 +4096,8 @@ function cliTestView(aid, draft) {
   }
   if (result) {
     const labels = { queue_timeout: "排队超时", timeout: "响应超时", service_unavailable: "服务繁忙",
-      quota_rate_limit: "额度或限流", auth_expired: "需登录", transport_error: "实测中断", binary_missing: "未检测到 CLI" };
+      quota_rate_limit: "额度或限流", auth_expired: "需登录", unsupported_effort_or_model: "模型或档位不支持",
+      transport_error: "实测中断", binary_missing: "未检测到 CLI" };
     return { label: labels[result.error_kind] || "实测未通过", cls: "driver-pill missing", result };
   }
   const missing = !state.system?.agents?.[aid]?.binary_detected && !draft;
@@ -4634,7 +4635,7 @@ function renderSessionList() {
       `<div class="session-item-top">` +
         `<span class="session-item-title">${escapeHtml(s.title || "新圆桌会议")}</span>` +
         (s.is_busy ? `<span class="session-busy-dot" title="研讨运行中"></span>` : "") +
-        `<button type="button" class="session-del-btn" title="删除会话">✕</button>` +
+        `<button type="button" class="session-del-btn" title="${s.history_protected ? "请先结束运行或处理项目回滚" : "移入最近删除"}" aria-label="移入最近删除：${escapeHtml(s.title || "新会议")}" ${s.history_protected ? "disabled" : ""}>✕</button>` +
       `</div>` +
       `<div class="session-item-meta">` +
         `<span>${escapeHtml(modeLabel)} · ${s.message_count || 0} 条发言</span>` +
@@ -4648,7 +4649,7 @@ function renderSessionList() {
     };
     div.querySelector(".session-del-btn")?.addEventListener("click", async (e) => {
       e.stopPropagation();
-      await deleteSessionById(s.session_id);
+      await deleteSessionById(s);
     });
     listEl.appendChild(div);
   }
@@ -4977,6 +4978,12 @@ function dispatchSseEventFrame(eventName, rawData, rawId, sessionId) {
       return;
     }
 
+    if (eventName === "session_trashed") {
+      switchToSession(pkt.active_session_id);
+      refreshSessionsListOnly();
+      refreshHistoryTrash();
+      return;
+    }
     if (eventName === "session_cleared") {
       clearChatMessages();
       updateEmptyGuideVisibility();
@@ -5316,7 +5323,97 @@ async function createNewSession() {
   }
 }
 
-async function deleteSessionById(sessionId) {
+let trashRequest = 0;
+async function refreshHistoryTrash() {
+  if (!el("historyTrash")?.open) return;
+  const request = ++trashRequest;
+  const list = el("historyTrashList");
+  try {
+    const res = await apiFetch("/api/sessions/trash");
+    if (request !== trashRequest) return;
+    list.replaceChildren();
+    for (const session of res.sessions || []) {
+      const row = document.createElement("div");
+      row.className = "history-trash-row";
+      const title = document.createElement("span");
+      title.textContent = session.title;
+      title.title = new Date(session.deleted_at * 1000).toLocaleString();
+      const restore = document.createElement("button");
+      restore.type = "button";
+      restore.className = "mini-outline-btn";
+      restore.textContent = "恢复";
+      restore.disabled = session.purge_pending;
+      restore.setAttribute("aria-label", `恢复会议：${session.title}`);
+      restore.onclick = async () => {
+        restore.disabled = true;
+        try {
+          const saved = await apiFetch(`/api/sessions/${encodeURIComponent(session.session_id)}/restore`, { method: "POST" });
+          state.sessions = saved.sessions;
+          renderSessionList();
+          await refreshHistoryTrash();
+          showToast("会议已恢复到历史列表", "ok");
+        } catch (err) {
+          showToast(err.message || "恢复失败", "err");
+          restore.disabled = false;
+        }
+      };
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "mini-outline-btn";
+      remove.textContent = session.purge_pending ? "重试清理" : "永久删除";
+      remove.setAttribute("aria-label", `${remove.textContent}：${session.title}`);
+      remove.onclick = () => {
+        remove.disabled = true;
+        const panel = document.createElement("div");
+        panel.className = "history-purge-confirm";
+        const label = document.createElement("label");
+        label.textContent = `永久删除将清理「${session.title}」的发言、白板、附件和本会议备份。此操作无法撤销。请输入完整会议标题：`;
+        const input = document.createElement("input");
+        input.className = "session-search-input";
+        input.autocomplete = "off";
+        label.append(input);
+        const cancel = document.createElement("button");
+        cancel.type = "button";
+        cancel.className = "mini-outline-btn";
+        cancel.textContent = "取消";
+        cancel.onclick = () => { panel.remove(); remove.disabled = false; remove.focus(); };
+        const confirm = document.createElement("button");
+        confirm.type = "button";
+        confirm.className = "mini-outline-btn";
+        confirm.textContent = "确认永久删除";
+        confirm.disabled = true;
+        input.oninput = () => { confirm.disabled = input.value !== session.title; };
+        confirm.onclick = async () => {
+          if (input.value !== session.title) return;
+          confirm.disabled = cancel.disabled = input.disabled = true;
+          try {
+            await apiFetch(`/api/sessions/${encodeURIComponent(session.session_id)}/purge`, {
+              method: "POST", body: JSON.stringify({
+                confirm_session_id: session.session_id, confirm_title: input.value, deleted_at: session.deleted_at,
+              }),
+            });
+            showToast("会议已永久删除", "info");
+          } catch (err) {
+            showToast(err.message || "永久删除未完成", "err");
+          }
+          await refreshHistoryTrash();
+        };
+        panel.append(label, cancel, confirm);
+        row.after(panel);
+        input.focus();
+      };
+      row.append(title, restore, remove);
+      list.append(row);
+    }
+    if (!list.childElementCount) list.textContent = "暂无已删除会议";
+  } catch (err) {
+    if (request === trashRequest) list.textContent = err.message || "读取最近删除失败";
+  }
+}
+
+async function deleteSessionById(session) {
+  const sessionId = session.session_id;
+  if (!window.confirm(`将「${session.title || "新会议"}」移入最近删除？\n${session.message_count || 0} 条发言、白板和已上传附件可随会议恢复。`)) return;
   try {
     const res = await apiFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
     state.sessions = res.sessions || [];
@@ -5324,7 +5421,8 @@ async function deleteSessionById(sessionId) {
     if (state.currentSessionId === sessionId && res.active_session_id) {
       await switchToSession(res.active_session_id);
     }
-    showToast("已删除历史会话", "info", 1800);
+    await refreshHistoryTrash();
+    showToast("已移入最近删除，可在左侧恢复", "info", 2200);
   } catch (err) {
     showToast(err.message || "删除会话失败", "err");
   }
@@ -5988,6 +6086,7 @@ function bindEvents() {
     state.sessionSearchQuery = e.target.value || "";
     renderSessionList();
   });
+  el("historyTrash")?.addEventListener("toggle", refreshHistoryTrash);
 
   // 右侧白板/执行终端面板显隐与页签滑块切换
   el("toggleRightBtn")?.addEventListener("click", () => {
@@ -6169,6 +6268,7 @@ function bindEvents() {
 
   el("restartTopicBtn")?.addEventListener("click", async () => {
     if (!state.currentSessionId || !state.topic) return;
+    if (!window.confirm("重开会清空这场会议的原发言和白板，重新开始讨论。确认重开？")) return;
     try {
       await apiFetch(`/api/sessions/${state.currentSessionId}/start`, {
         method: "POST",
@@ -6183,6 +6283,7 @@ function bindEvents() {
           seat_efforts: state.seatEfforts,
           executor_agent: state.executorAgent,
           reset_history: true,
+          confirm_reset_session_id: state.currentSessionId,
         }),
       });
       showToast("已按当前场景意图包与席位分工重开本议题", "ok", 2000);

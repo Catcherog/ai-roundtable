@@ -51,8 +51,8 @@ async function run(){
   checkDOM();
   const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'roundtable-v4-ui-'));
   const project=path.join(tmp,'project'); fs.mkdirSync(project);
-  const code=randomBytes(24).toString('hex');
-  const server=spawn(process.env.PYTHON || 'python3',['-u','-c',py],{cwd:root,env:{...process.env,PYTHONDONTWRITEBYTECODE:'1',AI_ROUNDTABLE_HOME:path.join(tmp,'state'),AI_ROUNDTABLE_BOOTSTRAP_CODE:code,RT_UI_PROJECT:project},stdio:['ignore','pipe','inherit']});
+  const code=randomBytes(24).toString('hex'), testToken=randomBytes(32).toString('hex');
+  const server=spawn(process.env.PYTHON || 'python3',['-u','-c',py],{cwd:root,env:{...process.env,PYTHONDONTWRITEBYTECODE:'1',AI_ROUNDTABLE_HOME:path.join(tmp,'state'),AI_ROUNDTABLE_BOOT_TOKEN:testToken,AI_ROUNDTABLE_BOOTSTRAP_CODE:code,RT_UI_PROJECT:project},stdio:['ignore','pipe','inherit']});
   let browser;
   try{
     const port=await new Promise((resolve,reject)=>{
@@ -83,6 +83,12 @@ async function run(){
     assert.equal(await page.locator('#cfgCarbonExecEffort').inputValue(),'medium');
     await page.locator('#cfgCarbonEffort').evaluate(el=>{el.value='high';el.dispatchEvent(new Event('change',{bubbles:true}));});
     await page.waitForSelector('#v4EffortSegCarbon [data-eff-val="high"].active',{state:'attached'});
+    for (const model of ['gpt-6.2-sol','gpt-6.2-astra']) {
+      await page.locator('#v4ModelChipsAstra [data-chip-model="'+model+'"]').click();
+      assert.equal(await page.locator('#cfgAstraModel').inputValue(),model);
+      assert.equal(await page.locator('#cfgAstraEffort').inputValue(),'max');
+      assert.equal(await page.locator('#cfgAstraExecEffort').inputValue(),'max');
+    }
     await page.locator('[data-settings-tab=diagnostics]').click();
     await page.locator('#closeSettingsBtn').click();
     await page.evaluate(()=>window.__roundtableMenu('settings'));assert.equal(await activeTab(),'seats');
@@ -132,9 +138,16 @@ async function run(){
     assert.equal(await page.locator('#workspaceBadge').getAttribute('title'),ws);
     await page.locator('#openSettingsBtn').click();
     await page.locator('[data-modal-lineup=full_jury_6]').click();
+    await page.locator('#v4ModelChipsAstra [data-chip-model="gpt-6.2-astra"]').click();
     await page.locator('#saveSettingsBtn').click();
     await page.waitForFunction(()=>document.querySelector('[data-scenario-pack=incident_doc] .scenario-mode-tag').textContent.includes('当前 6 席'));
     assert.equal(await page.locator('#cliEngineCards .cli-card').count(),6);
+    await page.locator('#openSettingsBtn').click();
+    assert.equal(await page.locator('#cfgAstraModel').inputValue(),'gpt-6.2-astra');
+    assert.equal(await page.locator('#cfgAstraEffort').inputValue(),'max');
+    await page.locator('#cancelSettingsBtn').click();
+    console.log('PASS 6.2 Astra/Sol presets and saved Astra max settings');
+
     await page.locator('[data-scenario-pack=arch_code]').click();
     await page.waitForFunction(()=>document.querySelector('#readySummaryBar').textContent.startsWith('3 席 ·'));
     console.log('PASS partial results, 503, single-seat retry, draft scope, cancelled settings, actual lineup and project retained');
@@ -175,6 +188,56 @@ async function run(){
     const minutes=fs.readFileSync(await download.path(),'utf8');
     assert.match(minutes,/probe\.py/);assert.match(download.suggestedFilename(),/\.md$/);
     console.log('PASS downloaded meeting minutes contain the actual attachment topic');
+    const base='http://127.0.0.1:'+port, headers={'X-Roundtable-Token':testToken};
+    const pathToMeeting=new URL(reply.url()).pathname.replace(/\/start$/,'');
+    const secondCode=await (await page.request.post(base+'/api/auth/reissue-bootstrap',{headers,data:{}})).json();
+    const other=await browser.newPage({viewport:{width:1500,height:920}});
+    other.on('pageerror',e=>errors.push(e.message));
+    await other.goto(base+'/#bootstrap='+secondCode.bootstrap_code);
+    await other.waitForSelector('.v4-msg-attachments .v4-msg-img-card');
+    const shared='跨窗口核对同一会议的白板约束';
+    const wb=await page.request.post(base+pathToMeeting+'/whiteboard',{headers,data:{op:'add',kind:'decision',author:'chair',text:shared}});
+    assert.equal(wb.status(),200);
+    for(const view of [page,other]){
+      await view.waitForFunction(msg=>document.getElementById('pane-whiteboard').textContent.includes(msg),shared);
+    }
+    const followup='第二个窗口补充的会议记录';
+    await other.locator('#topicInput').fill(followup);
+    await other.locator('#primaryActionBtn').click();
+    await page.waitForFunction(msg=>document.getElementById('chatStream').textContent.includes(msg),followup);
+    await page.waitForFunction(()=>!document.querySelector('.session-item.active .session-del-btn')?.disabled);
+    const move=page.locator('.session-item.active .session-del-btn');
+    await move.hover();
+    page.once('dialog',d=>d.dismiss()); await move.click();
+    assert.equal((await page.request.get(base+pathToMeeting,{headers})).status(),200);
+    page.once('dialog',d=>d.accept());
+    const moved=page.waitForResponse(r=>r.request().method()==='DELETE'&&r.url()===base+pathToMeeting);
+    await move.click(); assert.equal((await moved).status(),200);
+    await other.waitForFunction(msg=>!document.getElementById('chatStream').textContent.includes(msg),followup);
+    await page.locator('#historyTrash summary').click();
+    await page.locator('.history-trash-row').getByRole('button',{name:/^永久删除/}).click();
+    const panel=page.locator('.history-purge-confirm');
+    const yes=panel.getByRole('button',{name:'确认永久删除'});
+    assert.equal(await yes.isDisabled(),true);
+    await panel.locator('input').fill('不匹配');assert.equal(await yes.isDisabled(),true);
+    await panel.getByRole('button',{name:'取消'}).click();
+    const restored=page.waitForResponse(r=>r.url()===base+pathToMeeting+'/restore');
+    await page.locator('.history-trash-row').getByRole('button',{name:/^恢复/}).click();
+    assert.equal((await restored).status(),200);
+    const originalTitle=(await (await page.request.get(base+pathToMeeting,{headers})).json()).session.title;
+    await page.locator('#sessionList .session-item').filter({has:page.getByText(originalTitle,{exact:true})}).click();
+    await page.waitForFunction(msg=>document.getElementById('chatStream').textContent.includes(msg),followup);
+    await page.waitForSelector('.v4-msg-attachments .v4-msg-img-card');
+    page.once('dialog',d=>d.accept());await move.hover();await move.click();
+    await page.locator('.history-trash-row').getByRole('button',{name:/^永久删除/}).click();
+    await panel.locator('input').fill(originalTitle);
+    const gone=page.waitForResponse(r=>r.url()===base+pathToMeeting+'/purge');
+    await yes.click();assert.equal((await gone).status(),200);
+    await page.waitForFunction(()=>document.getElementById('historyTrashList').textContent.includes('暂无已删除会议'));
+    assert.equal((await page.request.get(base+pathToMeeting,{headers})).status(),404);
+    await other.close();
+    console.log('PASS two windows share transcript, whiteboard and attachments; trash, cancel, restore and title-confirmed permanent deletion');
+
     assert.deepEqual(errors,[]);
     console.log('PASS picker, synthetic screenshot paste and log drop, 3 files in authenticated start, persisted gallery and preview; no JS errors');
   } finally {

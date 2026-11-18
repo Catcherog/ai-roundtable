@@ -12,7 +12,7 @@ AI圆桌 v4 — 多模态附件管线、灵动输入舱、配置降噪与 CLI �
 6. 代码/日志附件行号解析、SHA-256 同内容幂等去重与安全二进制流读取（CSP 沙箱响应头校验）
 7. 多模态圆桌开局与 CLI 沙箱挂载闭环（纯附件免填字开局 -> 席位 TMPDIR/rt_attachments/ 真实可读 + Codex --image 注入）
 8. 研讨中途追问补充附件（POST /followup 携带新 Markdown 附件并自动合入会话上下文）
-9. 单个附件删除与会话级联清理（DELETE 附件与 DELETE 会话均彻底清理磁盘文件，零残留）
+9. 附件删除、会话移入最近删除与确认后的永久清理
 10. CAS 写盘快照零干扰验证（挂载多模态附件后执行写入工作区与一键原子回滚 100% 字节级还原）
 """
 
@@ -492,7 +492,7 @@ async def run_v4_suite() -> None:
             assert (proj_dir / "main.py").read_text(encoding="utf-8") == "APP_VERSION = '3.0'\n"
             ok("9. 多模态附件与无 Git CAS 写前快照及一键原子回滚 100% 兼容")
 
-            # 10. 单个附件删除与会话删除级联清理磁盘目录
+            # 10. 普通删除保留附件，永久删除才清理本会议目录
             st_del_att, _, _ = await raw_http_request(
                 port,
                 "DELETE",
@@ -507,8 +507,14 @@ async def run_v4_suite() -> None:
                 headers={"X-Roundtable-Token": token},
             )
             assert st_del_sess == 200
-            assert not att_dir.exists()
-            ok("10. 附件删除与会话级联清理（磁盘零残留）")
+            assert att_dir.is_dir()
+            _, _, trash_body = await raw_http_request(port, "GET", "/api/sessions/trash", headers=auth_hdr)
+            row = next(s for s in json.loads(trash_body)["sessions"] if s["session_id"] == sid)
+            confirm = {"confirm_session_id": sid, "confirm_title": row["title"], "deleted_at": row["deleted_at"]}
+            code, _, _ = await raw_http_request(port, "POST", f"/api/sessions/{sid}/purge", headers=auth_hdr,
+                                               body=json.dumps(confirm).encode())
+            assert code == 200 and not att_dir.exists()
+            ok("10. 普通删除保留附件，核对标题后永久清理本会议附件")
 
         finally:
             server.close()

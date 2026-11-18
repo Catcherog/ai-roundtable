@@ -7,6 +7,8 @@
     "gemini-4-hydrogen": "agy",
     "grok-4.7": "grok",
     "gpt-6-astra": "codex",
+    "gpt-6.2-astra": "codex",
+    "gpt-6.2-sol": "codex",
     "gpt-6.1-sol": "codex"
   },
   "drivers": {
@@ -138,6 +140,20 @@
       ],
       "models": {
         "gpt-6-astra": {
+          "supports_effort": true,
+          "allowed": ["low", "medium", "high", "xhigh", "max"],
+          "default": "max",
+          "max": "max"
+        },
+        "gpt-6.2-astra": {
+          "label": "GPT-6.2 Astra",
+          "supports_effort": true,
+          "allowed": ["low", "medium", "high", "xhigh", "max"],
+          "default": "max",
+          "max": "max"
+        },
+        "gpt-6.2-sol": {
+          "label": "GPT-6.2 Sol",
           "supports_effort": true,
           "allowed": ["low", "medium", "high", "xhigh", "max"],
           "default": "max",

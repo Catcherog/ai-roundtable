@@ -667,7 +667,11 @@ export function renderSeatModelAndEffortChips(seatCap) {
   if (!drvSel || !modelInp || !chipBar || !discSel || !effortSeg) return;
 
   const drv = drvSel.value || "auto";
-  const chips = buildDynamicModelChipsForDriver(drv);
+  const effective = drv === "auto" ? storeBridge.state?.system?.agents?.[seatCap.toLowerCase()]?.effective_driver : drv;
+  const chips = buildDynamicModelChipsForDriver(effective || drv);
+  if (drv === "auto" && effective && chips.every((entry) => entry.value)) {
+    chips.unshift({ value: "", label: "跟随驱动默认" });
+  }
   const curModel = modelInp.value.trim();
   const matchesPreset = chips.some((c) => c.value.toLowerCase() === curModel.toLowerCase());
 
@@ -685,9 +689,20 @@ export function renderSeatModelAndEffortChips(seatCap) {
 
   chipBar.querySelectorAll("[data-chip-model]").forEach((btn) => {
     btn.onclick = () => {
-      modelInp.value = btn.dataset.chipModel || "";
+      const choice = btn.dataset.chipModel || "";
+      const changed = modelInp.value !== choice;
+      modelInp.value = choice;
       modelInp.dispatchEvent(new Event("input", { bubbles: true }));
       modelInp.dispatchEvent(new Event("change", { bubbles: true }));
+      const defaultEffort = storeBridge.state?.system?.driver_catalog?.drivers?.[effective]?.models?.[choice]?.default;
+      if (changed && defaultEffort) {
+        for (const select of [discSel, execSel]) {
+          if (select && !select.disabled && Array.from(select.options).some((opt) => opt.value === defaultEffort)) {
+            select.value = defaultEffort;
+            select.dispatchEvent(new Event("change", { bubbles: true }));
+          }
+        }
+      }
       setTimeout(() => renderSeatModelAndEffortChips(seatCap), 20);
     };
   });

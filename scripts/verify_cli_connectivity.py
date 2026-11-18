@@ -140,6 +140,9 @@ class ConnectivityTests(unittest.IsolatedAsyncioTestCase):
         err = classify_cli_error("agy", raw_err=message, exit_code=3)
         self.assertEqual(err.error_kind, "service_unavailable")
         self.assertIn("503", str(err))
+        denied = classify_cli_error("codex", raw_err='{"status":400,"code":"model_not_found"}',
+                                    stderr="background service startup timed out", exit_code=1, model="example-model")
+        self.assertEqual(denied.error_kind, "unsupported_effort_or_model")
         for msg, kind in [("429 Too Many Requests", "quota_rate_limit"),
                           ("model not found", "unsupported_effort_or_model"),
                           ("401 Unauthorized", "auth_expired")]:
@@ -184,7 +187,7 @@ class ConnectivityTests(unittest.IsolatedAsyncioTestCase):
         )
         Path(self.binary).write_text(script)
         Path(self.binary).chmod(0o755)
-        result = await self.runner.ping_agent("titan", timeout_sec=0.5)
+        result = await self.runner.ping_agent("titan", timeout_sec=2)
         self.assertEqual(result["error_kind"], "timeout")
         self.assertTrue(marker.exists())
         pid = int(marker.read_text())

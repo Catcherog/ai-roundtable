@@ -226,6 +226,8 @@ class AsyncHTTPServer:
                     await self._send_json(writer, 405, {"error": "静态资源仅支持 GET/HEAD"})
                     return
                 await self._serve_static(path, writer, head_only=(method == "HEAD"))
+        except ExecutionAdmissionConflictError as conflict:
+            await self._send_json(writer, conflict.status_code, conflict.to_dict())
         except _LineTooLongError as line_err:
             try:
                 await self._send_json(writer, line_err.status_code, {"error": "请求行或请求头超出长度限制"})
@@ -569,6 +571,10 @@ class AsyncHTTPServer:
             )
             return
 
+        if method == "GET" and path == "/api/sessions/trash":
+            await self._send_json(writer, 200, {"sessions": self.orchestrator.store.list_trashed_sessions()})
+            return
+
         if method == "GET" and path == "/api/sessions":
             await self._send_json(writer, 200, {"sessions": self.orchestrator.list_sessions()})
             return
@@ -600,8 +606,25 @@ class AsyncHTTPServer:
             sub_action = segs[4] if len(segs) >= 5 else ""
             third_action = segs[5] if len(segs) >= 6 else ""
 
-            if method == "DELETE" and action == "":
-                self.attachments.delete_session_attachments(sid)
+            if method == "POST" and action == "purge" and len(segs) == 4:
+                confirmation, err = self._parse_json_strict(body_bytes)
+                if err or confirmation is None:
+                    await self._send_json(writer, 400, {"error": err or "缺少删除确认"})
+                    return
+                await self.orchestrator.purge_session(sid, confirmation)
+                await self._send_json(writer, 200, {"ok": True})
+                return
+
+            if method == "POST" and action == "restore" and len(segs) == 4:
+                restored = await self.orchestrator.restore_session(sid)
+                if not restored:
+                    await self._send_json(writer, 404, {"error": "未找到可恢复的会议"})
+                else:
+                    await self._send_json(writer, 200, {"ok": True, "restored_session_id": sid,
+                                                        "sessions": self.orchestrator.list_sessions()})
+                return
+
+            if method == "DELETE" and len(segs) == 3:
                 next_sid = await self.orchestrator.delete_session(sid)
                 if not next_sid:
                     await self._send_json(writer, 404, {"error": f"未找到会议会话 {sid}"})
@@ -632,36 +655,36 @@ class AsyncHTTPServer:
                 if method == "POST" and sub_action == "":
                     ctype_low = str(headers.get("content-type") or "").split(";", 1)[0].strip().lower()
                     try:
-                        if ctype_low == "application/octet-stream":
-                            raw_hdr_name = headers.get("x-attachment-filename", "")
-                            fname = urllib.parse.unquote(raw_hdr_name).strip() or "attachment"
-                            dmime = str(headers.get("x-attachment-mime") or "").strip()
-                            saved = await asyncio.to_thread(
-                                self.attachments.save_raw_attachment,
-                                sid,
-                                filename=fname,
-                                raw_bytes=body_bytes,
-                                declared_mime=dmime,
-                            )
-                        else:
-                            att_req, jerr = self._parse_json_strict(body_bytes)
-                            if jerr is not None or att_req is None:
-                                await self._send_json(writer, 400, {"error": jerr or "附件请求 JSON 非法"})
+                        async with sess.session_lock:
+                            if self.orchestrator.get_session(sid) is not sess:
+                                await self._send_json(writer, 404, {"error": "会议已移入最近删除"})
                                 return
-                            fname = str(att_req.get("filename") or "attachment").strip()
-                            dmime = str(att_req.get("mime_type") or "").strip()
-                            b64 = str(att_req.get("data_base64") or "").strip()
-                            saved = await asyncio.to_thread(
-                                self.attachments.save_base64_attachment,
-                                sid,
-                                filename=fname,
-                                data_base64=b64,
-                                declared_mime=dmime,
-                            )
-                        if self.orchestrator.get_session(sid) is not sess:
-                            await asyncio.to_thread(self.attachments.delete_session_attachments, sid)
-                            await self._send_json(writer, 404, {"error": "会话已删除"})
-                            return
+                            if ctype_low == "application/octet-stream":
+                                raw_hdr_name = headers.get("x-attachment-filename", "")
+                                fname = urllib.parse.unquote(raw_hdr_name).strip() or "attachment"
+                                dmime = str(headers.get("x-attachment-mime") or "").strip()
+                                saved = await asyncio.to_thread(
+                                    self.attachments.save_raw_attachment,
+                                    sid,
+                                    filename=fname,
+                                    raw_bytes=body_bytes,
+                                    declared_mime=dmime,
+                                )
+                            else:
+                                att_req, jerr = self._parse_json_strict(body_bytes)
+                                if jerr is not None or att_req is None:
+                                    await self._send_json(writer, 400, {"error": jerr or "附件请求 JSON 非法"})
+                                    return
+                                fname = str(att_req.get("filename") or "attachment").strip()
+                                dmime = str(att_req.get("mime_type") or "").strip()
+                                b64 = str(att_req.get("data_base64") or "").strip()
+                                saved = await asyncio.to_thread(
+                                    self.attachments.save_base64_attachment,
+                                    sid,
+                                    filename=fname,
+                                    data_base64=b64,
+                                    declared_mime=dmime,
+                                )
                     except ValueError as ve:
                         await self._send_json(writer, 400, {"error": str(ve)})
                         return
@@ -801,7 +824,10 @@ class AsyncHTTPServer:
                 executor_agent = str(payload.get("executor_agent", "")).strip().lower() or None
                 scenario_pack = str(payload.get("scenario_pack", "")).strip().lower() or None
                 artifact_type = str(payload.get("artifact_type", "")).strip().lower() or None
-                reset_history = bool(payload.get("reset_history", False))
+                reset_history = payload.get("reset_history", False)
+                if type(reset_history) is not bool or (reset_history and payload.get("confirm_reset_session_id") != sid):
+                    await self._send_json(writer, 409, {"error": "请先确认清空原发言并重开此会议"})
+                    return
                 start_kwargs = dict(
                     topic=topic,
                     collab_mode=collab_mode,

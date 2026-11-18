@@ -366,6 +366,8 @@ _DRIVER_EXCLUSIVE_DEFAULT_MODELS: Dict[str, str] = {
     "orchestrator (argon)": "agy",
     "grok-4.7": "grok",
     "gpt-6-astra": "codex",
+    "gpt-6.2-astra": "codex",
+    "gpt-6.2-sol": "codex",
     "gpt-6.1-sol": "codex",
 }
 
@@ -1549,6 +1551,13 @@ def classify_cli_error(
     stderr_summary = (stderr.strip() or raw_err.strip())[:2400]
     rc_label = str(exit_code) if exit_code is not None else "未知"
     looks_like_usage_dump = "usage:" in low or "options:" in low
+
+    if not is_timeout and ("model_not_found" in low or "model is not supported when using codex" in low):
+        return CLIInvocationError(
+            f"{cli_label} 当前账号无法调用模型「{model or '所选模型'}」，请在设置中选择此账号支持的模型。",
+            error_kind="unsupported_effort_or_model", exit_code=exit_code, stderr=stderr_summary,
+            driver=driver_key, model=model, effort=effort,
+        )
 
     capacity_error = any(marker in low for marker in (
         "no capacity available for model", "model capacity exhausted", "servers are experiencing high traffic",
