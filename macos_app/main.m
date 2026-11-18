@@ -3,6 +3,8 @@
 #import <Security/Security.h>
 #import <WebKit/WebKit.h>
 #include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <spawn.h>
@@ -33,24 +35,40 @@ static NSString *generateSecureHex(size_t byteCount) {
     return [hex copy];
 }
 
-static int findAvailablePort(int startPort, int maxPort) {
-    for (int port = startPort; port <= maxPort; port++) {
+// Keep the listener bound until the backend inherits it. Port 0 lets macOS
+// choose an available port when every preferred port is in use.
+static int reserveBackendListener(int *selectedPort) {
+    for (int candidate = 8765; candidate <= 8800; candidate++) {
         int sock = socket(AF_INET, SOCK_STREAM, 0);
-        if (sock < 0) continue;
+        if (sock < 0) return -1;
+        if (fcntl(sock, F_SETFD, FD_CLOEXEC) < 0) {
+            int err = errno;
+            close(sock);
+            errno = err;
+            return -1;
+        }
         int opt = 1;
         setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-        struct sockaddr_in addr;
-        memset(&addr, 0, sizeof(addr));
+        struct sockaddr_in addr = {0};
         addr.sin_family = AF_INET;
-        addr.sin_port = htons(port);
-        addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-        int res = bind(sock, (struct sockaddr *)&addr, sizeof(addr));
+        addr.sin_port = htons(candidate <= 8799 ? candidate : 0);
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        socklen_t len = sizeof(addr);
+        if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) == 0 &&
+            listen(sock, SOMAXCONN) == 0 &&
+            getsockname(sock, (struct sockaddr *)&addr, &len) == 0) {
+            *selectedPort = ntohs(addr.sin_port);
+            return sock;
+        }
+        int err = errno;
         close(sock);
-        if (res == 0) {
-            return port;
+        if (err != EADDRINUSE) {
+            errno = err;
+            return -1;
         }
     }
-    return startPort;
+    errno = EADDRINUSE;
+    return -1;
 }
 
 static NSURL *buildLocalURL(int port, NSString *path) {
@@ -78,6 +96,7 @@ static NSString *escapeHtmlString(NSString *raw) {
 @property (nonatomic, copy) NSString *bootToken;
 @property (nonatomic, copy) NSString *bootId;
 @property (nonatomic, copy) NSString *bootLogPath;
+@property (nonatomic, copy) NSString *bootLaunchError;
 @end
 
 @implementation AppDelegate
@@ -274,6 +293,26 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
         }];
     } else if ([action isEqualToString:@"pickFolder"]) {
         [self chooseFolderWithCompletion:^(NSString *chosen) { replyHandler(chosen, nil); }];
+    } else if ([action isEqualToString:@"saveMinutes"]) {
+        NSString *text = dict[@"text"];
+        NSString *name = dict[@"filename"];
+        if (![text isKindOfClass:[NSString class]] || ![name isKindOfClass:[NSString class]] || !text.length) {
+            replyHandler(nil, @"会议纪要为空或文件名无效");
+            return;
+        }
+        NSSavePanel *panel = [NSSavePanel savePanel];
+        panel.title = @"保存会议纪要";
+        panel.nameFieldStringValue = name.lastPathComponent;
+        panel.canCreateDirectories = YES;
+        [panel beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
+            if (response != NSModalResponseOK || !panel.URL) {
+                replyHandler(@{@"cancelled": @YES}, nil);
+                return;
+            }
+            NSError *error = nil;
+            BOOL saved = [text writeToURL:panel.URL atomically:YES encoding:NSUTF8StringEncoding error:&error];
+            replyHandler(saved ? @{@"ok": @YES} : nil, saved ? nil : error.localizedDescription);
+        }];
     } else {
         replyHandler(nil, @"未知的桌面操作");
     }
@@ -327,20 +366,32 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
 
 - (void)stopBackendProcess {
     if (self.serverPid > 0) {
-        kill(-self.serverPid, SIGTERM);
-        kill(self.serverPid, SIGTERM);
-        usleep(120000);
-        kill(-self.serverPid, SIGKILL);
-        int st = 0;
-        waitpid(self.serverPid, &st, WNOHANG);
+        pid_t pid = self.serverPid;
         self.serverPid = 0;
+        int st = 0;
+        pid_t result = waitpid(pid, &st, WNOHANG);
+        if (result == pid || (result < 0 && errno == ECHILD)) return;
+        kill(-pid, SIGTERM);
+        kill(pid, SIGTERM);
+        usleep(120000);
+        kill(-pid, SIGKILL);
+        while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
     }
 }
 
 - (void)startEmbeddedBackend {
-    self.serverPort = findAvailablePort(8765, 8799);
+    self.serverPort = 0;
+    self.bootLaunchError = nil;
     self.bootToken = generateSecureHex(32);
     self.bootId = generateSecureHex(16);
+    int port = 0;
+    int listener = reserveBackendListener(&port);
+    if (listener < 0) {
+        self.bootLaunchError = [NSString stringWithFormat:@"本地服务无法监听回环地址：%s", strerror(errno)];
+        return;
+    }
+    self.serverPort = port;
+    const int childListener = listener == 3 ? 4 : 3;
 
     NSString *resPath = [[NSBundle mainBundle] resourcePath];
     NSString *serverPy = [resPath stringByAppendingPathComponent:@"app/backend/server.py"];
@@ -385,8 +436,8 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
     NSString *escapedPy = [serverPy stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
     NSString *escapedWs = [defaultWs stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
     NSString *escapedLog = [self.bootLogPath stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
-    NSString *cmd = [NSString stringWithFormat:@"exec python3 '%@' --host 127.0.0.1 --port %d --workspace '%@' > '%@' 2>&1",
-                     escapedPy, self.serverPort, escapedWs, escapedLog];
+    NSString *cmd = [NSString stringWithFormat:@"exec python3 '%@' --host 127.0.0.1 --port %d --listen-fd %d --workspace '%@' > '%@' 2>&1",
+                     escapedPy, port, childListener, escapedWs, escapedLog];
 
     char *argv[] = { "zsh", "-lic", (char *)[cmd UTF8String], NULL };
     posix_spawnattr_t attr;
@@ -395,8 +446,18 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
     posix_spawnattr_setpgroup(&attr, 0);
 
     pid_t pid = 0;
-    if (posix_spawnp(&pid, "zsh", NULL, &attr, argv, childEnv) == 0 && pid > 0) {
+    posix_spawn_file_actions_t actions;
+    int launchStatus = posix_spawn_file_actions_init(&actions);
+    if (launchStatus == 0) {
+        launchStatus = posix_spawn_file_actions_adddup2(&actions, listener, childListener);
+        if (launchStatus == 0) launchStatus = posix_spawnp(&pid, "zsh", &actions, &attr, argv, childEnv);
+        posix_spawn_file_actions_destroy(&actions);
+    }
+    close(listener);
+    if (launchStatus == 0 && pid > 0) {
         self.serverPid = pid;
+    } else {
+        self.bootLaunchError = [NSString stringWithFormat:@"无法启动本地服务进程：%s", strerror(launchStatus)];
     }
     posix_spawnattr_destroy(&attr);
 
@@ -429,7 +490,10 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
 }
 
 - (void)showBootErrorScreen:(NSString *)detail {
-    NSString *safeLog = escapeHtmlString(detail.length > 0 ? detail : @"未捕获到详细标准错误输出，请确认系统已安装 python3。");
+    NSString *log = [detail stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    NSString *reason = [log componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet].lastObject;
+    NSString *safeReason = escapeHtmlString(reason.length ? reason : @"未收到本地服务的启动响应。");
+    NSString *safeLog = escapeHtmlString(log);
     NSString *errHtml = [NSString stringWithFormat:
         @"<!DOCTYPE html><html><head><meta charset='utf-8'>"
         @"<style>"
@@ -440,16 +504,20 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
         @"pre{margin:0 0 16px;padding:10px 12px;background:#f1f5f9;border-radius:10px;font-size:11.5px;max-height:180px;overflow:auto;white-space:pre-wrap;word-break:break-all;color:#334155;}"
         @"button{background:linear-gradient(135deg,#5b5bd6,#3b63f6);color:#fff;border:none;border-radius:999px;padding:8px 18px;font-size:13px;font-weight:600;cursor:pointer;}"
         @"</style></head><body><div class='card'>"
-        @"<h3>本地服务启动超时或身份校验失败</h3>"
-        @"<p>内置 Python 服务未能在预期时间内完成鉴权握手，请检查终端环境配置后点击下方重试：</p>"
-        @"<pre>%@</pre>"
+        @"<h3>本地服务未就绪</h3>"
+        @"<p>%@</p>"
+        @"<details style='margin-bottom:16px'><summary>查看启动日志</summary><pre>%@</pre></details>"
         @"<button onclick=\"window.webkit.messageHandlers.roundtableNative.postMessage({action:'retryBoot'})\">重新启动本地服务</button>"
         @"</div></body></html>",
-        safeLog];
+        safeReason, safeLog];
     [self.webView loadHTMLString:errHtml baseURL:nil];
 }
 
 - (void)pollAndLoadFrontend {
+    if (self.bootLaunchError) {
+        [self showBootErrorScreen:self.bootLaunchError];
+        return;
+    }
     NSURL *statusUrl = buildLocalURL(self.serverPort, @"/api/status");
     NSURL *appUrl = buildLocalURL(self.serverPort, @"/");
     pid_t launchedPid = self.serverPid;
@@ -460,9 +528,9 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         for (int i = 0; i < 240; i++) {
             if (launchedPid > 0) {
-                int wstatus = 0;
-                pid_t w = waitpid(launchedPid, &wstatus, WNOHANG);
-                if (w == launchedPid) {
+                siginfo_t info = {0};
+                int rc = waitid(P_PID, (id_t)launchedPid, &info, WEXITED | WNOHANG | WNOWAIT);
+                if ((rc == 0 && info.si_pid == launchedPid) || (rc < 0 && errno == ECHILD)) {
                     break;
                 }
             }
@@ -491,6 +559,7 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
 
             if (verified) {
                 dispatch_async(dispatch_get_main_queue(), ^{
+                    if (![self.bootId isEqualToString:expectedBootId]) return;
                     NSURLRequest *mainReq = [NSURLRequest requestWithURL:appUrl];
                     [self.webView loadRequest:mainReq];
                 });
@@ -504,7 +573,7 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
             logTxt = [logTxt substringFromIndex:(logTxt.length - 1400)];
         }
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self showBootErrorScreen:logTxt];
+            if ([self.bootId isEqualToString:expectedBootId]) [self showBootErrorScreen:logTxt];
         });
     });
 }
@@ -512,7 +581,8 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
 - (BackendBusyState)queryBackendBusyState {
     if (self.serverPid <= 0 || self.serverPort <= 0) return BackendBusyStateIdle;
     int wstatus = 0;
-    if (waitpid(self.serverPid, &wstatus, WNOHANG) == self.serverPid) {
+    pid_t result = waitpid(self.serverPid, &wstatus, WNOHANG);
+    if (result == self.serverPid || (result < 0 && errno == ECHILD)) {
         self.serverPid = 0;
         return BackendBusyStateIdle;
     }

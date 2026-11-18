@@ -28,14 +28,14 @@ In the meeting above, three seats shared one Codex CLI and answered a small ques
 | Apple silicon Mac | Drag `AI圆桌.app` into Applications. Python 3.9 or later must be available on your Mac. The release uses an ad-hoc signature. [Apple’s first-open guidance](https://support.apple.com/en-us/102445) |
 
 1. Install and sign in to at least one supported CLI in your terminal: Antigravity (`agy`), Codex (`codex`) or Grok (`grok`).
-2. Open settings with **Ctrl+,** on Windows or **⌘,** on Mac. Under **阵容与称呼** choose seats. Under **席位与模型** choose their drivers and models, then click **保存配置** to save. **并发实测连通** sends a real connection test.
+2. Open settings with **Ctrl+,** on Windows or **⌘,** on Mac. Under **阵容与称呼** choose seats. Under **席位与模型** choose their drivers and models, then click **保存配置** to save. **实测连通** sends a real connection test.
 3. Select **快速合议** (quick consensus), enter a question and click **开始研讨** (start). Use **形成决议** for a resolution and **导出 .md** to export the minutes. The desktop interface is in Chinese.
 
 ## How it works
 
 - **Parallel seats on one CLI.** Seats that share an executable also share a concurrency limit. Each independent call gets its own temporary directory. In one Mac test, six Gemini CLI processes ran simultaneously and returned all six opening statements in 29.3 seconds. The meeting finished in 57.7 seconds including synthesis. [Test conditions and results](docs/verification.md)
 - **Reconnect without starting over.** Meeting events carry ordered revisions. A window requests the events it missed or loads a snapshot if those events have left the buffer. Messages and whiteboards are stored locally in SQLite.
-- **Rollback checks later edits.** Before a write, the app locks the workspace and snapshots managed files, including ordinary Git-ignored files. Untracked `output/` and `.app` directories are excluded. Binding is refused if managed regular files exceed 128 MiB. Recovery does not undo Git commits, pushes or effects outside the workspace; conflicting edits are preserved.
+- **Rollback checks later edits.** Before a write, the app locks the workspace and snapshots managed files, including ordinary Git-ignored files. Untracked `output/` and `.app` directories are excluded. Larger projects can bind at the root. Their executor proposes text edits across directories, and the app verifies and applies them with snapshots of the target files. The target set can total up to 128 MiB before editing and up to 128 MiB afterward. Recovery does not undo Git commits, pushes or effects outside the workspace; conflicting edits are preserved.
 - **Local orchestration.** WebView2 on Windows and WKWebView on macOS connect to an authenticated loopback service. The selected CLIs send prompts and referenced project context to their respective model providers under your account.
 
 ## Build from source

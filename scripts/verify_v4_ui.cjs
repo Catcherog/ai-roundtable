@@ -87,8 +87,57 @@ async function run(){
     await page.locator('#closeSettingsBtn').click();
     await page.evaluate(()=>window.__roundtableMenu('settings'));assert.equal(await activeTab(),'seats');
     assert.equal(await page.locator('#v4ModelChipsCarbon .active').count(),1);
+    await page.locator('[data-modal-lineup="solo_focus"]').click();
     await page.locator('#closeSettingsBtn').click();
+    assert.match(await page.locator('[data-scenario-pack="arch_code"] .scenario-mode-tag').innerText(), /当前 3 席/);
     console.log('PASS settings: rail and native menu default seats, 3/6 filter, model and effort round-trip');
+
+    const calls=[];
+    let releaseSlow;
+    const holdSlow=new Promise(resolve=>{releaseSlow=resolve;});
+    await page.route('**/api/cli/test', async route=>{
+      const data=route.request().postDataJSON(), aid=data.agent_id;
+      calls.push(aid);
+      const fail=aid==='astra' && calls.filter(a=>a==='astra').length===1;
+      if (fail) await holdSlow;
+      const result=fail ? {ok:false,error_kind:'service_unavailable',error:'模型服务暂时没有可用容量（503）'}
+        : {ok:true,elapsed_ms:400,request_elapsed_ms:390,reply:'连接正常'};
+      await route.fulfill({json:{results:{[aid]:result}}});
+    });
+    await page.locator('#readySummaryBar').click();
+    await page.locator('#testCliBtn').click();
+    await page.waitForFunction(()=>document.querySelector('#readySummaryBar').textContent.includes('2 席实测通过'));
+    assert.match(await page.locator('#readySummaryBar').innerText(),/1 席实测中/);
+    releaseSlow();
+    await page.waitForFunction(()=>document.querySelector('#seat-badge-astra').textContent==='服务繁忙');
+    assert.match(await page.locator('#readySummaryBar').innerText(),/1 席实测未通过/);
+    assert.deepEqual([...calls].sort(),['astra','carbon','grok']);
+    await page.locator('#cliEngineCards .cli-retest-btn').click();
+    await page.waitForFunction(()=>document.querySelector('#readySummaryBar').textContent.includes('3 席实测通过'));
+    assert.deepEqual(calls.slice(3),['astra']);
+    await page.locator('#openSettingsBtn').click();
+    await page.locator('[data-cfg-seat-enable=grok]').uncheck();
+    await page.locator('[data-cfg-seat-enable=astra]').uncheck();
+    await page.locator('#v4ModelChipsCarbon [data-chip-model="gemini-4-argon"]').click();
+    assert.equal(await page.locator('#cfgStatusCarbon').textContent(),'待实测');
+    await page.locator('#modalTestCliBtn').click();
+    await page.waitForFunction(()=>document.querySelector('#cfgStatusCarbon').textContent==='实测通过');
+    assert.deepEqual(calls.slice(4),['carbon']);
+    await page.locator('#cancelSettingsBtn').click();
+    assert.match(await page.locator('#readySummaryBar').textContent(),/3 席实测通过/);
+    const ws=await page.locator('#workspaceBadge').getAttribute('title');
+    assert.equal(ws,project);
+    await page.locator('[data-scenario-pack=incident_doc]').click();
+    await page.waitForFunction(()=>document.querySelector('#readySummaryBar').textContent.startsWith('2 席 ·'));
+    assert.equal(await page.locator('#workspaceBadge').getAttribute('title'),ws);
+    await page.locator('#openSettingsBtn').click();
+    await page.locator('[data-modal-lineup=full_jury_6]').click();
+    await page.locator('#saveSettingsBtn').click();
+    await page.waitForFunction(()=>document.querySelector('[data-scenario-pack=incident_doc] .scenario-mode-tag').textContent.includes('当前 6 席'));
+    assert.equal(await page.locator('#cliEngineCards .cli-card').count(),6);
+    await page.locator('[data-scenario-pack=arch_code]').click();
+    await page.waitForFunction(()=>document.querySelector('#readySummaryBar').textContent.startsWith('3 席 ·'));
+    console.log('PASS partial results, 503, single-seat retry, draft scope, cancelled settings, actual lineup and project retained');
     const chooserReady=page.waitForEvent('filechooser');
     await page.locator('#v4PlusAttachBtn').click();
     await page.locator('[data-v4-attach-cmd=file]').click();
@@ -117,6 +166,15 @@ async function run(){
     const img=page.locator('.v4-msg-img-card img').first();await img.click();
     assert.equal(await page.locator('#v4LightboxModal').isVisible(),true);
     await page.locator('#v4LightboxCloseBtn').click();
+    if (!await page.locator('#exportMdBtn').isVisible()) {
+      await page.locator('#toggleRightBtn').click();
+    }
+    const downloadReady=page.waitForEvent('download');
+    await page.locator('#exportMdBtn').click();
+    const download=await downloadReady;
+    const minutes=fs.readFileSync(await download.path(),'utf8');
+    assert.match(minutes,/probe\.py/);assert.match(download.suggestedFilename(),/\.md$/);
+    console.log('PASS downloaded meeting minutes contain the actual attachment topic');
     assert.deepEqual(errors,[]);
     console.log('PASS picker, synthetic screenshot paste and log drop, 3 files in authenticated start, persisted gallery and preview; no JS errors');
   } finally {

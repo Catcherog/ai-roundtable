@@ -75,16 +75,15 @@ from .domain import (
 )
 from .drivers import is_process_group_alive, load_driver_catalog
 from .engine import run_post_execution_verification
+from .project_edits import apply_edit_reply
 from .attachments import SessionAttachmentManager
 from .storage import RoundtableSQLiteStore
 from .workspace_backup import (
     HONEST_ROLLBACK_DISCLOSURE,
-    MAX_BACKUP_WORKSPACE_BYTES,
     WorkspaceAdmissionError,
     WorkspaceBackup,
     WorkspaceLockBusyError,
     WorkspaceWriteLock,
-    precheck_workspace_capacity,
 )
 
 
@@ -577,6 +576,9 @@ class RoundtableOrchestrator:
             if not sess:
                 continue
             if bk.state in ("prepared", "running") and bk.after_entries is None:
+                # An empty scoped manifest predates the first possible project write.
+                if bk.target_paths == []:
+                    continue
                 sess.recovery_required = True
                 sess.pending_recovery_backup = bk
                 sess.whiteboard["recovery_required"] = True
@@ -1219,8 +1221,7 @@ class RoundtableOrchestrator:
         allow_default_sandbox: bool = False,
     ) -> Tuple[bool, str, dict]:
         """
-        工作区爆炸半径前置硬拦截与 128 MiB 准入容量预检：
-        拒绝磁盘根目录、用户家目录 $HOME、~/.ai-roundtable、.app 包内路径、本机凭证与密钥目录及超 128 MiB 目录。
+        绑定时检查项目路径边界。写入时再根据文件体积选择快照方式。
         """
         cleaned = str(raw_path or "").strip()
         if not cleaned:
@@ -1292,21 +1293,7 @@ class RoundtableOrchestrator:
                         {"reason": "sensitive_credentials_dir_forbidden"},
                     )
 
-        # 5. 128 MiB 准入容量前置预检
-        cap_ok, total_b, largest_dirs, cap_err = precheck_workspace_capacity(str(real_target))
-        if not cap_ok:
-            return (
-                False,
-                cap_err,
-                {
-                    "reason": "workspace_too_large",
-                    "total_bytes": total_b,
-                    "max_bytes": MAX_BACKUP_WORKSPACE_BYTES,
-                    "largest_dirs": largest_dirs,
-                },
-            )
-
-        return True, str(real_target), {"total_bytes": total_b, "largest_dirs": largest_dirs}
+        return True, str(real_target), {}
 
     def validate_safe_workspace_path(self, raw_path: str, *, allow_default_sandbox: bool = False) -> Tuple[bool, str]:
         ok, res_or_err, _ = self.validate_safe_workspace_path_detailed(
@@ -1415,7 +1402,7 @@ class RoundtableOrchestrator:
             sess.updated_ts = time.time()
 
         if real_ws:
-            invalidate_workspace_index(real_ws)
+            await asyncio.to_thread(invalidate_workspace_index, real_ws)
         await self._broadcast_meta(sess)
         await self.broadcast(sess, "whiteboard_update", sess.whiteboard)
         self._persist_single_session(sess, immediate=True)
@@ -1474,6 +1461,7 @@ class RoundtableOrchestrator:
         if "single_cli_concurrency" in payload:
             try:
                 self.settings.single_cli_concurrency = max(1, min(6, int(payload["single_cli_concurrency"])))
+                self.runner.refresh_binary_limits()
             except Exception:
                 pass
 
@@ -3043,6 +3031,7 @@ class RoundtableOrchestrator:
         return {
             "unsupported_effort_or_model": "档位不兼容",
             "quota_rate_limit": "配额限流",
+            "service_unavailable": "模型服务繁忙",
             "auth_expired": "鉴权失效",
             "timeout": "响应超时",
             "binary_missing": "缺少 CLI",
@@ -5616,7 +5605,7 @@ class RoundtableOrchestrator:
         if do_real_write:
             try:
                 backup = await asyncio.to_thread(
-                    WorkspaceBackup.capture,
+                    WorkspaceBackup.capture_for_execution,
                     frozen_ws,
                     session_id=sess.session_id,
                     run_id=run_id,
@@ -5837,7 +5826,7 @@ class RoundtableOrchestrator:
                 backup_dir=str(backup.backup_dir),
                 state="rolled_back",
             )
-            invalidate_workspace_index(backup.cwd)
+            await asyncio.to_thread(invalidate_workspace_index, backup.cwd)
         finally:
             async with sess.session_lock:
                 if sess.exec_state == "preparing":
@@ -5932,9 +5921,11 @@ class RoundtableOrchestrator:
                     pgid=int(pgid),
                 )
 
+        file_edits = backup is not None and backup.target_paths is not None
         try:
             if backup is not None:
-                snap_line = f"[CAS Snapshot] 已完成写前无 Git 依赖字节清单与 fsync 落盘 (run={run_id})"
+                snap_line = ("大项目按本轮目标文件备份，可跨目录写入。" if file_edits
+                             else f"[CAS Snapshot] 已完成写前无 Git 依赖字节清单与 fsync 落盘 (run={run_id})")
                 sess.whiteboard["exec_logs"].append(snap_line)
                 await self.broadcast(sess, "term_log", {"line": snap_line})
 
@@ -5948,9 +5939,13 @@ class RoundtableOrchestrator:
                 session_id=sess.session_id,
                 on_pgid_spawned=_on_pgid_spawned,
             )
+            if file_edits:
+                exec_kwargs["file_edits"] = True
             try:
                 exec_gen = self.runner.stream_agent_execution(**exec_kwargs)
             except TypeError:
+                if file_edits:
+                    raise
                 exec_kwargs.pop("session_id", None)
                 exec_kwargs.pop("on_pgid_spawned", None)
                 exec_gen = self.runner.stream_agent_execution(**exec_kwargs)
@@ -5960,7 +5955,7 @@ class RoundtableOrchestrator:
                 if etype == "term_log":
                     sess.whiteboard["exec_logs"].append(ev["line"])
                     await self.broadcast(sess, "term_log", {"line": ev["line"]})
-                elif etype == "exec_delta":
+                elif etype == "exec_delta" and not file_edits:
                     delta_txt = ev.get("text", "")
                     if delta_txt:
                         if exec_ttft_ms is None:
@@ -5972,6 +5967,22 @@ class RoundtableOrchestrator:
                 elif etype == "exec_artifact":
                     summary_txt = str(ev.get("summary") or "").strip()
                     diff_txt = str(ev.get("diff") or "").strip()
+                    if file_edits:
+                        apply_task = asyncio.create_task(asyncio.to_thread(apply_edit_reply, backup, summary_txt))
+                        try:
+                            summary_txt, modified_paths = await asyncio.shield(apply_task)
+                        except asyncio.CancelledError:
+                            # 保持工作区锁，直到本批次提交或补偿完毕。
+                            while not apply_task.done():
+                                try:
+                                    await asyncio.shield(apply_task)
+                                except asyncio.CancelledError:
+                                    continue
+                            raise
+                        change_note = ("已写入 " + "、".join(modified_paths)) if modified_paths else "本轮没有文件变更"
+                        summary_txt = (summary_txt + "\n\n" + change_note).strip()
+                        diff_txt = ""
+                        ev = {**ev, "summary": summary_txt, "diff": ""}
                     if summary_txt or diff_txt:
                         received_substantive_artifact = True
                         elapsed_ms = int((time.perf_counter() - exec_start_ts) * 1000)
@@ -5983,6 +5994,8 @@ class RoundtableOrchestrator:
                         msg_obj["ttft_ms"] = exec_ttft_ms or elapsed_ms
                         msg_obj["elapsed_ms"] = elapsed_ms
                         msg_obj["badge"] = "已写入本地项目" if allow_workspace_write else "交付完成"
+                        if file_edits and not modified_paths:
+                            msg_obj["badge"] = "无文件变更"
                         await self.broadcast(sess, "msg_done", msg_obj)
                         await self.broadcast(sess, "exec_artifact", ev)
                         await self.broadcast(sess, "whiteboard_update", sess.whiteboard)
@@ -6011,6 +6024,7 @@ class RoundtableOrchestrator:
                         verify_cmd,
                         workspace_realpath=frozen_ws,
                         env=build_host_env(),
+                        protect_project=file_edits,
                     )
                     sess.whiteboard["last_verification"] = v_rep
                     if v_rep["passed"]:
@@ -6097,7 +6111,7 @@ class RoundtableOrchestrator:
                             backup_dir=str(backup.backup_dir),
                             state="rollbackable" if changed else "completed_noop",
                         )
-                        invalidate_workspace_index(frozen_ws)
+                        await asyncio.to_thread(invalidate_workspace_index, frozen_ws)
                     except Exception as exc:
                         sess.last_backup = None
                         sess.recovery_required = True

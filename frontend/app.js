@@ -427,8 +427,8 @@ const state = {
   activeTab: "whiteboard",
   activeSettingsTab: "seats",
   showAllSeatsInRing: false,
-  cliTestResults: {},
-  pingLatencyBySeat: {},
+  cliTestResults: new Map(),
+  cliTestingSeats: new Map(),
   expandedCliCard: null,
   personaPopoverSeat: null,
   execStartTs: 0,
@@ -468,6 +468,7 @@ const state = {
   writeAuthScope: { sessionId: "", workspaceDir: "" },
   workspaceBindScope: "session",
   settingsSaveDraft: null,
+  settingsLineupMode: "",
   sseRetryAttempt: 0,
 };
 
@@ -978,10 +979,10 @@ function detectActiveScenarioKey() {
     }
     return "";
   }
-  const curSet = state.enabledAgents.join(",");
   for (const [key, sp] of Object.entries(SCENARIO_PRESETS)) {
     if (sp.solo || key === "classic_triad") continue;
-    if (!Array.isArray(sp.enabled_agents) || sp.enabled_agents.join(",") !== curSet) continue;
+    if (sp.enabled_agents?.length !== state.enabledAgents.length ||
+        !sp.enabled_agents.every((aid) => state.enabledAgents.includes(aid))) continue;
     if (sp.collab_mode !== state.collabMode) continue;
     const matchPersonas = sp.enabled_agents.every((aid) => state.seatPersonas[aid] === sp.seat_personas[aid]);
     if (matchPersonas) return key;
@@ -1085,6 +1086,17 @@ function syncScenarioPresetHighlight() {
     const isAct = Boolean(state.scenarioPack) && pk === state.scenarioPack;
     card.classList.toggle("active", isAct);
     card.setAttribute("aria-pressed", isAct ? "true" : "false");
+    const pack = state.system?.scenario_packs?.[pk] || CLIENT_SCENARIO_PACKS[pk];
+    const tag = card.querySelector(".scenario-mode-tag");
+    if (pack && tag) {
+      const customized = isAct && (pack.collab_mode !== state.collabMode ||
+        pack.enabled_agents.length !== state.enabledAgents.length ||
+        pack.enabled_agents.some((aid) => !state.enabledAgents.includes(aid) ||
+          state.seatPersonas[aid] !== pack.seat_personas[aid]));
+      const count = isAct ? state.enabledAgents.length : pack.enabled_agents.length;
+      const mode = COLLAB_MODES[isAct ? state.collabMode : pack.collab_mode]?.label || "";
+      tag.textContent = `${isAct ? "当前" : "推荐"} ${count} 席 · ${mode}${customized ? " · 自定义阵容" : ""}`;
+    }
   });
 }
 
@@ -1199,13 +1211,6 @@ async function applyScenarioPack(packKey) {
     state.artifactType = state.artifactType || nextArt;
     syncScenarioPresetHighlight();
 
-    const isIdleUnstarted =
-      (state.stage || "idle") === "idle" &&
-      (!state.messages || state.messages.size === 0) &&
-      !String(state.topic || "").trim();
-    if ((pack.prefer_unbound_workspace || packKey === "tradeoff_debate") && isIdleUnstarted && effectiveWorkspacePath()) {
-      await switchCurrentSessionWorkspace("");
-    }
     if (state.whiteboard) renderWhiteboard(state.whiteboard, true, false);
     showToast(`已切换场景意图包：${pack.label || packKey}`, "ok", 2200);
     return true;
@@ -1446,7 +1451,6 @@ function refreshSeatEffortSelectInModal(seatCap, autoResetModelOnDriverChange = 
 
 function syncPacingControlsInModal(mode, idleSec, turnSec, refChars) {
   const nextMode = ["standard", "unrestricted", "custom"].includes(mode) ? mode : "standard";
-  state.pacingMode = nextMode;
 
   document.querySelectorAll("#cfgPacingGroup [data-pacing-mode]").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.pacingMode === nextMode);
@@ -2263,6 +2267,9 @@ async function syncResolutionToWhiteboard(messageId) {
 
 function tickThinkingTimers() {
   const now = Date.now();
+  document.querySelectorAll("[data-cli-test-start]").forEach((timer) => {
+    timer.textContent = `${Math.max(0, Math.floor((now - Number(timer.dataset.cliTestStart)) / 1000))} 秒`;
+  });
   for (const msg of state.messages.values()) {
     if (!msg.streaming) continue;
     const startTs = Number(msg.started_ts || now);
@@ -3318,15 +3325,22 @@ async function exportMinutesMarkdownFile() {
       (state.whiteboard?.topic_title || state.topic || "AI圆桌纪要")
         .replace(/[\\/:*?"<>|\s]+/g, "_")
         .slice(0, 36) + ".md";
+    const filename = decodedFn || fallbackName;
+    const macBridge = window.webkit?.messageHandlers?.roundtableNative;
+    if (macBridge) {
+      const saved = await macBridge.postMessage({ action: "saveMinutes", filename, text: await blob.text() });
+      if (saved?.ok) showToast("会议纪要已保存", "ok", 2200);
+      return;
+    }
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = decodedFn || fallbackName;
+    a.download = filename;
     document.body.appendChild(a);
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1200);
-    showToast("已从服务端内存生成并下载 .md 会议纪要", "ok", 2400);
+    showToast("已发起会议纪要下载", "ok", 2400);
   } catch (err) {
     showToast(err.message || "导出会议纪要失败", "err");
   }
@@ -3354,12 +3368,14 @@ function resolveClientEpistemicMeta() {
       if (fk) fams.add(fk);
     }
   });
-  if (wbMode === "heterogeneous" || fams.size >= 2) {
+  if (wbMode ? wbMode === "heterogeneous" : fams.size >= 2) {
+    const count = state.whiteboard?.driver_family_count ?? fams.size;
+    const detail = count >= 2 ? `${count} 种引擎` : "多种引擎";
     return {
       mode: "heterogeneous",
-      badge: wbBadge || `多源异构独立交叉核验（${Math.max(2, fams.size)} 独立引擎）`,
-      headerText: `异构独立 · ${Math.max(2, fams.size)} 引擎`,
-      bannerText: `多源异构独立交叉核验（${Math.max(2, fams.size)} 个独立驱动族）：首轮盲评隔离 + 交叉质询闭环准入已启用。`,
+      badge: wbBadge || `多源交叉核验（${detail}）`,
+      headerText: `多源研讨 · ${detail}`,
+      bannerText: `本场使用${detail}，首轮独立发言后交叉质询。`,
     };
   }
   return {
@@ -3397,8 +3413,16 @@ function renderStageAndHeader() {
   if (epiEl) {
     const epi = resolveClientEpistemicMeta();
     epiEl.classList.remove("hidden", "epistemic-warn", "epistemic-solo", "epistemic-hetero");
-    epiEl.textContent = epi.headerText;
-    epiEl.title = epi.bannerText;
+    if (isIdleEmpty) {
+      const drivers = state.system?.agents || {};
+      const families = new Set(state.enabledAgents.filter((aid) => drivers[aid]?.binary_detected)
+        .map((aid) => drivers[aid].driver_family_key || drivers[aid].effective_driver).filter(Boolean));
+      epiEl.textContent = `已检测到 ${families.size} 种引擎`;
+      epiEl.title = "参会席位调用的本地引擎数量，同一引擎只计一次";
+    } else {
+      epiEl.textContent = epi.headerText;
+      epiEl.title = epi.bannerText;
+    }
     if (epi.mode === "heterogeneous") epiEl.classList.add("epistemic-hetero");
     else if (epi.mode === "solo_draft") epiEl.classList.add("epistemic-solo");
     else epiEl.classList.add("epistemic-warn");
@@ -3588,9 +3612,11 @@ function renderSeatCard(agentId) {
 
   const badgeEl = el(`seat-badge-${agentId}`);
   if (badgeEl) {
-    let badgeText = st.badge || (ready ? "已就绪" : "未检测到 CLI");
+    let badgeText = st.badge || (ready ? "待实测" : "未检测到 CLI");
     if (!enabled && status === "idle") {
       badgeText = "暂停参会";
+    } else if (enabled && status === "idle" && (!st.badge || st.badge === "已就绪" || st.badge === "未检测到 CLI")) {
+      badgeText = cliTestView(agentId).label;
     } else if (status === "idle" && st.elapsed_ms > 0 && badgeText && !badgeText.includes("s")) {
       badgeText = `${badgeText} · ${(st.elapsed_ms / 1000).toFixed(1)}s`;
     }
@@ -3631,6 +3657,7 @@ function syncMentionChipActiveStates() {
 }
 
 function renderAllSeats() {
+  renderCliStatus();
   syncDynamicRosterNames();
   AGENT_ORDER.forEach((aid) => renderSeatCard(aid));
   const countLbl = el("ringSeatCountLabel");
@@ -4000,7 +4027,7 @@ function renderExecutorControls() {
     } else if (allowWrite) {
       descEl.classList.add("warn");
       descEl.textContent =
-        `写入模式（${ws}）：写前将获取跨进程排他锁并建立写前字节快照，验证异常支持一键回滚。`;
+        `写入 ${ws}。超过 128 MiB 的项目按本轮修改的文本文件备份，可跨目录修改和回滚。`;
     } else {
       descEl.classList.remove("warn");
       descEl.textContent = `只读预演模式（${ws}）：依据白板已锁定约束与已勾选任务生成代码补丁预览，不改动本地文件。`;
@@ -4045,17 +4072,57 @@ function renderSystemStatus(sys) {
     el("diagIsolationSpec").textContent = `独立 TMPDIR 隔离 · ${conc} 路并发通道 · 进程组围栏收割`;
   }
 
+  renderWorkspaceBadges();
+  renderAllSeats();
+}
+
+function cliTestKey(aid, draft) {
+  const saved = state.system?.agents?.[aid] || {};
+  const cfg = draft || saved;
+  const effort = draft ? cfg.discussion_effort : state.seatEfforts[aid] || saved.effective_discussion_effort;
+  return JSON.stringify([aid, cfg.driver, cfg.custom_binary || "", cfg.model || (draft ? "" : saved.effective_model),
+    effort || "", saved.binary_path || "", saved.version || "", state.system?.allow_single_cli_fallback]);
+}
+
+function cliTestView(aid, draft) {
+  const key = cliTestKey(aid, draft);
+  const run = state.cliTestingSeats.get(aid);
+  if (run?.key === key) return { label: "实测中", cls: "driver-pill", started: run.started };
+  const result = state.cliTestResults.get(key);
+  if (result?.ok) {
+    const ms = result.request_elapsed_ms ?? result.elapsed_ms;
+    const speed = ms < 2800 ? "latency-fast" : ms < 7500 ? "latency-normal" : "latency-slow";
+    return { label: "实测通过", cls: `driver-pill ${speed}`, result };
+  }
+  if (result) {
+    const labels = { queue_timeout: "排队超时", timeout: "响应超时", service_unavailable: "服务繁忙",
+      quota_rate_limit: "额度或限流", auth_expired: "需登录", transport_error: "实测中断", binary_missing: "未检测到 CLI" };
+    return { label: labels[result.error_kind] || "实测未通过", cls: "driver-pill missing", result };
+  }
+  const missing = !state.system?.agents?.[aid]?.binary_detected && !draft;
+  return { label: missing ? "未检测到 CLI" : "待实测", cls: missing ? "driver-pill missing" : "driver-pill" };
+}
+
+function renderModalCliStatus() {
+  if (el("settingsModal")?.classList.contains("hidden")) return;
+  const drafts = collectDraftAgentConfigsFromModal();
+  for (const [aid, cap] of SEAT_CAP_PAIRS) {
+    const pill = el(`cfgStatus${cap}`);
+    if (!pill) continue;
+    const view = cliTestView(aid, drafts[aid]);
+    pill.className = view.cls;
+    pill.textContent = view.label;
+    pill.title = view.result?.error || "";
+  }
+}
+
+function renderCliStatus() {
+  if (!state.system) return;
+  const sys = state.system;
   const agents = sys.agents || {};
-  const activeSeatScope = state.enabledAgents.length ? state.enabledAgents : CORE_TRIAD_SEATS;
-  let readyCount = 0;
-  const distinctFamilies = new Set();
-  activeSeatScope.forEach((aid) => {
-    if (agents[aid]?.binary_detected) {
-      readyCount += 1;
-      const fk = state.seatStates[aid]?.driver_family_key || agents[aid]?.driver_family_key || agents[aid]?.effective_driver;
-      if (fk) distinctFamilies.add(fk);
-    }
-  });
+  const activeSeatScope = state.enabledAgents;
+  const distinctFamilies = new Set(activeSeatScope.filter((aid) => agents[aid]?.binary_detected)
+    .map((aid) => agents[aid].driver_family_key || agents[aid].effective_driver).filter(Boolean));
   const isHomogeneousMulti = activeSeatScope.length > 1 && distinctFamilies.size < 2;
 
   const heteroBtn = el("ringHeterogeneousBtn");
@@ -4066,20 +4133,21 @@ function renderSystemStatus(sys) {
 
   const summaryBar = el("readySummaryBar");
   if (summaryBar) {
-    summaryBar.classList.remove("all-ready", "warn-ready");
-    if (readyCount === activeSeatScope.length && !isHomogeneousMulti && activeSeatScope.length > 1) {
-      summaryBar.classList.add("all-ready");
-      summaryBar.textContent = `${readyCount} 席异构独立模型已就绪 · 支持真多源独立立论与交叉证伪`;
-    } else if (readyCount >= 1) {
-      summaryBar.classList.add("all-ready");
-      summaryBar.textContent =
-        activeSeatScope.length === 1
-          ? `单席专注模式已就绪 · 独立推演与边界自检`
-          : `本地模型已就绪（当前启用 ${activeSeatScope.length} 席 · 同源多视角推演）`;
-    } else {
-      summaryBar.classList.add("warn-ready");
-      summaryBar.textContent = "未检测到可用本地 CLI · 请打开左下角「设置中心」配置驱动路径";
-    }
+    const views = activeSeatScope.map((aid) => cliTestView(aid));
+    const missing = views.filter((v) => v.label === "未检测到 CLI").length;
+    const passed = views.filter((v) => v.result?.ok).length;
+    const failed = views.filter((v) => v.result && !v.result.ok && v.label !== "未检测到 CLI").length;
+    const testing = views.filter((v) => v.started).length;
+    const untested = views.length - missing - passed - failed - testing;
+    const counts = [`${views.length} 席 · ${distinctFamilies.size} 种引擎`];
+    if (passed) counts.push(`${passed} 席实测通过`);
+    if (failed) counts.push(`${failed} 席实测未通过`);
+    if (testing) counts.push(`${testing} 席实测中`);
+    if (untested) counts.push(`${untested} 席待实测`);
+    if (missing) counts.push(`${missing} 席未检测到 CLI`);
+    summaryBar.textContent = counts.join(" · ");
+    summaryBar.classList.toggle("all-ready", passed > 0 && passed === views.length);
+    summaryBar.classList.toggle("warn-ready", Boolean(failed || missing));
   }
 
   const cardsBox = el("cliEngineCards");
@@ -4087,68 +4155,67 @@ function renderSystemStatus(sys) {
     cardsBox.innerHTML = "";
     for (const aid of AGENT_ORDER) {
       const info = agents[aid] || {};
-      const ready = Boolean(info.binary_detected);
-      const pingRes = state.cliTestResults[aid];
-      const latMs = state.pingLatencyBySeat[aid];
+      const view = cliTestView(aid);
+      const pingRes = view.result;
       const isExpanded = state.expandedCliCard === aid;
-      const isSeatEnabled = state.enabledAgents.includes(aid);
-
-      let pillCls = ready ? "driver-pill live" : "driver-pill missing";
-      let pillTxt = ready ? (info.independence_label || (info.shared_fallback ? "同源复用" : "已就绪")) : "未安装";
-      if (latMs > 0 && pingRes?.ok) {
-        pillCls =
-          latMs < 2800
-            ? "driver-pill latency-fast"
-            : latMs < 7500
-            ? "driver-pill latency-normal"
-            : "driver-pill latency-slow";
-        pillTxt = `${(latMs / 1000).toFixed(1)}s`;
-      }
-
-      if (isSeatEnabled || CORE_TRIAD_SEATS.includes(aid)) {
+      if (activeSeatScope.includes(aid)) {
         const card = document.createElement("div");
         card.className = `cli-card${isExpanded ? " expanded" : ""}`;
         const provPart = info.provider_name ? `${info.provider_name} · ` : "";
         const drvText = `${provPart}${DRIVER_LABELS[info.effective_driver] || info.effective_driver || "CLI"} · ${
           info.effective_model || "默认模型"
-        }${info.effective_discussion_effort ? ` (${info.effective_discussion_effort})` : ""}`;
+        }${(state.seatEfforts[aid] || info.effective_discussion_effort) ? ` (${state.seatEfforts[aid] || info.effective_discussion_effort})` : ""}`;
 
         card.innerHTML =
+          `<button type="button" class="cli-card-toggle" data-cli-seat="${aid}" aria-expanded="${isExpanded}" aria-label="${escapeHtml(AGENT_NAMES[aid])}连接详情">` +
           `<div class="cli-card-top">` +
             `<div class="cli-name-wrap">` +
               `<span class="cli-role-dot dot-${aid}"></span>` +
               `<span class="cli-card-name">${escapeHtml(AGENT_NAMES[aid])}</span>` +
             `</div>` +
-            `<span class="${pillCls}">${escapeHtml(pillTxt)}</span>` +
+            `<span class="${view.cls}">${escapeHtml(view.label)}</span>` +
           `</div>` +
-          `<div class="cli-card-cli">${escapeHtml(drvText)}</div>` +
-          (pingRes
+          `<div class="cli-card-cli">${escapeHtml(drvText)}</div></button>` +
+          (view.started
+            ? `<div class="cli-test-note">已等待 <span data-cli-test-start="${view.started}">${Math.floor((Date.now() - view.started) / 1000)} 秒</span>，单次请求上限 ${state.turnTimeoutSec} 秒。</div>`
+            : pingRes
             ? `<div class="cli-test-note${pingRes.ok ? "" : " err"}">${escapeHtml(
-                pingRes.ok ? `连通正常 · ${pingRes.reply || "OK"}` : pingRes.error || "探活失败"
+                pingRes.ok ? `收到回复 · ${((pingRes.request_elapsed_ms ?? pingRes.elapsed_ms) / 1000).toFixed(1)} 秒` : pingRes.error || "实测未通过"
               )}</div>`
+            : "") +
+          (!view.started && (isExpanded || (pingRes && !pingRes.ok))
+            ? `<button type="button" class="mini-outline-btn cli-retest-btn" aria-label="${pingRes ? "重测" : "测试"}${escapeHtml(AGENT_NAMES[aid])}" ${state.cliTestingSeats.has(aid) ? "disabled" : ""}>${pingRes ? "重测此席位" : "测试此席位"}</button>`
             : "") +
           `<div class="cli-card-details">路径：${escapeHtml(info.binary_path || "未探测到可执行文件")}<br/>版本：${escapeHtml(
             info.version || "未知"
           )}</div>`;
 
-        card.onclick = () => {
+        card.querySelector(".cli-card-toggle").onclick = (event) => {
           state.expandedCliCard = state.expandedCliCard === aid ? null : aid;
-          renderSystemStatus(state.system);
+          renderCliStatus();
+          if (event.detail === 0) cardsBox.querySelector(`[data-cli-seat="${aid}"]`)?.focus();
         };
+        const retryBtn = card.querySelector(".cli-retest-btn");
+        if (retryBtn) {
+          retryBtn.onclick = (event) => {
+            event.stopPropagation();
+            runCliTest(false, aid);
+          };
+        }
         cardsBox.appendChild(card);
       }
 
-      const cap = aid.charAt(0).toUpperCase() + aid.slice(1);
-      const modalPill = el(`cfgStatus${cap}`);
-      if (modalPill) {
-        modalPill.className = pillCls;
-        modalPill.textContent = pillTxt;
-      }
     }
   }
-
-  renderWorkspaceBadges();
-  renderAllSeats();
+  const busy = state.cliTestingSeats.size > 0;
+  for (const id of ["testCliBtn", "modalTestCliBtn"]) {
+    const button = el(id);
+    if (button) {
+      button.disabled = busy;
+      button.textContent = busy ? `实测中 · ${state.cliTestingSeats.size} 席` : "实测连通";
+    }
+  }
+  renderModalCliStatus();
 }
 
 async function switchCurrentSessionWorkspace(targetPath, options = {}) {
@@ -5500,6 +5567,7 @@ function openSettingsModal(initialTab = "") {
   const modal = el("settingsModal");
   if (!modal) return;
   state.settingsSaveDraft = null;
+  state.settingsLineupMode = "";
   switchSettingsTab(initialTab || "seats");
   const sys = state.system || {};
   const agents = sys.agents || {};
@@ -5542,7 +5610,6 @@ function openSettingsModal(initialTab = "") {
     const modelInp = el(`cfg${cap}Model`);
     const nameInp = el(`cfg${cap}Name`);
     const binInp = el(`cfg${cap}Bin`);
-    const statusPill = el(`cfgStatus${cap}`);
 
     if (drvSel) drvSel.value = info.driver || "auto";
     if (personaSel) personaSel.value = state.seatPersonas[aid] || info.persona || DEFAULT_SEAT_PERSONAS[aid];
@@ -5561,27 +5628,14 @@ function openSettingsModal(initialTab = "") {
     const execAllowed = (spec.allowed || []).filter((x) => x !== "low");
     populateEffortSelectElement(execSel, execAllowed.length ? execAllowed : spec.allowed, prefExec, spec.supports_effort);
 
-    if (statusPill) {
-      const latency = state.pingLatencyBySeat?.[aid];
-      if (info.binary_detected) {
-        if (latency > 0) {
-          statusPill.textContent = `已就绪 · ${latency}ms`;
-          statusPill.className = `driver-pill ${latency < 2800 ? "latency-fast" : latency < 7500 ? "latency-normal" : "latency-slow"}`;
-        } else {
-          statusPill.textContent = info.shared_cli_group ? "并行池就绪" : "已就绪";
-          statusPill.className = "driver-pill live";
-        }
-      } else {
-        statusPill.textContent = "未安装";
-        statusPill.className = "driver-pill missing";
-      }
-    }
+
   }
 
   syncDynamicRosterNames();
   syncModalSeatMatrixSummary();
   refreshAllModalSeatChips();
   modal.classList.remove("hidden");
+  renderModalCliStatus();
   modal.dispatchEvent(new Event("roundtable:settings-open"));
 }
 
@@ -5626,7 +5680,7 @@ function applyQuickSingleCliTriad() {
   if (concSel && !concSel.value) {
     concSel.value = String(state.singleCliConcurrency || 3);
   }
-  state.singleCliConcurrency = Number(concSel?.value || state.singleCliConcurrency || 3);
+  const concurrency = Number(concSel?.value || state.singleCliConcurrency || 3);
 
   for (const [aid, cap] of SEAT_CAP_PAIRS) {
     const drvEl = el(`cfg${cap}Driver`);
@@ -5650,8 +5704,8 @@ function applyQuickSingleCliTriad() {
       spec.supports_effort
     );
   }
-  state.seatEfforts = {};
-  const concNote = state.singleCliConcurrency > 1 ? `${state.singleCliConcurrency} 路真并行` : "串行防限流";
+  renderModalCliStatus();
+  const concNote = concurrency > 1 ? `${concurrency} 路并行` : "串行";
   showToast(
     `已将全部 6 席对齐至「${DRIVER_LABELS[chosenDrv] || chosenDrv}」无状态真并行池（${concNote}），点击「保存配置」生效`,
     "ok",
@@ -5660,69 +5714,46 @@ function applyQuickSingleCliTriad() {
 }
 
 async function runCliTest(fromModal = false, targetAgentId = "") {
-  const btn = el(fromModal ? "modalTestCliBtn" : "testCliBtn");
-  const origTxt = btn?.textContent || "实测连通";
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = "实测中…";
+  const drafts = fromModal ? collectDraftAgentConfigsFromModal() : null;
+  const selected = targetAgentId ? [targetAgentId] : fromModal
+    ? Array.from(document.querySelectorAll("[data-cfg-seat-enable]:checked"), (box) => box.dataset.cfgSeatEnable)
+    : state.enabledAgents;
+  const seats = selected.filter((aid) => !state.cliTestingSeats.has(aid));
+  if (!seats.length) {
+    if (!selected.length) showToast("请先选择参会席位", "warn");
+    return;
   }
-  try {
-    let overrideAgents = null;
-    if (fromModal) {
-      overrideAgents = collectDraftAgentConfigsFromModal();
+  const jobs = seats.map((aid) => {
+    const draft = drafts?.[aid];
+    const key = cliTestKey(aid, draft);
+    const override = draft || (state.seatEfforts[aid] ? { discussion_effort: state.seatEfforts[aid] } : null);
+    state.cliTestingSeats.set(aid, { key, started: Date.now() });
+    return { aid, key, override };
+  });
+  renderAllSeats();
+  const outcomes = await Promise.all(jobs.map(async ({ aid, key, override }) => {
+    let result;
+    try {
+      const res = await apiFetch("/api/cli/test", {
+        method: "POST",
+        body: JSON.stringify({ agent_id: aid, agents: override ? { [aid]: override } : null, include_system: false }),
+      });
+      result = res.results?.[aid];
+      if (typeof result?.ok !== "boolean") throw new Error("本地服务未返回该席位的实测结果");
+    } catch (err) {
+      result = { ok: false, error_kind: "transport_error", error: err.message || "与本地服务的连接中断" };
     }
-    const res = await apiFetch("/api/cli/test", {
-      method: "POST",
-      body: JSON.stringify({
-        agents: overrideAgents,
-        agent_id: targetAgentId || "",
-      }),
-    });
-    const results = res.results || {};
-    state.cliTestResults = { ...state.cliTestResults, ...results };
-    let okCount = 0;
-    let totalCount = 0;
-    for (const [aid, r] of Object.entries(results)) {
-      totalCount += 1;
-      const ms = Number(r?.elapsed_ms ?? r?.latency_ms ?? 0);
-      if (r?.ok) {
-        okCount += 1;
-        if (ms > 0) state.pingLatencyBySeat[aid] = ms;
-      }
-      const cap = aid.charAt(0).toUpperCase() + aid.slice(1);
-      const pill = el(`cfgStatus${cap}`);
-      if (pill && fromModal) {
-        if (r?.ok) {
-          pill.textContent = `连通 ${ms}ms`;
-          pill.className = `driver-pill ${ms < 2500 ? "latency-fast" : ms < 6000 ? "latency-normal" : "latency-slow"}`;
-        } else {
-          pill.textContent = "未通过";
-          pill.className = "driver-pill missing";
-        }
-      }
-    }
-    if (res.system) {
-      renderSystemStatus(res.system);
-    } else {
-      renderAllSeats();
-    }
-    if (okCount === totalCount && totalCount > 0) {
-      const summary = Object.entries(results)
-        .map(([aid, r]) => `${AGENT_NAMES[aid] || aid} ${r.elapsed_ms ?? r.latency_ms ?? 0}ms`)
-        .join(" / ");
-      showToast(`连通实测全部通过：${summary}`, "ok", 3200);
-    } else {
-      const firstErr = Object.values(results).find((r) => !r?.ok)?.error || "部分席位未通过实测，请查看卡片诊断提示";
-      showToast(firstErr, "warn", 4200);
-    }
-  } catch (err) {
-    showToast(err.message || "连通性实测失败", "err");
-  } finally {
-    if (btn) {
-      btn.disabled = false;
-      btn.textContent = origTxt;
-    }
-  }
+    state.cliTestingSeats.delete(aid);
+    state.cliTestResults.set(key, result);
+    renderAllSeats();
+    return result;
+  }));
+  const passed = outcomes.filter((result) => result.ok).length;
+  const failed = outcomes.find((result) => !result.ok);
+  const text = seats.length === 1
+    ? `${AGENT_NAMES[seats[0]]} · ${failed?.error || "实测通过"}`
+    : `${seats.length} 席实测完成 · ${passed} 席通过${failed ? ` · ${seats.length - passed} 席未通过` : ""}`;
+  showToast(text, failed ? "warn" : "ok", 3400);
 }
 
 async function saveSettingsFromModal() {
@@ -5765,6 +5796,7 @@ async function saveSettingsFromModal() {
     const rosterPreset = el("cfgRosterPresetSelect")?.value || "role_experts";
 
     const draftAgents = collectDraftAgentConfigsFromModal();
+    const lineupMode = state.settingsLineupMode;
     for (const aid of AGENT_ORDER) {
       if (!draftAgents[aid].execution_effort && draftAgents[aid].discussion_effort) {
         draftAgents[aid].execution_effort = draftAgents[aid].discussion_effort;
@@ -5784,6 +5816,7 @@ async function saveSettingsFromModal() {
       turnSec,
       maxRef,
       selectedSeats,
+      lineupMode,
       draftAgents,
     });
 
@@ -5870,6 +5903,7 @@ async function saveSettingsFromModal() {
           method: "POST",
           body: JSON.stringify({
             enabled_agents: selectedSeats,
+            ...(lineupMode ? { collab_mode: lineupMode } : {}),
             executor_agent: nextExec,
             seat_personas: nextPersonas,
             seat_efforts: resetSeatEfforts,
@@ -5883,6 +5917,7 @@ async function saveSettingsFromModal() {
             state.seatPersonas = { ...state.seatPersonas, ...(seatRes.seat_personas || nextPersonas) };
             state.seatEfforts = { ...(seatRes.seat_efforts || {}) };
             if (seatRes.seat_states) state.seatStates = seatRes.seat_states;
+            if (seatRes.collab_mode) syncCollabModeUI(seatRes.collab_mode, seatRes.auto_preview_exec);
           }
           renderAllSeats();
           renderQuickCueButtons();
@@ -5891,6 +5926,7 @@ async function saveSettingsFromModal() {
         }
       } else {
         state.enabledAgents = selectedSeats;
+        if (lineupMode) syncCollabModeUI(lineupMode, state.autoPreviewExec);
         state.executorAgent = nextExec;
         state.seatPersonas = { ...state.seatPersonas, ...nextPersonas };
         state.seatEfforts = {};
@@ -6374,7 +6410,7 @@ function bindEvents() {
         const pSel = el(`cfg${cap}Persona`);
         if (pSel && targetPersonas[aid]) pSel.value = targetPersonas[aid];
       }
-      syncCollabModeUI(spec.collab_mode, state.autoPreviewExec);
+      state.settingsLineupMode = spec.collab_mode;
       syncModalSeatMatrixSummary();
       showToast(`已在设置中心预选「${spec.label}」，点击右下角「保存配置」生效`, "info", 2200);
     });
@@ -6411,7 +6447,17 @@ function bindEvents() {
   );
   el("quickSingleCliTriadBtn")?.addEventListener("click", () => applyQuickSingleCliTriad());
   el("testCliBtn")?.addEventListener("click", () => runCliTest(false));
+  el("readySummaryBar")?.addEventListener("click", () => {
+    setLeftCollapsed(false);
+    el("sidebarAdvancedFold").open = true;
+    const target = el("cliEngineCards")?.querySelector(".cli-retest-btn") || el("testCliBtn");
+    target?.focus();
+    target?.scrollIntoView({ block: "nearest" });
+  });
   el("modalTestCliBtn")?.addEventListener("click", () => runCliTest(true));
+  for (const event of ["input", "change"]) {
+    el("settingsModal")?.addEventListener(event, renderModalCliStatus);
+  }
   el("saveSettingsBtn")?.addEventListener("click", () => saveSettingsFromModal());
 
   for (const [, cap] of SEAT_CAP_PAIRS) {

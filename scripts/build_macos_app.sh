@@ -9,7 +9,7 @@ MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RES_DIR="${CONTENTS_DIR}/Resources"
 EMBED_APP_DIR="${RES_DIR}/app"
 
-echo "==> 1. 准备 ${APP_NAME}.app v4.0.1 目录结构..."
+echo "==> 1. 准备 ${APP_NAME}.app v4.0.2 目录结构..."
 rm -rf "${APP_BUNDLE}"
 mkdir -p "${MACOS_DIR}" "${EMBED_APP_DIR}/backend" "${EMBED_APP_DIR}/frontend"
 
@@ -60,9 +60,9 @@ cat > "${CONTENTS_DIR}/Info.plist" <<'PLIST'
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>4.0.1</string>
+  <string>4.0.2</string>
   <key>CFBundleVersion</key>
-  <string>8</string>
+  <string>9</string>
   <key>LSMinimumSystemVersion</key>
   <string>12.0</string>
   <key>NSHighResolutionCapable</key>
@@ -80,4 +80,4 @@ echo "==> 4. 执行 ad-hoc 签名并清理 Quarantine 属性..."
 codesign --force --deep --sign - "${APP_BUNDLE}"
 xattr -cr "${APP_BUNDLE}" 2>/dev/null || true
 
-echo "==> 构建完成: ${APP_BUNDLE} (v4.0.1)"
+echo "==> 构建完成: ${APP_BUNDLE} (v4.0.2)"

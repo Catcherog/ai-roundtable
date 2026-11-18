@@ -202,7 +202,7 @@
             <svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
               <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
             </svg>
-            <span>引擎状态与快捷探活</span>
+            <span>引擎连接状态</span>
           </span>
           <span class="fold-caret" aria-hidden="true">▾</span>
         </summary>
@@ -210,7 +210,7 @@
           <div class="section-header">
             <span>CLI 引擎状态</span>
             <div class="header-inline-btns">
-              <button id="testCliBtn" class="mini-ghost-btn" title="并发发送轻量探活请求检验各席位 CLI 响应延迟">实测连通</button>
+              <button id="testCliBtn" class="mini-ghost-btn" title="测试本场参会席位，逐席显示结果">实测连通</button>
               <button id="openSettingsBtn" class="mini-ghost-btn" title="打开设置中心 (⌘,)">设置中心</button>
             </div>
           </div>
@@ -487,13 +487,13 @@
           <div class="empty-guide" id="emptyGuide">
             <div class="empty-launch-card v4-launch-card">
               <div class="empty-top-bar">
-                <div class="empty-hero-badge" id="readySummaryBar">正在检测本地 CLI 模型环境…</div>
+                <button type="button" class="empty-hero-badge" id="readySummaryBar" aria-controls="sidebarAdvancedFold" title="查看席位连接详情">正在检测本地引擎…</button>
               </div>
 
               <div class="empty-title-group">
-                <h2>选择目标场景，开启多视角圆桌研讨</h2>
+                <h2>这场会议要解决什么问题？</h2>
                 <p>
-                  按任务意图自动装配<strong>对抗角色、研讨拓扑与交付形态</strong>；支持直接粘贴截图 (⌘V)、拖拽文档或通过 <code>@文件路径:起-止</code> 引用项目源码。
+                  选择场景后，在下方输入议题。可以粘贴截图、拖入文档，或用 <code>@文件路径:起-止</code> 引用项目源码。
                 </p>
               </div>
 
@@ -506,7 +506,7 @@
                       <polyline points="2 17 12 22 22 17"></polyline>
                       <polyline points="2 12 12 17 22 12"></polyline>
                     </svg>
-                    <span>场景意图包（自动匹配推荐席位、辩证流程与交付出口）</span>
+                    <span>会议场景</span>
                   </span>
                 </div>
                 <div class="intent-pack-grid" id="scenarioIntentPackGrid">
@@ -524,8 +524,8 @@
                         <span class="intent-exit-tag">代码预演/写盘</span>
                       </div>
                     </div>
-                    <div class="intent-pack-title">工程研发与代码审查包</div>
-                    <div class="intent-pack-desc">规划立论 + 反向审计 + 工程实现；支持 @源码切片引用与终端安全写盘交付</div>
+                    <div class="intent-pack-title">工程研发与代码审查</div>
+                    <div class="intent-pack-desc">引用源码，审查方案和风险，再预览改动。</div>
                   </button>
 
                   <button type="button" class="intent-pack-card" data-scenario-pack="tradeoff_debate">
@@ -543,8 +543,8 @@
                         <span class="intent-exit-tag">对比决策纪要</span>
                       </div>
                     </div>
-                    <div class="intent-pack-title">方案利弊红蓝辩证包</div>
-                    <div class="intent-pack-desc">正方建构 + 反方证伪 + 综合裁定；默认免绑项目纯研讨，收敛多维权衡决策矩阵</div>
+                    <div class="intent-pack-title">方案利弊比较</div>
+                    <div class="intent-pack-desc">比较备选方案，记录支持理由、反例和取舍。</div>
                   </button>
 
                   <button type="button" class="intent-pack-card" data-scenario-pack="ux_multimodal">
@@ -561,8 +561,8 @@
                         <span class="intent-exit-tag">体验走查清单</span>
                       </div>
                     </div>
-                    <div class="intent-pack-title">产品体验与多模态走查包</div>
-                    <div class="intent-pack-desc">交互体感 + 架构边界 + 风险审计；聚焦界面截图对比与分级体验打磨清单交付</div>
+                    <div class="intent-pack-title">产品体验走查</div>
+                    <div class="intent-pack-desc">结合截图检查操作步骤，列出问题和改进优先级。</div>
                   </button>
 
                   <button type="button" class="intent-pack-card" data-scenario-pack="incident_doc">
@@ -580,8 +580,8 @@
                         <span class="intent-exit-tag">排查/定稿导出</span>
                       </div>
                     </div>
-                    <div class="intent-pack-title">故障排查与文稿打磨包</div>
-                    <div class="intent-pack-desc">自适应排查与定稿立场；快速收敛根因验证路径或结构化技术文稿复制导出</div>
+                    <div class="intent-pack-title">故障排查与文稿打磨</div>
+                    <div class="intent-pack-desc">从日志梳理原因和验证步骤，或整理待定稿的文档。</div>
                   </button>
                 </div>
 
@@ -1692,7 +1692,7 @@
       </div>
 
       <div class="modal-footer">
-        <button type="button" id="modalTestCliBtn" class="mini-outline-btn" title="并发携带当前所选驱动、模型与推理档位实测连通延迟">并发实测连通</button>
+        <button type="button" id="modalTestCliBtn" class="mini-outline-btn" title="按表单中的驱动、模型和推理档位，测试已勾选的席位。时限与并发数使用已保存的设置。">实测连通</button>
         <div class="modal-footer-right">
           <button type="button" id="cancelSettingsBtn" class="mini-outline-btn">取消</button>
           <button type="button" id="saveSettingsBtn" class="primary-send-btn">保存配置</button>

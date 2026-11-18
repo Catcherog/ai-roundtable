@@ -551,6 +551,9 @@ class AsyncHTTPServer:
                 return
             override_agents = data.get("agents") if isinstance(data.get("agents"), dict) else None
             target_aid = str(data.get("agent_id", "")).strip().lower()
+            if target_aid and target_aid not in self.orchestrator.settings.agents:
+                await self._send_json(writer, 400, {"error": "未知的实测席位"})
+                return
             results = await self.orchestrator.run_cli_connectivity_test(
                 override_agents=override_agents,
                 target_agent_id=target_aid,
@@ -561,7 +564,7 @@ class AsyncHTTPServer:
                 {
                     "ok": True,
                     "results": results,
-                    "system": self.orchestrator.get_system_status(),
+                    **({} if data.get("include_system") is False else {"system": self.orchestrator.get_system_status()}),
                 },
             )
             return
@@ -1059,11 +1062,19 @@ class AsyncHTTPServer:
             self.orchestrator.unsubscribe_session_sse(sess, queue)
 
 
-async def run_async_server(host: str, port: int, workspace_dir: str, *, notify_parent: bool = False) -> None:
+async def run_async_server(
+    host: str, port: int, workspace_dir: str, *, notify_parent: bool = False, listen_fd: Optional[int] = None,
+) -> None:
     import socket
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM) if listen_fd is None else socket.socket(fileno=listen_fd)
     try:
-        listener.bind((host, port))
+        if listen_fd is None:
+            listener.bind((host, port))
+        else:
+            listener.set_inheritable(False)
+            if (listener.family != socket.AF_INET or listener.type != socket.SOCK_STREAM
+                    or host != "127.0.0.1" or listener.getsockname() != (host, port)):
+                raise ValueError("Mac 启动器传入的监听地址无效")
         port = listener.getsockname()[1]
         app = AsyncHTTPServer(host=host, port=port, workspace_dir=workspace_dir)
         server = await asyncio.start_server(
@@ -1105,12 +1116,14 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8765, help="监听端口 (默认 8765)")
     parser.add_argument("--workspace", default="", help="新建会话默认工作目录（默认未绑定纯研讨模式）")
     parser.add_argument("--notify-parent", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--listen-fd", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--wait-for-parent", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.wait_for_parent and sys.stdin.buffer.readline(16).strip() != b"START":
         return
     try:
-        asyncio.run(run_async_server(args.host, args.port, args.workspace, notify_parent=args.notify_parent))
+        asyncio.run(run_async_server(args.host, args.port, args.workspace,
+                                     notify_parent=args.notify_parent, listen_fd=args.listen_fd))
     except KeyboardInterrupt:
         print("\n服务已关闭。")
 

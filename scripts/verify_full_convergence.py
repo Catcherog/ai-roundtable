@@ -229,6 +229,7 @@ async def run_convergence_suite() -> None:
         from backend.drivers import sanitize_subprocess_env, windows_support
         from backend.engine import run_post_execution_verification
         from backend.server import AsyncHTTPServer
+        from backend.project_edits import apply_edit_reply
         from backend.workspace_backup import (
             HONEST_ROLLBACK_DISCLOSURE,
             MAX_BACKUP_WORKSPACE_BYTES,
@@ -332,7 +333,7 @@ async def run_convergence_suite() -> None:
                     is_ok, _, det = app.orchestrator.validate_safe_workspace_path_detailed(bad_p)
                     assert not is_ok and det.get("reason") == exp_reason, f"路径 {bad_p} 未按预期拦截 ({exp_reason}): {det}"
 
-            # 3.2 验证未纳入 Git 跟踪的 `output/` 大型归档自动忽略 + 超 128 MiB 绑定阶段当场拒绝并返回 largest_dirs
+            # 3.2 未跟踪的归档照常跳过；大项目仍能绑定并按文件跨目录执行。
             untracked_out = ws_a / "output" / "archives"
             untracked_out.mkdir(parents=True, exist_ok=True)
             with open(untracked_out / "release_bundle.zip", "wb") as f_out:
@@ -344,7 +345,7 @@ async def run_convergence_suite() -> None:
             at_files = list_workspace_files(str(ws_a), query="", limit=50).get("files", [])
             assert all(not f["path"].startswith("output/") for f in at_files), f"@检索泄露了未跟踪 output/: {at_files}"
 
-            # 在受管子目录 heavy_assets/ 中构造 >128 MiB 文件，验证在绑定工作区阶段当场返回 400 + largest_dirs
+            # 大文件不得进入逐文件快照，即使回滚时它已被其他进程修改。
             oversize_ws = tmp_root / "oversize_ws"
             (oversize_ws / "heavy_assets").mkdir(parents=True)
             with open(oversize_ws / "heavy_assets" / "weights.bin", "wb") as f_big:
@@ -360,9 +361,34 @@ async def run_convergence_suite() -> None:
                 f"/api/sessions/{sid_default}/workspace",
                 {"workspace_dir": str(oversize_ws)},
             )
-            assert st_over == 400 and d_over.get("reason") == "workspace_too_large", f"超 128MiB 未在绑定阶段拦截: {st_over} {d_over}"
-            assert any(x.get("path") == "heavy_assets" for x in d_over.get("largest_dirs", [])), f"未返回大目录清单: {d_over}"
-            ok("3. 爆炸半径硬拦截（/、$HOME、凭证目录、.app）、未跟踪 output/ 忽略与 128 MiB 前置预检")
+            assert st_over == 200 and d_over["workspace_dir"] == str(oversize_ws)
+            src = oversize_ws / "src" / "中文.py"
+            src.parent.mkdir()
+            src.write_bytes(b"value = 1\r\n")
+            new_file = oversize_ws / "tests" / "nested" / "value.txt"
+            snap = WorkspaceBackup.capture_for_execution(str(oversize_ws), runtime_home=rt_home)
+            assert snap.target_paths == []
+            edit = {"path": "src/中文.py", "replacements": [{"old": "value = 1\n", "new": "value = 2\n"}]}
+            for bad_edit in ({"path": "../outside.py", "create": "x"}, {"path": "missing.py", "replacements": [{"old": "x", "new": "y"}]}):
+                try:
+                    apply_edit_reply(snap, json.dumps({"summary": "test", "files": [edit, bad_edit]}))
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError("invalid batch accepted")
+                assert src.read_bytes() == b"value = 1\r\n"
+            apply_edit_reply(snap, json.dumps({"summary": "test", "files": [edit, {"path": "tests/nested/value.txt", "create": "2\n"}]}))
+            assert src.read_bytes() == b"value = 2\r\n" and new_file.read_text() == "2\n"
+            assert snap.finish() and set(snap.changed_paths) == {"src/中文.py", "tests/nested/value.txt"}
+            restored = WorkspaceBackup.load_from_manifest(snap.manifest_path)
+            src.write_text("manual\n")
+            assert not restored.restore_with_report()[0] and new_file.exists()
+            src.write_bytes(b"value = 2\r\n")
+            unrelated = oversize_ws / "other.txt"
+            unrelated.write_text("concurrent")
+            assert restored.restore_with_report()[0]
+            assert src.read_bytes() == b"value = 1\r\n" and not new_file.exists() and unrelated.read_text() == "concurrent"
+            ok("3. 敏感目录防护、未跟踪归档忽略、大项目绑定、跨目录写入、冲突检测与重载后回滚")
 
             # ---------------- 4. 启动鉴权兑换、X-Roundtable-Boot-Id 与 reissue-bootstrap + driver_catalog ----------------
             st_b1, h_b1, d_b1 = await mem_json(app, "", "POST", "/api/auth/bootstrap", {"code": "init_code_123456"})
