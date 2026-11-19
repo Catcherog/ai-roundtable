@@ -1,39 +1,49 @@
-<p align="center"><img src="docs/images/app-icon.png" alt="AI 圆桌图标" width="96" height="96"></p>
+<p align="center"><img src="docs/images/app-icon.png" alt="AI 圆桌图标" width="88" height="88"></p>
 
-# AI 圆桌
+# AI 圆桌 · 好方案，值得一个反对席。
 
-[English](README.en.md) · **简体中文**
+[English](README.en.md) · 简体中文
 
-在 Windows 或 macOS 上，把同一道题交给 1–6 个 AI 席位。你可以让架构师提方案、让审计官找反例，再请工程师给出实施步骤。每个席位都能使用自己的 CLI、模型和推理档位，也能共用一个已登录的账号。
+一个 AI 说「这个方案可行」时，你最想追问什么？在 AI 圆桌，你可以让另一个席位专门回答：**「什么情况下，它会失败？」**
 
-**[下载 Windows x64](https://github.com/Catcherog/ai-roundtable/releases/latest/download/AI-Roundtable-Windows-x64.zip)** · **[下载 macOS Apple 芯片版](https://github.com/Catcherog/ai-roundtable/releases/latest/download/AI-Roundtable-macOS-arm64.zip)** · [使用手册](docs/guide.zh-CN.md) · [版本与校验值](https://github.com/Catcherog/ai-roundtable/releases/latest)
+在 Windows 或 Mac 上，把 1–6 个 AI 席位请到同一张桌上。让一个提案、一个找反例、一个把争论整理成明天能做的事。不用在几个聊天窗口之间搬运答案，也不用为了凑齐一桌去开六个账号。**最后拍板的是你。**
 
-![实际会议。左侧是三个席位对平票规则的发言，右侧白板记录已采纳的约束和仍有争议的问题。](docs/images/roundtable-session.png)
+**[下载 Windows x64 版](https://github.com/Catcherog/ai-roundtable/releases/latest/download/AI-Roundtable-Windows-x64.zip)** · **[下载 Apple 芯片 Mac 版](https://github.com/Catcherog/ai-roundtable/releases/latest/download/AI-Roundtable-macOS-arm64.zip)** · [安装与首次打开](docs/guide.zh-CN.md#安装与首次打开) · [版本与校验值](https://github.com/Catcherog/ai-roundtable/releases/latest)
 
-## 一场会议如何得到可执行的结果
+已有 v4.0.2 会议记录？请先看[升级前的备份提醒](#从-v402-升级)。
 
-上图这场会只问了一件事：「水果投票并列第一，怎么选出唯一赢家？」同一个 Codex CLI 分饰三个角色。架构师建议加投一次，审计官提出必须在开票前公布规则，工程师补充同一场抽签重试时应沿用第一次的结果。最后的规则同时覆盖了平票、公平性和重复执行。
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/roundtable-5.5.1-dark.png">
+  <img src="docs/images/roundtable-5.5.1.png" alt="AI 圆桌 5.5.1 实拍：三个席位就座，已选中方案辩证，输入框里是离线记录与跨设备同步的取舍题。">
+</picture>
 
-| 你想做的事 | 圆桌提供的操作 |
-| --- | --- |
-| 比较方案或审查代码 | 从快速合议、深度研讨、正反辩证、发散收敛、代码审查中选一种。需要追问时用 `@席位名`，要核对源码时用 `@backend/server.py:31-62` 指定行。 |
-| 留下可复查的决议 | 白板分别记录已确认的约束、风险和待执行任务。你可以采纳、修改或取消勾选，再将决议、任务和原始发言导出为 Markdown。 |
-| 把选定的任务交给 AI | 先在「只读预演」查看改动建议。绑定项目后可授权写入，指定执行席位，并配置完成后要运行的验证命令。 |
+## 第一场会，就问一道有取舍的题
 
-## 第一场会
+先在终端确认一个受支持的模型工具（例如 Codex 或 Claude Code）能回答问题。打开圆桌，在「设置 → 席位与模型」给参会席位选好驱动和模型，保存配置。**只有一个已登录的工具也可以分饰多角**；想比较不同模型，再给席位换搭档。
 
-| 平台 | 打开方式 |
-| --- | --- |
-| Windows 10/11 x64 | 完整解压 ZIP，双击 `AI-Roundtable.exe`。包内自带 Python 和 .NET，桌面窗口使用 Edge WebView2。[WebView2 运行时](https://developer.microsoft.com/microsoft-edge/webview2/) |
-| Apple 芯片 Mac | 将 `AI圆桌.app` 拖入「应用程序」。本机需有 Python 3.9 或以上版本。[首次打开说明](docs/guide.zh-CN.md#安装与首次打开) |
+选「方案利弊红蓝辩证包」，粘贴这段话，点「开始研讨」。这道题不用绑定项目：
 
-在终端安装并登录至少一个受支持的 CLI：Antigravity（`agy`）、Codex（`codex`）或 Grok（`grok`）。打开圆桌设置（Windows **Ctrl+,**，Mac **⌘,**），选好阵容、驱动和模型，点击「保存配置」。「实测连通」会发起真实模型请求。回到会议选择「快速合议」，输入议题即可开始。
+> 我们两个人做的待办 App 一周后上线，只够做「离线记录」或「跨设备同步」中的一个。请正反两席各替一个方案辩护，再各说一条会让自己改主意的证据。最后，给我一个明天就能做的验证。
 
-## 技术上怎样做到
+听到两边的理由之后，再追问一句：**「如果首批用户每天都坐没信号的地铁呢？」** 看哪一席会改口、为什么。点「形成决议」，把你认同的判断放上白板，连同仍有分歧的地方一起导出为 Markdown。多席的价值不在票数，而在你能看见每条建议依赖什么假设。
 
-- **同一 CLI 可以并行。** 同一可执行文件的席位共享并发上限，每次独立调用获得单独的临时目录。一次 Mac 实测中，单个 Gemini CLI 的六个真实进程同时运行，六席首轮在 29.3 秒内完成，含汇总共 57.7 秒。[测试条件与记录](docs/verification.md)
-- **断线后能接着看。** 每个会议事件都有递增序号。窗口按最后收到的序号续接，如果缺失的事件超过缓冲区，就重新加载会议快照。消息和白板保存在本机 SQLite 中。
-- **回滚会核对后来的改动。** 写入前为受管文件建立 SHA-256 快照，并对同一工作区加写锁。一般被 Git 忽略的普通文件也受管；未纳入 Git 跟踪的 `output/` 和 `.app` 目录不纳入快照。超过 128 MiB 的项目可以绑定根目录并跨目录编辑文本源码。圆桌写入前会核对原文，仅为本轮目标文件建立快照，目标文件修改前和修改后分别最多 128 MiB。回滚不撤销 Git 提交、远端推送或工作区外的副作用；发现手动编辑冲突时会保留现场。
-- **桌面与模型各自运行。** Windows 使用 WebView2，macOS 使用 WKWebView。界面通过经身份验证的本机回环服务调度 CLI。选用的 CLI 会按自身服务规则把提示词和引用的项目内容发送给模型提供方。
+## 哪些事值得开一桌？
 
-从源码运行或构建见[使用手册](docs/guide.zh-CN.md#源码运行与目录)。[反馈问题](https://github.com/Catcherog/ai-roundtable/issues)
+| 你手边的事 | 试试这样开场 | 散会时带走什么 |
+| --- | --- | --- |
+| 两个方案都说得通 | 「如果只能选一个，哪个判断错了会付出更大代价？」 | 取舍理由、还没验证的假设、一个小实验。 |
+| 准备改代码 | 用 `@文件名:起始行-结束行` 引用实现：「先找会在哪种输入下出错，再讨论怎么改。」 | 有出处的风险和修复任务；可以先做只读预演，再决定是否允许写入。 |
+| 一个界面总让人点错 | 粘贴或拖入截图：「第一次来的人下一步会点哪？请指出画面里的依据。」 | 可以逐条核对的问题清单，而不只是一句「优化体验」。看图需所选模型支持。 |
+
+想先看看一场真实的讨论？[看三席怎样为一次平票定规则](docs/images/roundtable-session.png)：一席建议加投，一席坚持投票前公布规则，第三席提醒重试时不能重新抽签。这是早期版本留下的真实会议截图。
+
+## 下载前知道两件事
+
+- **桌面程序不附送模型或额度。** Windows 10/11 x64：完整解压再打开 `AI-Roundtable.exe`，包内含 Python 和 .NET，需要 Edge WebView2。Apple 芯片 Mac：需要 macOS 12 或更高版本及 Python 3.9+，解压后把 `AI圆桌.app` 拖入「应用程序」。[详细安装说明](docs/guide.zh-CN.md#安装与首次打开)
+- **会议存在本机，不等于模型请求都离线。** 接入云端 CLI 时，议题、附件或引用的代码可能发给对应服务，并使用你的额度。仅讨论不需要绑定项目；要动文件时先用「只读预演」。[配置、执行与回滚](docs/guide.zh-CN.md)
+
+### 从 v4.0.2 升级
+
+**先完全退出应用，备份整个数据目录**：Mac 为 `~/.ai-roundtable/`，Windows 为 `%USERPROFILE%\.ai-roundtable`。5.5.1 在保存时只保留最近 50 场会议；整场重写时只保留最近 500 条发言。删除没有「最近删除」可恢复，受管文件合计超过 128 MiB 的目录也不能绑定。若你依赖旧版的不限量历史、删除恢复或大项目根目录支持，可以[继续用 v4.0.2](https://github.com/Catcherog/ai-roundtable/releases/tag/v4.0.2)。
+
+[使用手册](docs/guide.zh-CN.md) · [源码运行与构建](docs/guide.zh-CN.md#源码运行与目录) · [验证记录](docs/verification.md) · [分享一个值得开圆桌的问题，或反馈使用体验](https://github.com/Catcherog/ai-roundtable/issues)

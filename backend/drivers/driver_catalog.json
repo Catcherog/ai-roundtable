@@ -1,175 +1,1409 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "updated_at": "2026-11-18",
   "canonical_efforts": ["low", "medium", "high", "xhigh", "max"],
+  "subscription_tiers": {
+    "all": {
+      "key": "all",
+      "label": "全部可用模型",
+      "short_label": "全部",
+      "rank": 99,
+      "desc": "展示全目录模型与完整推理档位（不按订阅裁剪，超限档位显示订阅徽标提示）"
+    },
+    "free": {
+      "key": "free",
+      "label": "免费基础 Free",
+      "short_label": "Free",
+      "rank": 0,
+      "desc": "无需付费订阅即可调用的免费模型与本地开源权重（如 Gemini 4 Hydrogen / GPT-6 Luna / Claude Haiku 5.5）"
+    },
+    "plus_pro": {
+      "key": "plus_pro",
+      "label": "标准订阅 Plus · Pro",
+      "short_label": "Plus·Pro",
+      "rank": 1,
+      "desc": "主流 $20–$30/月个人订阅（ChatGPT Plus / Claude Pro / Google AI Pro / X SuperGrok）"
+    },
+    "max_ultra": {
+      "key": "max_ultra",
+      "label": "旗舰满血 Max · Ultra",
+      "short_label": "Max·Ultra",
+      "rank": 2,
+      "desc": "高阶 $100–$200/月旗舰订阅（ChatGPT Pro·Work / Claude Max·Ultra / Google AI Ultra / SuperGrok Heavy）"
+    },
+    "api_local": {
+      "key": "api_local",
+      "label": "API 按量 · 本地开源",
+      "short_label": "API·本地",
+      "rank": 3,
+      "desc": "开发者 API Key 按 Token 计费或本地 Ollama 开源模型直连（无订阅档位封顶限制）"
+    }
+  },
+  "vendor_plans": {
+    "agy": {
+      "provider": "Google Gemini / Antigravity",
+      "plans": [
+        { "key": "auto", "label": "跟随全局订阅档位", "rank": -1 },
+        { "key": "google_free", "label": "Free / AI Plus ($0–$4.99)", "rank": 0 },
+        { "key": "google_pro", "label": "Google AI Pro ($19.99/月)", "rank": 1 },
+        { "key": "google_ultra", "label": "Google AI Ultra / Enterprise ($99.99+)", "rank": 2 },
+        { "key": "google_api", "label": "Gemini API Key 按量计费", "rank": 3 }
+      ]
+    },
+    "codex": {
+      "provider": "OpenAI ChatGPT / Codex",
+      "plans": [
+        { "key": "auto", "label": "跟随全局订阅档位", "rank": -1 },
+        { "key": "openai_free", "label": "ChatGPT Free / Go ($0–$8)", "rank": 0, "effort_cap": "high" },
+        { "key": "openai_plus", "label": "ChatGPT Plus ($20/月 · Codex 含 GPT-6)", "rank": 1 },
+        { "key": "openai_pro", "label": "ChatGPT Pro / Work ($100–$200/月)", "rank": 2 },
+        { "key": "openai_api", "label": "OpenAI API Key 按量计费", "rank": 3 }
+      ]
+    },
+    "claude": {
+      "provider": "Anthropic Claude Code",
+      "plans": [
+        { "key": "auto", "label": "跟随全局订阅档位", "rank": -1 },
+        { "key": "anthropic_free", "label": "Claude Free (Web 基础 · CLI 需 Pro+)", "rank": 0, "effort_cap": "high" },
+        { "key": "anthropic_pro", "label": "Claude Pro ($20/月 · 解锁 Opus/Sonnet 5.5)", "rank": 1 },
+        { "key": "anthropic_max", "label": "Claude Max / Ultra ($100–$200/月 · 解锁 Fable)", "rank": 2 },
+        { "key": "anthropic_api", "label": "Anthropic API Key 按量计费", "rank": 3 }
+      ]
+    },
+    "grok": {
+      "provider": "xAI / SpaceXSI Grok",
+      "plans": [
+        { "key": "auto", "label": "跟随全局订阅档位", "rank": -1 },
+        { "key": "xai_free", "label": "Grok Free / X Plus ($0–$8)", "rank": 0, "effort_cap": "high" },
+        { "key": "xai_supergrok", "label": "X Premium / SuperGrok ($30/月)", "rank": 1 },
+        { "key": "xai_heavy", "label": "X Super·Ultra / SuperGrok Heavy ($100+)", "rank": 2 },
+        { "key": "xai_api", "label": "xAI API Key 按量计费", "rank": 3 }
+      ]
+    },
+    "ollama": {
+      "provider": "本地开源 / 国产云端网关",
+      "plans": [
+        { "key": "auto", "label": "跟随全局订阅档位", "rank": -1 },
+        { "key": "local_open", "label": "Ollama 本地免费开源权重", "rank": 0 },
+        { "key": "cloud_api", "label": "DeepSeek / Qwen / Kimi / GLM API 按量", "rank": 3 }
+      ]
+    }
+  },
   "exclusive_default_models": {
     "gemini-4-carbon": "agy",
     "gemini-4-argon": "agy",
     "gemini-4-hydrogen": "agy",
+    "gemini-pro-orchestrator": "agy",
+    "gemini-pro-orchestrator-argon": "agy",
+    "orchestrator (carbon)": "agy",
+    "orchestrator (argon)": "agy",
     "grok-4.7": "grok",
+    "grok-4.6": "grok",
+    "grok-4.5": "grok",
+    "grok-4.20-multi-agent": "grok",
     "gpt-6-astra": "codex",
     "gpt-6.2-astra": "codex",
     "gpt-6.2-sol": "codex",
-    "gpt-6.1-sol": "codex"
+    "gpt-6.1-sol": "codex",
+    "claude-opus-5-5": "claude",
+    "claude-fable-5-2": "claude",
+    "opusplan": "claude",
+    "qwen-3.8-27b": "ollama",
+    "deepseek-v4-pro": "ollama"
   },
   "drivers": {
     "agy": {
+      "provider": "Google",
       "cli_name": "Antigravity CLI",
       "short_label": "AGY",
       "binary_candidates": ["agy", "antigravity"],
-      "default_model": "gemini-4-carbon",
-      "default_discuss_effort": "high",
-      "default_exec_effort": "high",
       "macos_fallback_paths": [
         "/Applications/Antigravity.app/Contents/Resources/app/bin/agy",
         "/Applications/Antigravity.app/Contents/Resources/app/bin/antigravity",
         "~/Applications/Antigravity.app/Contents/Resources/app/bin/agy"
       ],
+      "default_model": "gemini-4-carbon",
+      "default_discuss_effort": "high",
+      "default_exec_effort": "high",
+      "recommended_models": [
+        "gemini-4-carbon",
+        "gemini-4-argon",
+        "gemini-4-hydrogen",
+        "orchestrator (carbon)"
+      ],
+      "model_groups": [
+        {
+          "key": "gemini-4",
+          "label": "Gemini 4 旗舰系",
+          "badge": "1M Ctx",
+          "desc": "Google 2026 主力多模态推理架构，覆盖深度规划、均衡编码与长思维链",
+          "subgroups": [
+            {
+              "label": "深度架构与均衡编码",
+              "models": ["gemini-4-carbon", "gemini-4-argon"]
+            },
+            {
+              "label": "高通量与 xhigh 长思维",
+              "models": ["gemini-4-hydrogen"]
+            },
+            {
+              "label": "Antigravity 自动编排器（免填档位）",
+              "models": ["orchestrator (carbon)", "orchestrator (argon)"]
+            }
+          ]
+        },
+        {
+          "key": "gemini-3",
+          "label": "Gemini 3.x 高效系",
+          "badge": "极速",
+          "desc": "支持 minimal 极低思考开销与高并发响应的 Flash / Flash-Lite 系列",
+          "subgroups": [
+            {
+              "label": "Gemini 3.8 / 3.6 Flash",
+              "models": ["gemini-3.8-flash", "gemini-3.6-flash"]
+            },
+            {
+              "label": "Flash-Lite 极速与 3.1 Pro",
+              "models": ["gemini-3.5-flash-lite", "gemini-3.1-pro-preview", "gemini-3.1-flash-lite"]
+            }
+          ]
+        },
+        {
+          "key": "agy-claude",
+          "label": "Antigravity 跨源 Claude",
+          "badge": "多源路由",
+          "desc": "通过 Antigravity 宿主网关调用 Anthropic Claude 5 / 4.x 系列",
+          "subgroups": [
+            {
+              "label": "Claude 5.5 / 4.6 网关模型",
+              "models": ["claude-sonnet-5-5", "claude-opus-5-5", "claude-sonnet-4-6", "claude-opus-4-6"]
+            }
+          ]
+        },
+        {
+          "key": "gemini-legacy",
+          "label": "经典兼容归档",
+          "badge": "Legacy",
+          "desc": "Gemini 2.5 旧版兼容标识（官方将于 2026-12 自动迁转至 Gemini 4）",
+          "subgroups": [
+            {
+              "label": "Gemini 2.5 归档",
+              "models": ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
+            }
+          ]
+        }
+      ],
       "models": {
         "gemini-4-carbon": {
-          "supports_effort": true,
+          "label": "Gemini 4 Carbon",
+          "group": "gemini-4",
+          "subgroup": "深度架构与均衡编码",
+          "context": "1M",
+          "tier_min": 2,
+          "plan_badge": "AI Ultra · API",
           "allowed": ["low", "medium", "high"],
           "default": "high",
-          "max": "high"
+          "supports_effort": true,
+          "note": "Google 深度科学/架构旗舰，最高合法档位为 high（不支持 xhigh/max）"
         },
         "gemini-4-argon": {
-          "supports_effort": true,
+          "label": "Gemini 4 Argon",
+          "group": "gemini-4",
+          "subgroup": "深度架构与均衡编码",
+          "context": "1M",
+          "tier_min": 1,
+          "plan_badge": "AI Pro · API",
           "allowed": ["low", "medium", "high"],
           "default": "high",
-          "max": "high"
+          "supports_effort": true,
+          "note": "Google AI Pro 主力多模态与长上下文软件工程模型"
         },
         "gemini-4-hydrogen": {
-          "supports_effort": true,
+          "label": "Gemini 4 Hydrogen",
+          "group": "gemini-4",
+          "subgroup": "高通量与 xhigh 长思维",
+          "context": "1M",
+          "tier_min": 0,
+          "plan_badge": "Free · Plus · Pro",
           "allowed": ["low", "medium", "high", "xhigh"],
           "default": "xhigh",
-          "max": "xhigh"
+          "supports_effort": true,
+          "note": "全订阅开放的高性价比主力模型，独家支持 xhigh 深度思维档"
         },
         "gemini-4-hydrogen*": {
-          "supports_effort": true,
           "allowed": ["low", "medium", "high", "xhigh"],
           "default": "xhigh",
-          "max": "xhigh"
+          "supports_effort": true
         },
         "orchestrator (carbon)": {
-          "supports_effort": false,
+          "label": "Orchestrator (Carbon)",
+          "group": "gemini-4",
+          "subgroup": "Antigravity 自动编排器（免填档位）",
+          "context": "1M",
+          "tier_min": 2,
+          "plan_badge": "AI Ultra",
           "allowed": [],
           "default": "",
-          "max": ""
+          "supports_effort": false,
+          "note": "Antigravity 内置多步编排器，自动托管推理预算（无需传 --effort）"
         },
         "orchestrator (argon)": {
-          "supports_effort": false,
+          "label": "Orchestrator (Argon)",
+          "group": "gemini-4",
+          "subgroup": "Antigravity 自动编排器（免填档位）",
+          "context": "1M",
+          "tier_min": 1,
+          "plan_badge": "AI Pro",
           "allowed": [],
           "default": "",
-          "max": ""
+          "supports_effort": false,
+          "note": "Antigravity Argon 自动编排器（无需传 --effort）"
         },
         "gemini-pro-orchestrator": {
-          "supports_effort": false,
           "allowed": [],
           "default": "",
-          "max": ""
+          "supports_effort": false
         },
         "gemini-pro-orchestrator-argon": {
-          "supports_effort": false,
           "allowed": [],
           "default": "",
-          "max": ""
+          "supports_effort": false
+        },
+        "gemini-3.8-flash": {
+          "label": "Gemini 3.8 Flash",
+          "group": "gemini-3",
+          "subgroup": "Gemini 3.8 / 3.6 Flash",
+          "context": "1M",
+          "tier_min": 0,
+          "plan_badge": "Free · API",
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "gemini-3.6-flash": {
+          "label": "Gemini 3.6 Flash",
+          "group": "gemini-3",
+          "subgroup": "Gemini 3.8 / 3.6 Flash",
+          "context": "1M",
+          "tier_min": 0,
+          "plan_badge": "Free · API",
+          "allowed": ["minimal", "low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true,
+          "note": "支持 minimal 极低思考延迟档"
+        },
+        "gemini-3.5-flash-lite": {
+          "label": "Gemini 3.5 Flash-Lite",
+          "group": "gemini-3",
+          "subgroup": "Flash-Lite 极速与 3.1 Pro",
+          "context": "1M",
+          "tier_min": 0,
+          "plan_badge": "Free · API",
+          "allowed": ["minimal", "low", "medium", "high"],
+          "default": "medium",
+          "supports_effort": true
+        },
+        "gemini-3.1-pro-preview": {
+          "label": "Gemini 3.1 Pro Preview",
+          "group": "gemini-3",
+          "subgroup": "Flash-Lite 极速与 3.1 Pro",
+          "context": "1M",
+          "tier_min": 1,
+          "plan_badge": "AI Pro · API",
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "gemini-3.1-flash-lite": {
+          "label": "Gemini 3.1 Flash-Lite",
+          "group": "gemini-3",
+          "subgroup": "Flash-Lite 极速与 3.1 Pro",
+          "context": "1M",
+          "tier_min": 0,
+          "plan_badge": "Free · API",
+          "allowed": ["minimal", "low", "medium", "high"],
+          "default": "medium",
+          "supports_effort": true
+        },
+        "claude-sonnet-5-5": {
+          "label": "Claude Sonnet 5.5 (AGY)",
+          "group": "agy-claude",
+          "subgroup": "Claude 5.5 / 4.6 网关模型",
+          "context": "1M",
+          "tier_min": 1,
+          "plan_badge": "AI Pro · Ultra",
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "claude-opus-5-5": {
+          "label": "Claude Opus 5.5 (AGY)",
+          "group": "agy-claude",
+          "subgroup": "Claude 5.5 / 4.6 网关模型",
+          "context": "1M",
+          "tier_min": 2,
+          "plan_badge": "AI Ultra",
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "claude-sonnet-4-6": {
+          "label": "Claude Sonnet 4.6 (AGY)",
+          "group": "agy-claude",
+          "subgroup": "Claude 5.5 / 4.6 网关模型",
+          "context": "1M",
+          "tier_min": 1,
+          "plan_badge": "AI Pro · Ultra",
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "claude-opus-4-6": {
+          "label": "Claude Opus 4.6 (AGY)",
+          "group": "agy-claude",
+          "subgroup": "Claude 5.5 / 4.6 网关模型",
+          "context": "1M",
+          "tier_min": 2,
+          "plan_badge": "AI Ultra",
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "gemini-2.5-pro": {
+          "label": "Gemini 2.5 Pro (Legacy)",
+          "group": "gemini-legacy",
+          "subgroup": "Gemini 2.5 归档",
+          "context": "1M",
+          "tier_min": 1,
+          "plan_badge": "Legacy",
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "gemini-2.5-flash": {
+          "label": "Gemini 2.5 Flash (Legacy)",
+          "group": "gemini-legacy",
+          "subgroup": "Gemini 2.5 归档",
+          "context": "1M",
+          "tier_min": 0,
+          "plan_badge": "Legacy",
+          "allowed": ["low", "medium", "high"],
+          "default": "medium",
+          "supports_effort": true
+        },
+        "gemini-2.5-flash-lite": {
+          "label": "Gemini 2.5 Flash-Lite (Legacy)",
+          "group": "gemini-legacy",
+          "subgroup": "Gemini 2.5 归档",
+          "context": "1M",
+          "tier_min": 0,
+          "plan_badge": "Legacy",
+          "allowed": ["low", "medium", "high"],
+          "default": "low",
+          "supports_effort": true
         },
         "gemini-*": {
-          "supports_effort": true,
           "allowed": ["low", "medium", "high"],
           "default": "high",
-          "max": "high"
+          "supports_effort": true
         },
         "claude-*": {
-          "supports_effort": true,
           "allowed": ["low", "medium", "high"],
           "default": "high",
-          "max": "high"
+          "supports_effort": true
         },
         "*": {
-          "supports_effort": true,
           "allowed": ["low", "medium", "high"],
           "default": "high",
-          "max": "high"
-        }
-      }
-    },
-    "grok": {
-      "cli_name": "Grok CLI",
-      "short_label": "Grok",
-      "binary_candidates": ["grok"],
-      "default_model": "grok-4.7",
-      "default_discuss_effort": "xhigh",
-      "default_exec_effort": "xhigh",
-      "macos_fallback_paths": [],
-      "models": {
-        "grok-4.7": {
-          "supports_effort": true,
-          "allowed": ["low", "medium", "high", "xhigh"],
-          "default": "xhigh",
-          "max": "xhigh"
-        },
-        "grok-*": {
-          "supports_effort": true,
-          "allowed": ["low", "medium", "high", "xhigh"],
-          "default": "xhigh",
-          "max": "xhigh"
-        },
-        "*": {
-          "supports_effort": true,
-          "allowed": ["low", "medium", "high", "xhigh"],
-          "default": "xhigh",
-          "max": "xhigh"
+          "supports_effort": true
         }
       }
     },
     "codex": {
+      "provider": "OpenAI",
       "cli_name": "Codex CLI",
       "short_label": "Codex",
       "binary_candidates": ["codex"],
+      "macos_fallback_paths": [
+        "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+        "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
+        "/Applications/ChatGPT.app/Contents/Resources/codex",
+        "/Applications/Codex.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+        "/Applications/Codex.app/Contents/Resources/codex-cli/bin/codex",
+        "/Applications/Codex.app/Contents/Resources/codex",
+        "~/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+        "~/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
+        "~/Applications/ChatGPT.app/Contents/Resources/codex",
+        "~/Applications/Codex.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+        "~/Applications/Codex.app/Contents/Resources/codex-cli/bin/codex",
+        "~/Applications/Codex.app/Contents/Resources/codex"
+      ],
       "default_model": "gpt-6-astra",
       "default_discuss_effort": "max",
       "default_exec_effort": "max",
-      "macos_fallback_paths": [
-        "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
-        "/Applications/ChatGPT.app/Contents/Resources/codex",
-        "/Applications/Codex.app/Contents/Resources/codex",
-        "/Applications/Codex.app/Contents/MacOS/codex",
-        "~/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
-        "~/Applications/Codex.app/Contents/Resources/codex",
-        "~/Applications/Codex.app/Contents/MacOS/codex"
+      "recommended_models": [
+        "gpt-6-astra",
+        "gpt-6.2-astra",
+        "gpt-6.2-sol",
+        "gpt-6.1-sol"
+      ],
+      "model_groups": [
+        {
+          "key": "gpt-6-flagship",
+          "label": "GPT-6.2 / 6 旗舰推理",
+          "badge": "1.05M Ctx",
+          "desc": "OpenAI 2026 满血工程与科研推理旗舰，支持 xhigh / max 深度思维链",
+          "subgroups": [
+            {
+              "label": "Astra 超算旗舰系",
+              "models": ["gpt-6.2-astra", "gpt-6-astra"]
+            },
+            {
+              "label": "Sol 软件工程主力系",
+              "models": ["gpt-6.2-sol", "gpt-6.1-sol", "gpt-6-sol"]
+            }
+          ]
+        },
+        {
+          "key": "gpt-6-efficient",
+          "label": "GPT-6 均衡与极速系",
+          "badge": "高性价比",
+          "desc": "兼顾 1.05M 超长上下文与低成本高吞吐的 Terra / Luna 子系列",
+          "subgroups": [
+            {
+              "label": "Terra / Luna 轻量推理",
+              "models": ["gpt-6.1-terra", "gpt-6-luna"]
+            }
+          ]
+        },
+        {
+          "key": "gpt-5-series",
+          "label": "GPT-5.6 / 5.5 世代",
+          "badge": "Plus·Free",
+          "desc": "广泛覆盖 Free / Go / Plus 订阅配额的稳定推理模型",
+          "subgroups": [
+            {
+              "label": "GPT-5.6 系列",
+              "models": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+            },
+            {
+              "label": "GPT-5.5 / 5.4 系列",
+              "models": ["gpt-5.5", "gpt-5.5-pro", "gpt-5.4", "gpt-5.4-mini"]
+            }
+          ]
+        },
+        {
+          "key": "gpt-special",
+          "label": "安全专项与开源归档",
+          "badge": "Cyber·OSS",
+          "desc": "安全审计专项模型、Apache 2.0 开源权重与经典归档模型",
+          "subgroups": [
+            {
+              "label": "Cyber 安全与 GPT-OSS 开源",
+              "models": ["gpt-6-cyber", "gpt-5.6-cyber", "gpt-oss-120b", "gpt-oss-20b"]
+            },
+            {
+              "label": "经典归档 (2026-12 下线)",
+              "models": ["o3", "gpt-5", "gpt-4.1"]
+            }
+          ]
+        }
       ],
       "models": {
-        "gpt-6-astra": {
-          "supports_effort": true,
-          "allowed": ["low", "medium", "high", "xhigh", "max"],
-          "default": "max",
-          "max": "max"
-        },
         "gpt-6.2-astra": {
           "label": "GPT-6.2 Astra",
-          "supports_effort": true,
+          "group": "gpt-6-flagship",
+          "subgroup": "Astra 超算旗舰系",
+          "context": "1.05M",
+          "tier_min": 2,
+          "plan_badge": "Pro · Work · API",
           "allowed": ["low", "medium", "high", "xhigh", "max"],
           "default": "max",
-          "max": "max"
+          "supports_effort": true,
+          "note": "OpenAI 最强超算推理旗舰（128K 输出，ChatGPT Pro / Work / API 专享）"
+        },
+        "gpt-6-astra": {
+          "label": "GPT-6 Astra",
+          "group": "gpt-6-flagship",
+          "subgroup": "Astra 超算旗舰系",
+          "context": "1.05M",
+          "tier_min": 1,
+          "plan_badge": "Plus(Codex) · Pro",
+          "effort_caps_by_tier": { "plus_pro": "xhigh" },
+          "allowed": ["low", "medium", "high", "xhigh", "max"],
+          "default": "max",
+          "supports_effort": true,
+          "note": "Codex CLI 默认工程主刀模型，支持 low ~ max 五档推理"
         },
         "gpt-6.2-sol": {
           "label": "GPT-6.2 Sol",
-          "supports_effort": true,
+          "group": "gpt-6-flagship",
+          "subgroup": "Sol 软件工程主力系",
+          "context": "1.05M",
+          "tier_min": 1,
+          "plan_badge": "Plus · Pro · API",
+          "effort_caps_by_tier": { "plus_pro": "high" },
           "allowed": ["low", "medium", "high", "xhigh", "max"],
-          "default": "max",
-          "max": "max"
+          "default": "xhigh",
+          "supports_effort": true,
+          "note": "Plus 用户网页端上限 high，Pro / Work / API 解锁 xhigh 与 max"
         },
         "gpt-6.1-sol": {
-          "supports_effort": true,
+          "label": "GPT-6.1 Sol",
+          "group": "gpt-6-flagship",
+          "subgroup": "Sol 软件工程主力系",
+          "context": "1.05M",
+          "tier_min": 1,
+          "plan_badge": "Plus · Pro · API",
           "allowed": ["low", "medium", "high", "xhigh"],
           "default": "xhigh",
-          "max": "xhigh"
+          "supports_effort": true,
+          "note": "稳定代码工程模型，最高档位为 xhigh"
+        },
+        "gpt-6-sol": {
+          "label": "GPT-6 Sol",
+          "group": "gpt-6-flagship",
+          "subgroup": "Sol 软件工程主力系",
+          "context": "1.05M",
+          "tier_min": 1,
+          "plan_badge": "Plus · Pro · API",
+          "effort_caps_by_tier": { "plus_pro": "high" },
+          "allowed": ["low", "medium", "high", "xhigh"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "gpt-6.1-terra": {
+          "label": "GPT-6.1 Terra",
+          "group": "gpt-6-efficient",
+          "subgroup": "Terra / Luna 轻量推理",
+          "context": "1.05M",
+          "tier_min": 1,
+          "plan_badge": "Plus · Pro · API",
+          "allowed": ["low", "medium", "high", "xhigh", "max"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "gpt-6-luna": {
+          "label": "GPT-6 Luna",
+          "group": "gpt-6-efficient",
+          "subgroup": "Terra / Luna 轻量推理",
+          "context": "1.05M",
+          "tier_min": 0,
+          "plan_badge": "Free · Go · API",
+          "effort_caps_by_tier": { "free": "high" },
+          "allowed": ["low", "medium", "high", "xhigh", "max"],
+          "default": "medium",
+          "supports_effort": true,
+          "note": "极低延迟高吞吐推理模型，免费层与轻量订阅直接可用"
+        },
+        "gpt-5.6-sol": {
+          "label": "GPT-5.6 Sol",
+          "group": "gpt-5-series",
+          "subgroup": "GPT-5.6 系列",
+          "context": "400K",
+          "tier_min": 1,
+          "plan_badge": "Plus · Pro",
+          "allowed": ["low", "medium", "high", "xhigh"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "gpt-5.6-terra": {
+          "label": "GPT-5.6 Terra",
+          "group": "gpt-5-series",
+          "subgroup": "GPT-5.6 系列",
+          "context": "400K",
+          "tier_min": 0,
+          "plan_badge": "Free(Codex) · Go",
+          "allowed": ["low", "medium", "high", "xhigh"],
+          "default": "high",
+          "supports_effort": true,
+          "note": "Codex CLI Free / Go 档位默认可用编码模型"
+        },
+        "gpt-5.6-luna": {
+          "label": "GPT-5.6 Luna",
+          "group": "gpt-5-series",
+          "subgroup": "GPT-5.6 系列",
+          "context": "400K",
+          "tier_min": 0,
+          "plan_badge": "Free · Go",
+          "allowed": ["low", "medium", "high"],
+          "default": "medium",
+          "supports_effort": true
+        },
+        "gpt-5.5": {
+          "label": "GPT-5.5",
+          "group": "gpt-5-series",
+          "subgroup": "GPT-5.5 / 5.4 系列",
+          "context": "400K",
+          "tier_min": 1,
+          "plan_badge": "Plus · API",
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "gpt-5.5-pro": {
+          "label": "GPT-5.5 Pro",
+          "group": "gpt-5-series",
+          "subgroup": "GPT-5.5 / 5.4 系列",
+          "context": "400K",
+          "tier_min": 2,
+          "plan_badge": "Pro · API",
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "gpt-5.4": {
+          "label": "GPT-5.4",
+          "group": "gpt-5-series",
+          "subgroup": "GPT-5.5 / 5.4 系列",
+          "context": "400K",
+          "tier_min": 1,
+          "plan_badge": "Plus · API",
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "gpt-5.4-mini": {
+          "label": "GPT-5.4 Mini",
+          "group": "gpt-5-series",
+          "subgroup": "GPT-5.5 / 5.4 系列",
+          "context": "400K",
+          "tier_min": 0,
+          "plan_badge": "Free · API",
+          "allowed": ["low", "medium", "high"],
+          "default": "medium",
+          "supports_effort": true
+        },
+        "gpt-6-cyber": {
+          "label": "GPT-6 Cyber",
+          "group": "gpt-special",
+          "subgroup": "Cyber 安全与 GPT-OSS 开源",
+          "context": "1.05M",
+          "tier_min": 2,
+          "plan_badge": "Trusted · API",
+          "allowed": ["low", "medium", "high", "xhigh"],
+          "default": "high",
+          "supports_effort": true,
+          "note": "防御性安全代码审计与漏洞验证专用模型"
+        },
+        "gpt-5.6-cyber": {
+          "label": "GPT-5.6 Cyber",
+          "group": "gpt-special",
+          "subgroup": "Cyber 安全与 GPT-OSS 开源",
+          "context": "400K",
+          "tier_min": 2,
+          "plan_badge": "Trusted · API",
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "gpt-oss-120b": {
+          "label": "GPT-OSS 120B",
+          "group": "gpt-special",
+          "subgroup": "Cyber 安全与 GPT-OSS 开源",
+          "context": "128K",
+          "tier_min": 0,
+          "plan_badge": "Apache 2.0",
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "gpt-oss-20b": {
+          "label": "GPT-OSS 20B",
+          "group": "gpt-special",
+          "subgroup": "Cyber 安全与 GPT-OSS 开源",
+          "context": "128K",
+          "tier_min": 0,
+          "plan_badge": "Apache 2.0",
+          "allowed": ["low", "medium", "high"],
+          "default": "medium",
+          "supports_effort": true
+        },
+        "o3": {
+          "label": "o3 (Legacy)",
+          "group": "gpt-special",
+          "subgroup": "经典归档 (2026-12 下线)",
+          "context": "200K",
+          "tier_min": 1,
+          "plan_badge": "Legacy",
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "gpt-5": {
+          "label": "GPT-5 (Legacy)",
+          "group": "gpt-special",
+          "subgroup": "经典归档 (2026-12 下线)",
+          "context": "400K",
+          "tier_min": 1,
+          "plan_badge": "Legacy",
+          "allowed": ["minimal", "low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "gpt-4.1": {
+          "label": "GPT-4.1 (Legacy)",
+          "group": "gpt-special",
+          "subgroup": "经典归档 (2026-12 下线)",
+          "context": "1M",
+          "tier_min": 1,
+          "plan_badge": "Legacy",
+          "allowed": [],
+          "default": "",
+          "supports_effort": false
         },
         "*": {
-          "supports_effort": true,
           "allowed": ["low", "medium", "high", "xhigh", "max"],
           "default": "max",
-          "max": "max"
+          "supports_effort": true
+        }
+      }
+    },
+    "claude": {
+      "provider": "Anthropic",
+      "cli_name": "Claude Code CLI",
+      "short_label": "Claude",
+      "binary_candidates": ["claude"],
+      "macos_fallback_paths": [
+        "~/.local/bin/claude",
+        "/opt/homebrew/bin/claude",
+        "/usr/local/bin/claude",
+        "~/.npm-global/bin/claude"
+      ],
+      "default_model": "claude-opus-5-5",
+      "default_discuss_effort": "high",
+      "default_exec_effort": "high",
+      "recommended_models": [
+        "claude-opus-5-5",
+        "claude-fable-5-2",
+        "claude-sonnet-5-5",
+        "opusplan"
+      ],
+      "model_groups": [
+        {
+          "key": "claude-5",
+          "label": "Claude 5 自适应推理系",
+          "badge": "1M Ctx",
+          "desc": "Anthropic 2026 旗舰系，全面搭载 Adaptive Thinking 自适应思考（low ~ max 五档）",
+          "subgroups": [
+            {
+              "label": "Fable / Mythos 超算推理",
+              "models": ["claude-fable-5-2", "claude-fable-5-1", "claude-mythos-5-2"]
+            },
+            {
+              "label": "Opus 5.5 架构与混合编排",
+              "models": ["claude-opus-5-5", "claude-opus-5", "opusplan"]
+            },
+            {
+              "label": "Sonnet / Haiku 5.5 敏捷工程",
+              "models": ["claude-sonnet-5-5", "claude-sonnet-5", "claude-haiku-5-5"]
+            }
+          ]
+        },
+        {
+          "key": "claude-4",
+          "label": "Claude 4.x 稳定生产系",
+          "badge": "稳态兼容",
+          "desc": "注意：4.8/4.7 支持 xhigh，4.6 支持 low/medium/high/max（无 xhigh），4.5 最高 high",
+          "subgroups": [
+            {
+              "label": "Claude Opus 4.8 / 4.7",
+              "models": ["claude-opus-4-8", "claude-opus-4-7"]
+            },
+            {
+              "label": "Claude 4.6（无 xhigh 档）",
+              "models": ["claude-opus-4-6", "claude-sonnet-4-6"]
+            },
+            {
+              "label": "Claude 4.5（200K 经典）",
+              "models": ["claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5"]
+            }
+          ]
+        }
+      ],
+      "models": {
+        "claude-fable-5-2": {
+          "label": "Claude Fable 5.2",
+          "group": "claude-5",
+          "subgroup": "Fable / Mythos 超算推理",
+          "context": "1M",
+          "tier_min": 2,
+          "plan_badge": "Max · Ultra · API",
+          "allowed": ["low", "medium", "high", "xhigh", "max"],
+          "default": "high",
+          "supports_effort": true,
+          "note": "Anthropic 顶尖深度推演旗舰（别名 fable），Max/Ultra/Enterprise 或 API 可用"
+        },
+        "claude-fable-5-1": {
+          "label": "Claude Fable 5.1",
+          "group": "claude-5",
+          "subgroup": "Fable / Mythos 超算推理",
+          "context": "1M",
+          "tier_min": 2,
+          "plan_badge": "Max · Ultra · API",
+          "allowed": ["low", "medium", "high", "xhigh", "max"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "claude-mythos-5-2": {
+          "label": "Claude Mythos 5.2",
+          "group": "claude-5",
+          "subgroup": "Fable / Mythos 超算推理",
+          "context": "1M",
+          "tier_min": 2,
+          "plan_badge": "Ultra · Enterprise",
+          "allowed": ["low", "medium", "high", "xhigh", "max"],
+          "default": "xhigh",
+          "supports_effort": true
+        },
+        "claude-opus-5-5": {
+          "label": "Claude Opus 5.5",
+          "group": "claude-5",
+          "subgroup": "Opus 5.5 架构与混合编排",
+          "context": "1M",
+          "tier_min": 1,
+          "plan_badge": "Pro · Max · API",
+          "effort_caps_by_tier": { "plus_pro": "high" },
+          "allowed": ["low", "medium", "high", "xhigh", "max"],
+          "default": "high",
+          "supports_effort": true,
+          "note": "Claude Code 主力架构与编码模型（别名 opus），Pro 订阅及以上可用"
+        },
+        "claude-opus-5": {
+          "label": "Claude Opus 5",
+          "group": "claude-5",
+          "subgroup": "Opus 5.5 架构与混合编排",
+          "context": "1M",
+          "tier_min": 1,
+          "plan_badge": "Pro · Max · API",
+          "allowed": ["low", "medium", "high", "xhigh", "max"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "opusplan": {
+          "label": "OpusPlan 混合编排",
+          "group": "claude-5",
+          "subgroup": "Opus 5.5 架构与混合编排",
+          "context": "1M",
+          "tier_min": 1,
+          "plan_badge": "Claude Code 专属",
+          "allowed": ["low", "medium", "high", "xhigh", "max"],
+          "default": "high",
+          "supports_effort": true,
+          "note": "规划阶段自动使用 Opus 深度裁定，代码执行阶段切换 Sonnet 提速省配额"
+        },
+        "claude-sonnet-5-5": {
+          "label": "Claude Sonnet 5.5",
+          "group": "claude-5",
+          "subgroup": "Sonnet / Haiku 5.5 敏捷工程",
+          "context": "1M",
+          "tier_min": 1,
+          "plan_badge": "Pro · Max · API",
+          "allowed": ["low", "medium", "high", "xhigh", "max"],
+          "default": "high",
+          "supports_effort": true,
+          "note": "高吞吐工程编码主力（Web 免费可用，Claude Code CLI 需 Pro 或 API）"
+        },
+        "claude-sonnet-5": {
+          "label": "Claude Sonnet 5",
+          "group": "claude-5",
+          "subgroup": "Sonnet / Haiku 5.5 敏捷工程",
+          "context": "1M",
+          "tier_min": 1,
+          "plan_badge": "Pro · API",
+          "allowed": ["low", "medium", "high", "xhigh", "max"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "claude-haiku-5-5": {
+          "label": "Claude Haiku 5.5",
+          "group": "claude-5",
+          "subgroup": "Sonnet / Haiku 5.5 敏捷工程",
+          "context": "1M",
+          "tier_min": 0,
+          "plan_badge": "Free · Pro · API",
+          "allowed": ["low", "medium", "high", "xhigh", "max"],
+          "default": "medium",
+          "supports_effort": true,
+          "note": "极低成本超快响应模型（$0.10/$0.50 MTok）"
+        },
+        "claude-opus-4-8": {
+          "label": "Claude Opus 4.8",
+          "group": "claude-4",
+          "subgroup": "Claude Opus 4.8 / 4.7",
+          "context": "1M",
+          "tier_min": 1,
+          "plan_badge": "Pro · Max · API",
+          "allowed": ["low", "medium", "high", "xhigh", "max"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "claude-opus-4-7": {
+          "label": "Claude Opus 4.7",
+          "group": "claude-4",
+          "subgroup": "Claude Opus 4.8 / 4.7",
+          "context": "1M",
+          "tier_min": 1,
+          "plan_badge": "Pro · Max · API",
+          "allowed": ["low", "medium", "high", "xhigh", "max"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "claude-opus-4-6": {
+          "label": "Claude Opus 4.6",
+          "group": "claude-4",
+          "subgroup": "Claude 4.6（无 xhigh 档）",
+          "context": "1M",
+          "tier_min": 1,
+          "plan_badge": "Pro · Max · API",
+          "allowed": ["low", "medium", "high", "max"],
+          "default": "high",
+          "supports_effort": true,
+          "note": "官方档位为 low / medium / high / max（跳过 xhigh）"
+        },
+        "claude-sonnet-4-6": {
+          "label": "Claude Sonnet 4.6",
+          "group": "claude-4",
+          "subgroup": "Claude 4.6（无 xhigh 档）",
+          "context": "1M",
+          "tier_min": 1,
+          "plan_badge": "Pro · Max · API",
+          "allowed": ["low", "medium", "high", "max"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "claude-opus-4-5": {
+          "label": "Claude Opus 4.5",
+          "group": "claude-4",
+          "subgroup": "Claude 4.5（200K 经典）",
+          "context": "200K",
+          "tier_min": 1,
+          "plan_badge": "Pro · API",
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "claude-sonnet-4-5": {
+          "label": "Claude Sonnet 4.5",
+          "group": "claude-4",
+          "subgroup": "Claude 4.5（200K 经典）",
+          "context": "200K",
+          "tier_min": 1,
+          "plan_badge": "Pro · API",
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "claude-haiku-4-5": {
+          "label": "Claude Haiku 4.5",
+          "group": "claude-4",
+          "subgroup": "Claude 4.5（200K 经典）",
+          "context": "200K",
+          "tier_min": 0,
+          "plan_badge": "Free · API",
+          "allowed": ["low", "medium", "high"],
+          "default": "medium",
+          "supports_effort": true
+        },
+        "*": {
+          "allowed": ["low", "medium", "high", "xhigh", "max"],
+          "default": "high",
+          "supports_effort": true
+        }
+      }
+    },
+    "grok": {
+      "provider": "xAI",
+      "cli_name": "Grok CLI",
+      "short_label": "Grok",
+      "binary_candidates": ["grok"],
+      "macos_fallback_paths": [
+        "~/.grok/bin/grok",
+        "~/.local/bin/grok",
+        "/opt/homebrew/bin/grok",
+        "/usr/local/bin/grok"
+      ],
+      "default_model": "grok-4.7",
+      "default_discuss_effort": "xhigh",
+      "default_exec_effort": "xhigh",
+      "recommended_models": [
+        "grok-4.7",
+        "grok-4.6",
+        "grok-4.20-multi-agent",
+        "grok-4.5"
+      ],
+      "model_groups": [
+        {
+          "key": "grok-4",
+          "label": "Grok 4.x 推理主力",
+          "badge": "500K Ctx",
+          "desc": "xAI (SpaceXSI) 第一性原理压力审计与编码主力模型",
+          "subgroups": [
+            {
+              "label": "Grok 4.7 / 4.6 深度推理",
+              "models": ["grok-4.7", "grok-4.6"]
+            },
+            {
+              "label": "Grok 4.5 标准推理",
+              "models": ["grok-4.5"]
+            }
+          ]
+        },
+        {
+          "key": "grok-multi",
+          "label": "Multi-Agent 协同集群",
+          "badge": "4–16 Agents",
+          "desc": "单轮内部拉起 4–16 个并行推理子代理交叉证伪的 Heavy 旗舰模式",
+          "subgroups": [
+            {
+              "label": "SuperGrok Heavy 多智能体",
+              "models": ["grok-4.20-multi-agent"]
+            }
+          ]
+        }
+      ],
+      "models": {
+        "grok-4.7": {
+          "label": "Grok 4.7",
+          "group": "grok-4",
+          "subgroup": "Grok 4.7 / 4.6 深度推理",
+          "context": "500K",
+          "tier_min": 1,
+          "plan_badge": "SuperGrok · API",
+          "allowed": ["low", "medium", "high", "xhigh"],
+          "default": "xhigh",
+          "supports_effort": true,
+          "note": "xAI 最新旗舰推理模型（500K 上下文，最高 xhigh 档）"
+        },
+        "grok-4.6": {
+          "label": "Grok 4.6",
+          "group": "grok-4",
+          "subgroup": "Grok 4.7 / 4.6 深度推理",
+          "context": "200K+",
+          "tier_min": 1,
+          "plan_badge": "SuperGrok · API",
+          "allowed": ["low", "medium", "high", "xhigh"],
+          "default": "xhigh",
+          "supports_effort": true
+        },
+        "grok-4.5": {
+          "label": "Grok 4.5",
+          "group": "grok-4",
+          "subgroup": "Grok 4.5 标准推理",
+          "context": "200K",
+          "tier_min": 0,
+          "plan_badge": "Free · X Plus · API",
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true,
+          "note": "最高合法档位为 high（传入 xhigh 会自动折算为 high）"
+        },
+        "grok-4.20-multi-agent": {
+          "label": "Grok 4.20 Multi-Agent",
+          "group": "grok-multi",
+          "subgroup": "SuperGrok Heavy 多智能体",
+          "context": "500K",
+          "tier_min": 2,
+          "plan_badge": "X Super·Ultra · Heavy",
+          "allowed": ["low", "medium", "high", "xhigh"],
+          "default": "xhigh",
+          "supports_effort": true,
+          "note": "low/medium 调度 4 子代理，high/xhigh 调度 16 子代理深度协同"
+        },
+        "grok-*": {
+          "allowed": ["low", "medium", "high", "xhigh"],
+          "default": "xhigh",
+          "supports_effort": true
+        },
+        "*": {
+          "allowed": ["low", "medium", "high", "xhigh"],
+          "default": "xhigh",
+          "supports_effort": true
+        }
+      }
+    },
+    "ollama": {
+      "provider": "Open / CN",
+      "cli_name": "Ollama / 开源网关 CLI",
+      "short_label": "Ollama",
+      "binary_candidates": ["ollama"],
+      "macos_fallback_paths": [
+        "/opt/homebrew/bin/ollama",
+        "/usr/local/bin/ollama",
+        "/Applications/Ollama.app/Contents/Resources/ollama"
+      ],
+      "cmd_template": ["{binary}", "run", "{model}", "{prompt}"],
+      "default_model": "qwen-3.8-27b",
+      "default_discuss_effort": "high",
+      "default_exec_effort": "high",
+      "recommended_models": [
+        "deepseek-v4-pro",
+        "qwen-3.8-max",
+        "kimi-k3.1-pro",
+        "qwen-3.8-27b"
+      ],
+      "model_groups": [
+        {
+          "key": "cn-flagship",
+          "label": "DeepSeek / Qwen 旗舰系",
+          "badge": "1M Ctx",
+          "desc": "国产第一梯队大参数 MoE 与本地高密度 Apache/MIT 开源模型",
+          "subgroups": [
+            {
+              "label": "DeepSeek V4 系列",
+              "models": ["deepseek-v4-pro", "deepseek-v4.1-flash"]
+            },
+            {
+              "label": "Alibaba Qwen 3.8 系列",
+              "models": ["qwen-3.8-max", "qwen-3.8-27b", "qwen3-coder"]
+            }
+          ]
+        },
+        {
+          "key": "cn-frontier",
+          "label": "Kimi / GLM / MiMo / MiniMax",
+          "badge": "Agentic",
+          "desc": "长程代码代理与超低成本 1M 上下文推理阵列",
+          "subgroups": [
+            {
+              "label": "Moonshot Kimi K3 系列",
+              "models": ["kimi-k3.1-pro", "kimi-k3.1-pro-highspeed", "kimi-k3"]
+            },
+            {
+              "label": "Z.ai GLM 5.3 系列",
+              "models": ["glm-5.3", "glm-5.3-flash"]
+            },
+            {
+              "label": "Xiaomi MiMo & MiniMax M3",
+              "models": ["mimo-v2.6-pro", "mimo-v2.6-flash", "minimax-m3.1-flash"]
+            }
+          ]
+        },
+        {
+          "key": "global-open",
+          "label": "Mistral / Llama 国际开源",
+          "badge": "Open Weight",
+          "desc": "欧洲与北美主流开放权重推理及代码模型",
+          "subgroups": [
+            {
+              "label": "Mistral 4 & Codestral",
+              "models": ["mistral-large-4", "mistral-small-4", "codestral"]
+            },
+            {
+              "label": "Meta Llama 4 系列",
+              "models": ["llama-4-maverick", "llama-4-scout"]
+            }
+          ]
+        }
+      ],
+      "models": {
+        "deepseek-v4-pro": {
+          "label": "DeepSeek V4 Pro",
+          "group": "cn-flagship",
+          "subgroup": "DeepSeek V4 系列",
+          "context": "1M",
+          "tier_min": 3,
+          "plan_badge": "API · 云端网关",
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true,
+          "note": "1.6T MoE 旗舰推理模型，1M 上下文"
+        },
+        "deepseek-v4.1-flash": {
+          "label": "DeepSeek V4.1 Flash",
+          "group": "cn-flagship",
+          "subgroup": "DeepSeek V4 系列",
+          "context": "1M",
+          "tier_min": 0,
+          "plan_badge": "MIT 开源 · API",
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true,
+          "note": "552B MoE 开源模型，支持 384K 超长思考输出"
+        },
+        "qwen-3.8-max": {
+          "label": "Qwen 3.8 Max",
+          "group": "cn-flagship",
+          "subgroup": "Alibaba Qwen 3.8 系列",
+          "context": "1M",
+          "tier_min": 3,
+          "plan_badge": "API · 百炼",
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true,
+          "note": "2.4T MoE 多模态推理旗舰（qwen-3.8-max-0902）"
+        },
+        "qwen-3.8-27b": {
+          "label": "Qwen 3.8 27B (Local)",
+          "group": "cn-flagship",
+          "subgroup": "Alibaba Qwen 3.8 系列",
+          "context": "262K",
+          "tier_min": 0,
+          "plan_badge": "Local · Apache 2.0",
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true,
+          "note": "Mac Apple Silicon 本地 Ollama 黄金尺寸全能推理模型"
+        },
+        "qwen3-coder": {
+          "label": "Qwen3 Coder",
+          "group": "cn-flagship",
+          "subgroup": "Alibaba Qwen 3.8 系列",
+          "context": "256K",
+          "tier_min": 0,
+          "plan_badge": "Local · API",
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "kimi-k3.1-pro": {
+          "label": "Kimi K3.1 Pro",
+          "group": "cn-frontier",
+          "subgroup": "Moonshot Kimi K3 系列",
+          "context": "1M",
+          "tier_min": 3,
+          "plan_badge": "API · Kimi Code",
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true,
+          "note": "Moonshot 旗舰代理与复杂仓库重构模型"
+        },
+        "kimi-k3.1-pro-highspeed": {
+          "label": "Kimi K3.1 Pro Highspeed",
+          "group": "cn-frontier",
+          "subgroup": "Moonshot Kimi K3 系列",
+          "context": "1M",
+          "tier_min": 3,
+          "plan_badge": "API 高速版",
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "kimi-k3": {
+          "label": "Kimi K3",
+          "group": "cn-frontier",
+          "subgroup": "Moonshot Kimi K3 系列",
+          "context": "1M",
+          "tier_min": 0,
+          "plan_badge": "开源权重 · API",
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "glm-5.3": {
+          "label": "GLM-5.3",
+          "group": "cn-frontier",
+          "subgroup": "Z.ai GLM 5.3 系列",
+          "context": "1M",
+          "tier_min": 3,
+          "plan_badge": "Coding Plan · API",
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "glm-5.3-flash": {
+          "label": "GLM-5.3 Flash",
+          "group": "cn-frontier",
+          "subgroup": "Z.ai GLM 5.3 系列",
+          "context": "1M",
+          "tier_min": 0,
+          "plan_badge": "MIT 开源 · Free",
+          "allowed": ["low", "medium", "high"],
+          "default": "medium",
+          "supports_effort": true
+        },
+        "mimo-v2.6-pro": {
+          "label": "MiMo-V2.6-Pro",
+          "group": "cn-frontier",
+          "subgroup": "Xiaomi MiMo & MiniMax M3",
+          "context": "1M",
+          "tier_min": 3,
+          "plan_badge": "API 超高性价比",
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "mimo-v2.6-flash": {
+          "label": "MiMo-V2.6-Flash",
+          "group": "cn-frontier",
+          "subgroup": "Xiaomi MiMo & MiniMax M3",
+          "context": "1M",
+          "tier_min": 0,
+          "plan_badge": "Free · API",
+          "allowed": ["low", "medium", "high"],
+          "default": "medium",
+          "supports_effort": true
+        },
+        "minimax-m3.1-flash": {
+          "label": "MiniMax M3.1 Flash",
+          "group": "cn-frontier",
+          "subgroup": "Xiaomi MiMo & MiniMax M3",
+          "context": "1M",
+          "tier_min": 3,
+          "plan_badge": "API · 428B MoE",
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "mistral-large-4": {
+          "label": "Mistral Large 4",
+          "group": "global-open",
+          "subgroup": "Mistral 4 & Codestral",
+          "context": "256K",
+          "tier_min": 0,
+          "plan_badge": "Open · API",
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "mistral-small-4": {
+          "label": "Mistral Small 4",
+          "group": "global-open",
+          "subgroup": "Mistral 4 & Codestral",
+          "context": "256K",
+          "tier_min": 0,
+          "plan_badge": "Local · Apache 2.0",
+          "allowed": ["low", "medium", "high"],
+          "default": "medium",
+          "supports_effort": true
+        },
+        "codestral": {
+          "label": "Codestral",
+          "group": "global-open",
+          "subgroup": "Mistral 4 & Codestral",
+          "context": "256K",
+          "tier_min": 0,
+          "plan_badge": "Local · API",
+          "allowed": [],
+          "default": "",
+          "supports_effort": false
+        },
+        "llama-4-maverick": {
+          "label": "Llama 4 Maverick",
+          "group": "global-open",
+          "subgroup": "Meta Llama 4 系列",
+          "context": "1M",
+          "tier_min": 0,
+          "plan_badge": "Open Weight",
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true
+        },
+        "llama-4-scout": {
+          "label": "Llama 4 Scout",
+          "group": "global-open",
+          "subgroup": "Meta Llama 4 系列",
+          "context": "10M",
+          "tier_min": 0,
+          "plan_badge": "Local · Open",
+          "allowed": ["low", "medium", "high"],
+          "default": "medium",
+          "supports_effort": true
+        },
+        "*": {
+          "allowed": ["low", "medium", "high"],
+          "default": "high",
+          "supports_effort": true
         }
       }
     }

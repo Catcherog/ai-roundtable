@@ -6,7 +6,7 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <AssemblyName>AI-Roundtable</AssemblyName>
     <ApplicationIcon>AppIcon.ico</ApplicationIcon>
-    <Version>4.0.2</Version>
+    <Version>5.5.1</Version>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <DebugType>none</DebugType>

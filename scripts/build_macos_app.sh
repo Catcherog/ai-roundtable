@@ -9,7 +9,7 @@ MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RES_DIR="${CONTENTS_DIR}/Resources"
 EMBED_APP_DIR="${RES_DIR}/app"
 
-echo "==> 1. 准备 ${APP_NAME}.app v4.0.2 目录结构..."
+echo "==> 1. 准备 ${APP_NAME}.app 目录结构..."
 rm -rf "${APP_BUNDLE}"
 mkdir -p "${MACOS_DIR}" "${EMBED_APP_DIR}/backend" "${EMBED_APP_DIR}/frontend"
 
@@ -27,7 +27,7 @@ if [ -f "${ROOT_DIR}/macos_app/make_icon.m" ]; then
   mkdir -p "${ICONSET_TMP}"
   MAKE_ICON_BIN="$(mktemp)"
   clang -fobjc-arc -O2 -framework Cocoa "${ROOT_DIR}/macos_app/make_icon.m" -o "${MAKE_ICON_BIN}"
-  "${MAKE_ICON_BIN}" "${ICONSET_TMP}" "${ROOT_DIR}/docs/images/app-icon.png"
+  "${MAKE_ICON_BIN}" "${ICONSET_TMP}" "${ROOT_DIR}/docs/images/app-icon.png" --web-icon "${ROOT_DIR}/frontend/app-icon.png"
   if ! iconutil -c icns "${ICONSET_TMP}" -o "${RES_DIR}/AppIcon.icns" 2>/dev/null; then
     "${MAKE_ICON_BIN}" "${ICONSET_TMP}" --icns "${RES_DIR}/AppIcon.icns"
   fi
@@ -60,9 +60,9 @@ cat > "${CONTENTS_DIR}/Info.plist" <<'PLIST'
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>4.0.2</string>
+  <string>5.5.1</string>
   <key>CFBundleVersion</key>
-  <string>10</string>
+  <string>13</string>
   <key>LSMinimumSystemVersion</key>
   <string>12.0</string>
   <key>NSHighResolutionCapable</key>
@@ -80,4 +80,4 @@ echo "==> 4. 执行 ad-hoc 签名并清理 Quarantine 属性..."
 codesign --force --deep --sign - "${APP_BUNDLE}"
 xattr -cr "${APP_BUNDLE}" 2>/dev/null || true
 
-echo "==> 构建完成: ${APP_BUNDLE} (v4.0.2)"
+echo "==> 构建完成: ${APP_BUNDLE} (v$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${CONTENTS_DIR}/Info.plist"))"

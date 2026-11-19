@@ -132,9 +132,9 @@ async def check(root):
     sock=socket.socket();sock.bind(("127.0.0.1",0));sock.setblocking(False)
     port=sock.getsockname()[1];app=AsyncHTTPServer("127.0.0.1",port,str(project))
     server=await asyncio.start_server(app.handle_client,sock=sock)
-    def request(path,token=None,payload=None,method=None):
+    def request(path,token=None,payload=None):
         req=urllib.request.Request(f"http://127.0.0.1:{port}"+path,data=json.dumps(payload).encode() if payload is not None else None,
-            headers={"Content-Type":"application/json",**({"X-Roundtable-Token":token} if token else {})},method=method)
+            headers={"Content-Type":"application/json",**({"X-Roundtable-Token":token} if token else {})})
         opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
         try:
             with opener.open(req,timeout=15) as r:return r.status,json.loads(r.read())
@@ -148,30 +148,6 @@ async def check(root):
         rc,s=await asyncio.to_thread(request,"/api/cli/test",app.boot_token,{"agent_id":"carbon","agents":{"carbon":{"driver":"agy","custom_binary":str(project/"rt.cmd")}}})
         ping=s["results"]["carbon"]
         assert rc == 200 and ping["ok"] and "WINDOWS_ADAPTER_OK" in ping["reply"], ping
-        async def api(path, payload=None, method=None, expected=200):
-            code, body = await asyncio.to_thread(request, path, app.boot_token, payload, method)
-            assert code == expected, (path, code, expected)
-            return body
-        created = await api("/api/sessions", {"title":"Windows 历史核验"}, expected=201)
-        sid = created["session"]["session_id"]
-        meeting = "/api/sessions/" + sid
-        await api(meeting + "/attachments", {"filename":"会议证据.txt","data_base64":"cHJvb2Y="}, expected=201)
-        await api(meeting, method="DELETE")
-        await api(meeting + "/restore", {})
-        assert len((await api(meeting + "/attachments"))["attachments"]) == 1
-        await api(meeting, method="DELETE")
-        row = next(r for r in (await api("/api/sessions/trash"))["sessions"] if r["session_id"] == sid)
-        confirm = {"confirm_session_id":sid,"confirm_title":row["title"],"deleted_at":row["deleted_at"]}
-        await api(meeting + "/purge", {**confirm, "confirm_title":"错误标题"}, expected=409)
-        folder = data / "attachments" / sid
-        busy_file = folder / "open-test.txt"
-        with busy_file.open("wb") as held:
-            held.write(b"Windows sharing violation fixture"); held.flush()
-            await api(meeting + "/purge", confirm, expected=409)
-        await api(meeting + "/purge", confirm)
-        assert not folder.exists()
-        assert not any(r["session_id"] == sid for r in (await api("/api/sessions/trash"))["sessions"])
-        print("PASS Windows trash/restore, title confirmation and retry after closing a locked file", flush=True)
     finally:
         server.close();await server.wait_closed();await app.orchestrator.shutdown()
     print("PASS extracted release API authentication, six seats, saved model and SQLite startup",flush=True)

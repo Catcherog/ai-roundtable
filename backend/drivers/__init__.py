@@ -42,6 +42,10 @@ def _deep_merge_driver_catalog(base: dict, override: dict) -> dict:
         return merged
     if isinstance(override.get("canonical_efforts"), list) and override["canonical_efforts"]:
         merged["canonical_efforts"] = [str(x) for x in override["canonical_efforts"] if str(x).strip()]
+    if isinstance(override.get("subscription_tiers"), dict):
+        merged.setdefault("subscription_tiers", {}).update(copy.deepcopy(override["subscription_tiers"]))
+    if isinstance(override.get("vendor_plans"), dict):
+        merged.setdefault("vendor_plans", {}).update(copy.deepcopy(override["vendor_plans"]))
     if isinstance(override.get("exclusive_default_models"), dict):
         merged.setdefault("exclusive_default_models", {}).update(
             {str(k): str(v) for k, v in override["exclusive_default_models"].items()}
@@ -60,7 +64,12 @@ def _deep_merge_driver_catalog(base: dict, override: dict) -> dict:
                 cur = drv_dest[dk_norm]
                 for k, v in dv.items():
                     if k == "models" and isinstance(v, dict):
-                        cur.setdefault("models", {}).update(copy.deepcopy(v))
+                        models_dest = cur.setdefault("models", {})
+                        for mk, mv in v.items():
+                            if isinstance(mv, dict) and isinstance(models_dest.get(mk), dict):
+                                models_dest[mk].update(copy.deepcopy(mv))
+                            else:
+                                models_dest[mk] = copy.deepcopy(mv)
                     else:
                         cur[k] = copy.deepcopy(v)
     return merged
@@ -104,12 +113,15 @@ def build_driver_specs_and_capabilities(force: bool = False) -> Tuple[Dict[str, 
 
     for dk, dinfo in (cat.get("drivers") or {}).items():
         specs[dk] = {
+            "provider": dinfo.get("provider", "Custom"),
             "cli_name": dinfo.get("cli_name", f"{dk.upper()} CLI"),
             "short_label": dinfo.get("short_label", dk.upper()),
             "binary_candidates": list(dinfo.get("binary_candidates") or [dk]),
             "default_model": dinfo.get("default_model", ""),
             "default_discuss_effort": dinfo.get("default_discuss_effort", "high"),
             "default_exec_effort": dinfo.get("default_exec_effort", "high"),
+            "recommended_models": list(dinfo.get("recommended_models") or []),
+            "model_groups": copy.deepcopy(dinfo.get("model_groups") or []),
             "cmd_template": dinfo.get("cmd_template"),
         }
         caps[dk] = copy.deepcopy(dinfo.get("models") or {})

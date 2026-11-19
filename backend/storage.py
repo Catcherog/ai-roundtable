@@ -16,12 +16,10 @@ import json
 import os
 import queue
 import sqlite3
-import tempfile
 import threading
 import time
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 
 class RoundtableSQLiteStore:
@@ -47,25 +45,48 @@ class RoundtableSQLiteStore:
     def _configure_connection(self, conn: sqlite3.Connection) -> str:
         conn.isolation_level = None  # 手动显式控制 BEGIN IMMEDIATE / COMMIT
         conn.execute("PRAGMA foreign_keys = ON;")
-        conn.execute("PRAGMA busy_timeout = 5000;")
+        conn.execute("PRAGMA busy_timeout = 15000;")
         force_delete = os.environ.get("AI_ROUNDTABLE_FORCE_DELETE_JOURNAL", "").strip() == "1"
         mode = "DELETE"
         if not force_delete:
-            try:
-                row = conn.execute("PRAGMA journal_mode = WAL;").fetchone()
-                cand = str(row[0] if row else "").strip().upper()
-                if cand == "WAL":
-                    mode = "WAL"
-                    conn.execute("PRAGMA synchronous = NORMAL;")
-            except sqlite3.OperationalError:
-                mode = "DELETE"
+            for attempt in range(3):
+                try:
+                    row = conn.execute("PRAGMA journal_mode = WAL;").fetchone()
+                    cand = str(row[0] if row else "").strip().upper()
+                    if cand == "WAL":
+                        mode = "WAL"
+                        conn.execute("PRAGMA synchronous = NORMAL;")
+                    break
+                except sqlite3.OperationalError:
+                    if attempt < 2:
+                        time.sleep(0.15 * (attempt + 1))
+                    else:
+                        mode = "DELETE"
         if mode != "WAL":
-            conn.execute("PRAGMA journal_mode = DELETE;")
-            conn.execute("PRAGMA synchronous = FULL;")
+            try:
+                conn.execute("PRAGMA journal_mode = DELETE;")
+                conn.execute("PRAGMA synchronous = FULL;")
+            except sqlite3.OperationalError:
+                pass
         return mode
 
+    def _begin_immediate_with_retry(self, conn: sqlite3.Connection) -> None:
+        last_err: Optional[BaseException] = None
+        for attempt in range(4):
+            try:
+                conn.execute("BEGIN IMMEDIATE;")
+                return
+            except sqlite3.OperationalError as exc:
+                last_err = exc
+                if "locked" in str(exc).lower() and attempt < 3:
+                    time.sleep(0.2 * (attempt + 1))
+                    continue
+                raise
+        if last_err is not None:
+            raise last_err
+
     def _init_schema(self, conn: sqlite3.Connection) -> None:
-        conn.execute("BEGIN IMMEDIATE;")
+        self._begin_immediate_with_retry(conn)
         try:
             conn.execute(
                 """
@@ -82,15 +103,10 @@ class RoundtableSQLiteStore:
                     updated_ts REAL NOT NULL,
                     rev INTEGER NOT NULL DEFAULT 0,
                     header_json TEXT NOT NULL,
-                    whiteboard_json TEXT NOT NULL,
-                    deleted_at REAL
+                    whiteboard_json TEXT NOT NULL
                 );
                 """
             )
-            if "deleted_at" not in {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}:
-                conn.execute("ALTER TABLE sessions ADD COLUMN deleted_at REAL")
-            conn.execute("CREATE TABLE IF NOT EXISTS meeting_purges "
-                         "(session_id TEXT PRIMARY KEY, pending INTEGER NOT NULL)")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS session_messages (
@@ -125,13 +141,17 @@ class RoundtableSQLiteStore:
             )
             conn.execute("COMMIT;")
         except Exception:
-            conn.execute("ROLLBACK;")
+            if conn.in_transaction:
+                try:
+                    conn.execute("ROLLBACK;")
+                except Exception:
+                    pass
             raise
 
     def _writer_loop(self) -> None:
         conn: Optional[sqlite3.Connection] = None
         try:
-            conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+            conn = sqlite3.connect(str(self.db_path), timeout=15.0, check_same_thread=False)
             self.journal_mode_active = self._configure_connection(conn)
             self._init_schema(conn)
         except BaseException as exc:
@@ -183,7 +203,7 @@ class RoundtableSQLiteStore:
         err_box: List[BaseException] = []
         self._write_queue.put((fn, done_ev, res_box, err_box))
         if done_ev is not None:
-            done_ev.wait()
+            done_ev.wait(timeout=15.0)
             if err_box:
                 raise err_box[0]
             return res_box[0] if res_box else None
@@ -203,14 +223,10 @@ class RoundtableSQLiteStore:
         self._write_queue.put(None)
         self._writer_thread.join(timeout=3.0)
 
-    @contextmanager
-    def _read_conn(self) -> Iterator[sqlite3.Connection]:
+    def _read_conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), timeout=5.0)
-        try:
-            conn.row_factory = sqlite3.Row
-            yield conn
-        finally:
-            conn.close()
+        conn.row_factory = sqlite3.Row
+        return conn
 
     def migrate_legacy_sessions_json_if_needed(self, legacy_json_path: Path) -> bool:
         """幂等迁移旧版 sessions.json 至单库 SQLite（仅在未迁移且库为空时执行一次）。"""
@@ -232,15 +248,13 @@ class RoundtableSQLiteStore:
 
         def _tx(conn: sqlite3.Connection) -> int:
             imported = 0
-            for item in raw_list:
+            for item in raw_list[-50:]:
                 if not isinstance(item, dict):
                     continue
                 sid = str(item.get("session_id") or "").strip()
                 if not sid:
                     continue
-                if conn.execute("SELECT 1 FROM meeting_purges WHERE session_id=?", (sid,)).fetchone():
-                    continue
-                msgs = list(item.get("messages") or [])
+                msgs = list(item.get("messages") or [])[-500:]
                 wb = dict(item.get("whiteboard") or {})
                 header = {k: v for k, v in item.items() if k not in ("messages", "whiteboard")}
                 upd_ts = float(item.get("updated_ts") or time.time())
@@ -278,24 +292,18 @@ class RoundtableSQLiteStore:
         count = self.submit_write(_tx, wait=True)
         return bool(count)
 
-    def load_all_sessions(self, limit: Optional[int] = None, *, trashed_id: str = "") -> List[dict]:
+    def load_all_sessions(self, limit: int = 50) -> List[dict]:
         """读取持久化会话（按 updated_ts 升序还原，供编排器启动加载）。"""
         with self._read_conn() as rconn:
-            sql = """
+            rows = rconn.execute(
+                """
                 SELECT session_id, updated_ts, rev, header_json, whiteboard_json
                 FROM sessions
-            """
-            if trashed_id:
-                sql += " WHERE deleted_at IS NOT NULL AND session_id = ?"
-                params = [trashed_id]
-            else:
-                sql += " WHERE deleted_at IS NULL"
-                params = []
-            sql += " ORDER BY updated_ts DESC, session_id DESC"
-            if limit is not None:
-                sql += " LIMIT ?"
-                params.append(max(1, int(limit)))
-            rows = rconn.execute(sql, params).fetchall()
+                ORDER BY updated_ts DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
             result: List[dict] = []
             for row in reversed(rows):
                 sid = str(row["session_id"])
@@ -337,14 +345,14 @@ class RoundtableSQLiteStore:
         rewrite_all_messages: bool = False,
         wait: bool = False,
     ) -> None:
-        """Write a completed message or a full checkpoint for one active meeting."""
+        """O(1) 增量写入会话元数据、白板与单条完成消息；必要时支持全量重写单会话消息并裁剪超过 50 个的旧会话。"""
         sid = str(persisted_dict.get("session_id") or "").strip()
         if not sid:
             return
         upd_ts = float(persisted_dict.get("updated_ts") or time.time())
         rev = int(persisted_dict.get("rev") or 0)
         wb = dict(persisted_dict.get("whiteboard") or {})
-        msgs = persisted_dict.get("messages") or []
+        msgs = list(persisted_dict.get("messages") or [])[-500:]
         header = {k: v for k, v in persisted_dict.items() if k not in ("messages", "whiteboard")}
         header_str = json.dumps(header, ensure_ascii=False)
         wb_str = json.dumps(wb, ensure_ascii=False)
@@ -365,9 +373,7 @@ class RoundtableSQLiteStore:
             ]
 
         def _tx(conn: sqlite3.Connection) -> None:
-            if conn.execute("SELECT 1 FROM meeting_purges WHERE session_id=?", (sid,)).fetchone():
-                return
-            written = conn.execute(
+            conn.execute(
                 """
                 INSERT INTO sessions(session_id, updated_ts, rev, header_json, whiteboard_json)
                 VALUES (?, ?, ?, ?, ?)
@@ -376,12 +382,9 @@ class RoundtableSQLiteStore:
                     rev = excluded.rev,
                     header_json = excluded.header_json,
                     whiteboard_json = excluded.whiteboard_json
-                WHERE sessions.deleted_at IS NULL AND sessions.rev <= excluded.rev
                 """,
                 (sid, upd_ts, rev, header_str, wb_str),
             )
-            if not written.rowcount:
-                return
             if single_payload is not None and not rewrite_all_messages:
                 sq, mid, mjson = single_payload
                 conn.execute(
@@ -403,98 +406,23 @@ class RoundtableSQLiteStore:
                     """,
                     [(sid, sq, mid, mjson) for sq, mid, mjson in all_msgs_payload],
                 )
+            conn.execute(
+                """
+                DELETE FROM sessions
+                WHERE session_id NOT IN (
+                    SELECT session_id FROM sessions ORDER BY updated_ts DESC LIMIT 50
+                )
+                """
+            )
+
         self.submit_write(_tx, wait=wait)
 
-    def list_trashed_sessions(self) -> List[dict]:
-        with self._read_conn() as conn:
-            rows = conn.execute(
-                "SELECT s.session_id, s.header_json, s.deleted_at, p.pending FROM sessions s "
-                "LEFT JOIN meeting_purges p ON p.session_id=s.session_id "
-                "WHERE s.deleted_at IS NOT NULL ORDER BY s.deleted_at DESC, s.session_id"
-            )
-            return [{"session_id": r["session_id"], "title": json.loads(r["header_json"]).get("title") or "新会议",
-                     "deleted_at": r["deleted_at"], "purge_pending": bool(r["pending"])} for r in rows]
+    def delete_session(self, session_id: str, *, wait: bool = True) -> None:
+        def _tx(conn: sqlite3.Connection) -> None:
+            conn.execute("DELETE FROM session_messages WHERE session_id = ?", (session_id,))
+            conn.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
 
-    def is_trashed(self, session_id: str) -> bool:
-        with self._read_conn() as conn:
-            return conn.execute("SELECT 1 FROM sessions WHERE session_id = ? AND deleted_at IS NOT NULL",
-                                (session_id,)).fetchone() is not None
-
-    def set_trashed(self, session_id: str, trashed: bool) -> bool:
-        def update(conn):
-            if trashed:
-                return conn.execute(
-                    "UPDATE sessions SET deleted_at = ? WHERE session_id = ? AND deleted_at IS NULL AND NOT EXISTS "
-                    "(SELECT 1 FROM exec_recovery WHERE session_id = ? AND state IN "
-                    "('prepared','running','rolling_back','recovery_required'))",
-                    (time.time(), session_id, session_id)).rowcount
-            return conn.execute("UPDATE sessions SET deleted_at = NULL WHERE session_id = ? AND deleted_at IS NOT NULL "
-                                "AND NOT EXISTS (SELECT 1 FROM meeting_purges WHERE session_id=?)",
-                                (session_id, session_id)).rowcount
-        return bool(self.submit_write(update, wait=True))
-
-    def begin_purge(self, sid: str, title: str, deleted_at: float) -> str:
-        """Commit the confirmation before removing any files. The timestamp identifies this specific trash operation."""
-        def begin(conn):
-            marker = conn.execute("SELECT pending FROM meeting_purges WHERE session_id=?", (sid,)).fetchone()
-            if marker and not marker[0]:
-                return "done"
-            row = conn.execute("SELECT deleted_at, header_json FROM sessions WHERE session_id=?", (sid,)).fetchone()
-            if not row or row[0] is None:
-                return "not_trashed"
-            if row[0] != deleted_at or title != (json.loads(row[1]).get("title") or "新会议"):
-                return "confirmation_mismatch"
-            if conn.execute("SELECT 1 FROM exec_recovery WHERE session_id=? AND state IN "
-                            "('prepared','running','rolling_back','recovery_required')", (sid,)).fetchone():
-                return "pending_workspace_recovery"
-            conn.execute("INSERT OR IGNORE INTO meeting_purges(session_id,pending) VALUES (?,1)", (sid,))
-            return "pending"
-        return self.submit_write(begin, wait=True)
-
-    def pending_purges(self) -> List[str]:
-        with self._read_conn() as conn:
-            return [r[0] for r in conn.execute("SELECT session_id FROM meeting_purges WHERE pending=1")]
-
-    def finish_purge(self, sid: str) -> None:
-        def finish(conn):
-            if not conn.execute("SELECT 1 FROM meeting_purges WHERE session_id=? AND pending=1", (sid,)).fetchone():
-                return
-            # The database writer also serializes edits to any old import file shared by multiple instances.
-            for old in (self.db_path.parent / "sessions.json", self.db_path.parent / "data" / "sessions.json"):
-                if not old.is_file():
-                    continue
-                if old.is_symlink() or old.parent.is_symlink():
-                    raise OSError("旧版历史文件指向外部位置")
-                with old.open(encoding="utf-8") as stream:
-                    source = json.load(stream)
-                rows = source.get("sessions") if isinstance(source, dict) else source
-                if not isinstance(rows, list):
-                    raise ValueError("旧版历史文件格式无法识别")
-                kept = [r for r in rows if not isinstance(r, dict) or r.get("session_id") != sid]
-                if len(kept) == len(rows):
-                    continue
-                if isinstance(source, dict):
-                    source["sessions"] = kept
-                else:
-                    source = kept
-                with tempfile.NamedTemporaryFile("w", prefix="meeting-purge-", suffix=".tmp",
-                                                 dir=old.parent, encoding="utf-8", delete=False) as tmp:
-                    try:
-                        json.dump(source, tmp, ensure_ascii=False)
-                        tmp.flush()
-                        os.fsync(tmp.fileno())
-                    except BaseException:
-                        tmp.close()
-                        Path(tmp.name).unlink(missing_ok=True)
-                        raise
-                try:
-                    os.replace(tmp.name, old)
-                finally:
-                    Path(tmp.name).unlink(missing_ok=True)
-            conn.execute("DELETE FROM sessions WHERE session_id=? AND deleted_at IS NOT NULL", (sid,))
-            conn.execute("DELETE FROM exec_recovery WHERE session_id=?", (sid,))
-            conn.execute("UPDATE meeting_purges SET pending=0 WHERE session_id=?", (sid,))
-        self.submit_write(finish, wait=True)
+        self.submit_write(_tx, wait=wait)
 
     def record_exec_recovery(
         self,
@@ -512,8 +440,6 @@ class RoundtableSQLiteStore:
         now = time.time()
 
         def _tx(conn: sqlite3.Connection) -> None:
-            if conn.execute("SELECT 1 FROM meeting_purges WHERE session_id=?", (session_id,)).fetchone():
-                return
             conn.execute(
                 """
                 INSERT INTO exec_recovery(run_id, session_id, workspace_realpath, backup_dir, state, pgid, updated_ts, meta_json)

@@ -15,7 +15,6 @@ from __future__ import annotations
 import ast
 import asyncio
 import glob
-import heapq
 import json
 import os
 import re
@@ -33,8 +32,7 @@ from .context import (
     count_file_lines_cached,
     invalidate_workspace_index,
     run_index_in_thread,
-    scan_workspace_paths_cached,
-    describe_workspace_file,
+    scan_workspace_index_cached,
 )
 from .domain import (
     ALL_SEAT_IDS,
@@ -50,16 +48,16 @@ from .drivers import (
     terminate_and_reap_process_group,
 )
 from .attachments import SessionAttachmentManager
-from .project_edits import EDIT_INSTRUCTION, protect_project_command
 from .workspace_backup import WorkspaceBackup
 
 
 _CACHED_LOGIN_PATH: Optional[str] = None
 _CACHED_HOST_ENV: Optional[Dict[str, str]] = None
 
-VALID_EFFORT_LEVELS = ("", "none", "low", "medium", "high", "xhigh", "max", "ultra")
+VALID_EFFORT_LEVELS = ("", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 CANONICAL_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
-VALID_DRIVERS = ("auto", "agy", "grok", "codex")
+ORDERED_EFFORT_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")
+VALID_DRIVERS = ("auto", "agy", "grok", "codex", "claude", "ollama")
 
 PERSONA_PRESETS: Dict[str, dict] = {
     "planner": {
@@ -366,8 +364,6 @@ _DRIVER_EXCLUSIVE_DEFAULT_MODELS: Dict[str, str] = {
     "orchestrator (argon)": "agy",
     "grok-4.7": "grok",
     "gpt-6-astra": "codex",
-    "gpt-6.2-astra": "codex",
-    "gpt-6.2-sol": "codex",
     "gpt-6.1-sol": "codex",
 }
 
@@ -425,10 +421,25 @@ AGY_MACOS_FALLBACK_PATHS: List[str] = [
     "~/Applications/Antigravity.app/Contents/Resources/app/bin/agy",
 ]
 
+CLAUDE_MACOS_FALLBACK_PATHS: List[str] = [
+    "~/.local/bin/claude",
+    "/opt/homebrew/bin/claude",
+    "/usr/local/bin/claude",
+    "~/.npm-global/bin/claude",
+]
+
+OLLAMA_MACOS_FALLBACK_PATHS: List[str] = [
+    "/opt/homebrew/bin/ollama",
+    "/usr/local/bin/ollama",
+    "/Applications/Ollama.app/Contents/Resources/ollama",
+]
+
 DRIVER_FALLBACK_PATHS: Dict[str, List[str]] = {
     "agy": AGY_MACOS_FALLBACK_PATHS,
     "grok": [],
     "codex": CODEX_MACOS_FALLBACK_PATHS,
+    "claude": CLAUDE_MACOS_FALLBACK_PATHS,
+    "ollama": OLLAMA_MACOS_FALLBACK_PATHS,
 }
 
 _refresh_declarative_driver_tables()
@@ -485,15 +496,6 @@ _BINARY_FILE_EXTS = {
     ".mp4",
     ".mov",
     ".sqlite",
-    ".sqlite3",
-    ".safetensors",
-    ".gguf",
-    ".ckpt",
-    ".pt",
-    ".pth",
-    ".npy",
-    ".npz",
-    ".parquet",
     ".db",
 }
 
@@ -807,31 +809,38 @@ def list_workspace_files(workspace_dir: str, query: str = "", limit: int = 200) 
 
     q_low = (query or "").strip().lower().lstrip("@")
     cap = max(1, min(int(limit or 200), 400))
-    paths = scan_workspace_paths_cached(
-        real_ws, _IGNORED_PROJECT_DIRS, _BINARY_FILE_EXTS,
-        max_depth=None if q_low else 5,
-        max_scan=None if q_low else 2500,
+    all_items = scan_workspace_index_cached(
+        real_ws,
+        _IGNORED_PROJECT_DIRS,
+        _BINARY_FILE_EXTS,
+        max_depth=5,
+        max_scan=2500,
     )
+
+    total_count = len(all_items)
     if q_low:
-        def matches():
-            for path in paths:
-                lower = path.lower()
-                if q_low in lower:
-                    name = lower.rsplit("/", 1)[-1]
-                    rank = 0 if name.startswith(q_low) else 1 if q_low in name else 2
-                    yield rank, len(lower), lower, path
-        matched = [match[-1] for match in heapq.nsmallest(cap, matches())]
+        scored: List[Tuple[int, str, dict]] = []
+        for item in all_items:
+            p_low = item["path"].lower()
+            base_low = os.path.basename(p_low)
+            if base_low.startswith(q_low):
+                scored.append((0, p_low, item))
+            elif q_low in base_low:
+                scored.append((1, p_low, item))
+            elif q_low in p_low:
+                scored.append((2, p_low, item))
+        scored.sort(key=lambda x: (x[0], len(x[1]), x[1]))
+        matched = [x[2] for x in scored[:cap]]
     else:
-        matched = paths[:cap]
-    files = [entry for rel in matched if (entry := describe_workspace_file(real_ws, rel)) is not None]
+        matched = all_items[:cap]
 
     return {
         "ok": True,
         "bound": True,
         "is_git": is_git_workspace(real_ws),
         "workspace_dir": real_ws,
-        "files": files,
-        "total": len(paths),
+        "files": matched,
+        "total": total_count,
     }
 
 
@@ -965,29 +974,6 @@ def build_file_outline_skeleton(rel_path: str, all_lines: List[str]) -> str:
     return skeleton[:8000]
 
 
-def _read_source_window(stream, first: int, last: int, budget: int) -> Tuple[List[str], int]:
-    """Read a line range with bounded memory even when one training record spans gigabytes."""
-    lines = []
-    number = 1
-    seen = 0
-    at_line_start = True
-    while number <= last and budget > 0:
-        part = stream.readline(65536)
-        if not part:
-            break
-        seen = number
-        if number >= first:
-            if at_line_start:
-                lines.append("")
-            piece = part.removesuffix("\n")[:budget]
-            lines[-1] += piece
-            budget -= len(piece) + int(at_line_start)
-        at_line_start = part.endswith("\n")
-        if at_line_start:
-            number += 1
-    return lines, seen
-
-
 def validate_referenced_files_snapshot(
     workspace_dir: str,
     reference_texts: str,
@@ -1024,16 +1010,16 @@ def validate_referenced_files_snapshot(
         if not os.path.isfile(cand_path):
             errors.append(f"{raw_tok}（工作区内未找到该文件，请核对相对路径）")
             continue
-        if os.path.splitext(cand_path)[1].lower() in _BINARY_FILE_EXTS:
-            errors.append(f"{raw_tok}（源码引用需要文本文件）")
-            continue
         try:
             with open(cand_path, "r", encoding="utf-8", errors="replace") as rf:
-                if start_s:
-                    lo_ln = max(1, min(int(start_s), int(end_s or start_s)))
-                    _, seen = _read_source_window(rf, lo_ln, lo_ln, 1)
-                    if lo_ln > seen:
-                        errors.append(f"{raw_tok}（文件共 {seen} 行，起始行 L{lo_ln} 超出范围）")
+                all_lines = rf.read().splitlines()
+            total_lines = len(all_lines)
+            if start_s:
+                s_ln = int(start_s)
+                e_ln = int(end_s) if end_s else s_ln
+                lo_ln = min(s_ln, e_ln)
+                if total_lines == 0 or lo_ln > total_lines:
+                    errors.append(f"{raw_tok}（文件共 {total_lines} 行，起始行 L{lo_ln} 超出范围）")
         except Exception as exc:
             errors.append(f"{raw_tok}（读取快照失败：{exc}）")
     return errors
@@ -1076,28 +1062,14 @@ def extract_referenced_files_context(
             continue
 
         try:
-            ext = os.path.splitext(rel_raw)[1].lstrip(".")
-            if "." + ext.lower() in _BINARY_FILE_EXTS:
-                continue
-            # Keep the existing indexed outline for ordinary source files. Stream large datasets by range.
-            streamed = os.path.getsize(cand_path) > 8 * 1024 * 1024
             with open(cand_path, "r", encoding="utf-8", errors="replace") as rf:
-                if streamed:
-                    first = max(1, int(start_s or 1))
-                    last = max(1, int(end_s)) if end_s else first + max_lines_per_file - 1
-                    first, last = sorted((first, last))
-                    all_lines, _ = _read_source_window(rf, first, last, eff_file_cap)
-                else:
-                    all_lines = rf.read().splitlines()
-
+                all_lines = rf.read().splitlines()
             total_lines = len(all_lines)
-            if not all_lines:
+            if total_lines == 0:
                 continue
-            if streamed:
-                body_txt = "\n".join(f"L{i}: {line}" for i, line in enumerate(all_lines, first))
-                block = (f"【引用源码 @{rel_raw}（大文件节选 L{first}–L{first + total_lines - 1}，可指定其他行号）】\n"
-                         f"```{ext}\n{body_txt[:eff_file_cap]}\n```")
-            elif start_s:
+
+            ext = os.path.splitext(rel_raw)[1].lstrip(".")
+            if start_s:
                 s_ln = max(1, int(start_s))
                 if end_s:
                     e_ln = int(end_s)
@@ -1383,10 +1355,10 @@ def get_model_effort_spec(driver_key: str, model: str = "", help_text: str = "")
             "max": "",
         }
 
-    allowed = [e for e in CANONICAL_EFFORT_LEVELS if e in matched_spec["allowed"]]
+    allowed = [e for e in ORDERED_EFFORT_LEVELS if e in matched_spec["allowed"]]
     if drv == "agy" and help_text and "--effort" in help_text:
         filtered = [
-            e for e in allowed if (e in ("low", "medium", "high") or e in help_text)
+            e for e in allowed if (e in ("minimal", "low", "medium", "high") or e in help_text)
         ]
         if filtered:
             allowed = filtered
@@ -1432,10 +1404,10 @@ def normalize_model_effort(
         return spec["default"]
     if e in allowed:
         return e
-    if e in CANONICAL_EFFORT_LEVELS:
-        req_idx = CANONICAL_EFFORT_LEVELS.index(e)
+    if e in ORDERED_EFFORT_LEVELS:
+        req_idx = ORDERED_EFFORT_LEVELS.index(e)
         lower_or_eq = [
-            cand for cand in allowed if CANONICAL_EFFORT_LEVELS.index(cand) <= req_idx
+            cand for cand in allowed if cand in ORDERED_EFFORT_LEVELS and ORDERED_EFFORT_LEVELS.index(cand) <= req_idx
         ]
         return lower_or_eq[-1] if lower_or_eq else allowed[0]
     return spec["default"]
@@ -1468,18 +1440,27 @@ async def list_workspace_files_async(workspace_dir: str, query: str = "", limit:
 
 def export_model_effort_catalog() -> dict:
     _refresh_declarative_driver_tables()
-    """导出前端可直接消费的「CLI 驱动 + 模型名」推理档位能力表与驱动默认参数。"""
+    """导出前端可直接消费的「CLI 驱动 + 模型名」推理档位能力表、分级目录与订阅档位矩阵。"""
+    raw_cat = load_driver_catalog()
     drivers_info: Dict[str, dict] = {}
     for drv, dspec in DRIVER_SPECS.items():
         drivers_info[drv] = {
+            "provider": dspec.get("provider", "Custom"),
             "cli_name": dspec["cli_name"],
+            "short_label": dspec.get("short_label", drv.upper()),
             "default_model": dspec["default_model"],
             "default_discuss_effort": dspec["default_discuss_effort"],
             "default_exec_effort": dspec["default_exec_effort"],
+            "recommended_models": dspec.get("recommended_models", []),
+            "model_groups": dspec.get("model_groups", []),
             "models": MODEL_EFFORT_CAPABILITIES.get(drv, {}),
         }
     return {
+        "schema_version": raw_cat.get("schema_version", 2),
         "canonical_efforts": list(CANONICAL_EFFORT_LEVELS),
+        "ordered_efforts": list(ORDERED_EFFORT_LEVELS),
+        "subscription_tiers": raw_cat.get("subscription_tiers", {}),
+        "vendor_plans": raw_cat.get("vendor_plans", {}),
         "exclusive_default_models": dict(_DRIVER_EXCLUSIVE_DEFAULT_MODELS),
         "drivers": drivers_info,
     }
@@ -1549,28 +1530,8 @@ def classify_cli_error(
     combined = "\n".join(parts).strip()
     low = combined.lower()
     stderr_summary = (stderr.strip() or raw_err.strip())[:2400]
-    rc_label = str(exit_code) if exit_code is not None else "未知"
+    rc_label = str(exit_code) if exit_code is not None else "0"
     looks_like_usage_dump = "usage:" in low or "options:" in low
-
-    if not is_timeout and ("model_not_found" in low or "model is not supported when using codex" in low):
-        return CLIInvocationError(
-            f"{cli_label} 当前账号无法调用模型「{model or '所选模型'}」，请在设置中选择此账号支持的模型。",
-            error_kind="unsupported_effort_or_model", exit_code=exit_code, stderr=stderr_summary,
-            driver=driver_key, model=model, effort=effort,
-        )
-
-    capacity_error = any(marker in low for marker in (
-        "no capacity available for model", "model capacity exhausted", "servers are experiencing high traffic",
-    ))
-    unavailable_503 = re.search(r"\b(?:http(?:/\d\.\d)?\s+503|(?:status|code)\s*[:= ]\s*503|503\s*[: -]?\s*service unavailable)\b", low)
-    if not is_timeout and (capacity_error or unavailable_503):
-        reason = "暂时没有可用容量" if capacity_error else "服务暂时不可用"
-        code = "（503）" if re.search(r"\b503\b", low) else ""
-        return CLIInvocationError(
-            f"{cli_label} 的模型服务{reason}{code}。可稍后按原配置重试。",
-            error_kind="service_unavailable", exit_code=exit_code, stderr=stderr_summary,
-            driver=driver_key, model=model, effort=effort,
-        )
 
     if is_timeout or any(
         k in low for k in ("timed out", "etimedout", "deadline exceeded", "request timeout")
@@ -1805,13 +1766,13 @@ class AgentRoleConfig:
         self.title = PERSONA_PRESETS[self.persona]["short_tag"]
 
     def preferred_driver_key(self) -> str:
-        if self.driver in ("agy", "grok", "codex"):
+        if self.driver in DRIVER_SPECS:
             return self.driver
         return DEFAULT_SEAT_DRIVERS.get(self.agent_id, "agy")
 
     def detect_primary_binary(self) -> Optional[str]:
         drv = self.preferred_driver_key()
-        spec = DRIVER_SPECS[drv]
+        spec = DRIVER_SPECS.get(drv) or DRIVER_SPECS["agy"]
         return resolve_binary(
             spec["binary_candidates"],
             self.custom_binary,
@@ -1831,7 +1792,10 @@ class AgentRoleConfig:
             return pref, primary_bin, False
 
         if allow_single_cli_fallback or self.driver == "auto":
-            for cand_drv in ("agy", "codex", "grok"):
+            fallback_order = ["agy", "codex", "claude", "grok"] + [
+                k for k in DRIVER_SPECS.keys() if k not in ("agy", "codex", "claude", "grok")
+            ]
+            for cand_drv in fallback_order:
                 if cand_drv == pref:
                     continue
                 alt_bin = detect_driver_binary(cand_drv)
@@ -1875,6 +1839,8 @@ class RuntimeSettings:
     roster_preset: str = "role_experts"
     single_cli_concurrency: int = 3
     post_exec_verify_cmd: str = ""
+    subscription_tier: str = "all"
+    vendor_subscriptions: Dict[str, str] = field(default_factory=dict)
     agents: Dict[str, AgentRoleConfig] = field(default_factory=dict)
     _status_cache: Optional[Dict[str, dict]] = field(default=None, repr=False)
     _status_cache_ts: float = field(default=0.0, repr=False)
@@ -1896,7 +1862,7 @@ class RuntimeSettings:
         preset_key = self.roster_preset if self.roster_preset in ROSTER_NAME_PRESETS else "role_experts"
         if preset_key == "auto_driver":
             drv = eff_drv or (cfg.preferred_driver_key() if cfg else "agy")
-            short_drv = {"agy": "AGY", "grok": "Grok", "codex": "Codex"}.get(drv, drv.upper())
+            short_drv = DRIVER_SPECS.get(drv, {}).get("short_label") or {"agy": "AGY", "grok": "Grok", "codex": "Codex", "claude": "Claude", "ollama": "Ollama"}.get(drv, drv.upper())
             pspec = get_persona_spec(persona_key or (cfg.persona if cfg else ""), fallback_agent_id=agent_id)
             return f"{short_drv}·{pspec['short_tag']}"
         preset_names = ROSTER_NAME_PRESETS[preset_key].get("names") or {}
@@ -2010,7 +1976,10 @@ class RuntimeSettings:
         _refresh_declarative_driver_tables()
         found: List[dict] = []
         seen_families: Set[str] = set()
-        for drv_k in ("agy", "codex", "grok"):
+        ordered_drvs = ["agy", "codex", "claude", "grok"] + [
+            k for k in DRIVER_SPECS.keys() if k not in ("agy", "codex", "claude", "grok")
+        ]
+        for drv_k in ordered_drvs:
             spec = DRIVER_SPECS.get(drv_k)
             if not spec:
                 continue
@@ -2021,7 +1990,7 @@ class RuntimeSettings:
             if fam_k in seen_families:
                 continue
             seen_families.add(fam_k)
-            prov_name, cli_disp = DRIVER_PROVIDER_LABELS.get(drv_k, ("Custom", spec["cli_name"]))
+            prov_name, cli_disp = DRIVER_PROVIDER_LABELS.get(drv_k, (spec.get("provider", "Custom"), spec["cli_name"]))
             found.append({
                 "driver": drv_k,
                 "cli_name": cli_disp,
@@ -2277,7 +2246,6 @@ class WarmAntigravityProcess:
         self.sandbox = sandbox
         self.proc: Optional[asyncio.subprocess.Process] = None
         self._supervised = None
-        self._stderr_task = None
         self._call_tmp = ""
         self.turn_count: int = 0
         self._lock = asyncio.Lock()
@@ -2322,7 +2290,6 @@ class WarmAntigravityProcess:
                 stderr=asyncio.subprocess.PIPE, limit=4 * 1024 * 1024,
             )
             self.proc = self._supervised.proc
-            self._stderr_task = asyncio.create_task(_read_stderr_tail(self.proc.stderr))
         except BaseException:
             await self.close()
             raise
@@ -2358,14 +2325,14 @@ class WarmAntigravityProcess:
                         turn_finished = True
                         err_msg = ""
                         rc: Optional[int] = None
-                        if self._stderr_task is not None:
-                            err_msg = await self._stderr_task
+                        if self.proc.stderr:
+                            err_msg = (await self.proc.stderr.read()).decode("utf-8", errors="replace").strip()
                         try:
                             rc = await asyncio.wait_for(self.proc.wait(), timeout=1.0)
                         except Exception:
                             rc = self.proc.returncode
                         await self.close()
-                        if not emitted or rc not in (0, None):
+                        if not emitted:
                             raise classify_cli_error(
                                 "agy",
                                 raw_err=err_msg,
@@ -2419,8 +2386,11 @@ class WarmAntigravityProcess:
                     elif etype == "result":
                         turn_finished = True
                         res = evt.get("result", {})
-                        if res.get("status") not in ("SUCCESS", None):
-                            raw_res_err = str(res.get("error") or res.get("response") or f"Antigravity 状态异常: {res.get('status')}")
+                        if not emitted and res.get("response"):
+                            emitted = True
+                            yield {"type": "delta", "text": res["response"]}
+                        if res.get("status") not in ("SUCCESS", None) and not emitted:
+                            raw_res_err = str(res.get("error") or f"Antigravity 状态异常: {res.get('status')}")
                             raise classify_cli_error(
                                 "agy",
                                 raw_err=raw_res_err,
@@ -2429,9 +2399,6 @@ class WarmAntigravityProcess:
                                 model=self.model,
                                 effort=self.effort,
                             )
-                        if not emitted and res.get("response"):
-                            emitted = True
-                            yield {"type": "delta", "text": res["response"]}
                         break
 
                 if emitted:
@@ -2442,51 +2409,13 @@ class WarmAntigravityProcess:
 
     async def close(self) -> None:
         handle, temp = self._supervised, self._call_tmp
-        stderr_task, self._stderr_task = self._stderr_task, None
         self._supervised, self._call_tmp, self.proc = None, "", None
         self.turn_count = 0
         try:
             if handle is not None:
                 await terminate_and_reap_process_group(handle)
         finally:
-            if stderr_task is not None:
-                stderr_task.cancel()
-                await asyncio.gather(stderr_task, return_exceptions=True)
             UnifiedAgentRunner._cleanup_isolated_call_tmp(temp)
-
-
-class _BinarySlots:
-    """Share a live concurrency limit across all calls to one executable."""
-
-    def __init__(self, limit: int):
-        self.limit = limit
-        self.active = 0
-        self.changed = asyncio.Event()
-
-    def set_limit(self, limit: int) -> None:
-        if self.limit != limit:
-            self.limit = limit
-            self.changed.set()
-
-    def locked(self) -> bool:
-        return self.active >= self.limit
-
-    async def acquire(self) -> None:
-        while self.locked():
-            self.changed.clear()
-            await self.changed.wait()
-        self.active += 1
-
-    def release(self) -> None:
-        self.active -= 1
-        self.changed.set()
-
-    async def __aenter__(self):
-        await self.acquire()
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        self.release()
 
 
 class UnifiedAgentRunner:
@@ -2507,7 +2436,7 @@ class UnifiedAgentRunner:
         self._last_seen_msg_idx: Dict[Tuple[str, str], int] = {}
         self._last_persona_by_seat: Dict[Tuple[str, str], str] = {}
         self._injected_refs: Dict[Tuple[str, str], Set[str]] = {}
-        self._binary_semaphores: Dict[str, _BinarySlots] = {}
+        self._binary_semaphores: Dict[Tuple[str, int], asyncio.Semaphore] = {}
         self._active_raw_procs: Dict[Tuple[str, str], Set[asyncio.subprocess.Process]] = {}
         self._active_supervised_handles: Dict[Tuple[str, str], Set[SupervisedProcessHandle]] = {}
 
@@ -2516,17 +2445,19 @@ class UnifiedAgentRunner:
             self.attachments = SessionAttachmentManager()
         return self.attachments
 
-    def refresh_binary_limits(self) -> None:
-        for slots in self._binary_semaphores.values():
-            slots.set_limit(self.settings.single_cli_concurrency)
-
-    def _get_binary_semaphore(self, binary_path: str) -> _BinarySlots:
+    def _get_binary_semaphore(self, binary_path: str, stateless_shared: bool = False) -> asyncio.Semaphore:
         real_key = os.path.realpath(binary_path) if (binary_path and "://" not in binary_path and os.path.lexists(binary_path)) else binary_path
-        slots = self._binary_semaphores.get(real_key)
-        if slots is None:
-            slots = _BinarySlots(self.settings.single_cli_concurrency)
-            self._binary_semaphores[real_key] = slots
-        return slots
+        cap = (
+            max(1, min(6, int(getattr(self.settings, "single_cli_concurrency", 3) or 3)))
+            if stateless_shared
+            else 4
+        )
+        key = (real_key, cap)
+        sem = self._binary_semaphores.get(key)
+        if sem is None:
+            sem = asyncio.Semaphore(cap)
+            self._binary_semaphores[key] = sem
+        return sem
 
     @staticmethod
     def _prepare_isolated_call_env(session_id: str, agent_id: str) -> Tuple[Dict[str, str], str]:
@@ -2660,7 +2591,7 @@ class UnifiedAgentRunner:
         base_cfg = self.settings.agents[agent_id]
         if isinstance(override, dict) and override:
             drv = str(override.get("driver", base_cfg.driver) or base_cfg.driver).strip().lower()
-            if drv not in ("auto", "agy", "grok", "codex"):
+            if drv not in VALID_DRIVERS:
                 drv = base_cfg.driver
             custom_bin = (
                 str(override.get("custom_binary", base_cfg.custom_binary) or "").strip()
@@ -3288,7 +3219,7 @@ class UnifiedAgentRunner:
     async def ping_agent(
         self,
         agent_id: str,
-        timeout_sec: Optional[float] = None,
+        timeout_sec: float = 75.0,
         override: Optional[dict] = None,
     ) -> dict:
         start_ts = time.perf_counter()
@@ -3400,98 +3331,134 @@ class UnifiedAgentRunner:
             effort=cfg.discussion_effort,
             help_text=help_text,
         )
-        timeout_sec = (
-            float(timeout_sec) if timeout_sec is not None
-            else float(max(30, min(3600, self.settings.turn_timeout_sec)))
-        )
-        sem = self._get_binary_semaphore(bpath)
-        queue_started = time.perf_counter()
-        request_started = None
-        error = None
-        reply = ""
-        timeout_phase = ""
-
-        async def collect_reply() -> None:
-            stream = self._stream_raw_cli(
-                session_id=f"ping_{agent_id}_{time.time_ns()}",
-                agent_id=agent_id,
-                driver_key=eff_drv,
-                binary_path=bpath,
-                help_text=help_text,
-                model=eff_model,
-                effort=eff_effort,
-                prompt=prompt,
-                use_warm=False,
-                cwd_override=ping_cwd,
-                discuss_readonly=True,
-            )
-            try:
-                async for ev in stream:
-                    if ev.get("type") == "delta" and ev.get("text"):
-                        chunks.append(ev["text"])
-            finally:
-                await stream.aclose()
-
+        sem = self._get_binary_semaphore(bpath, stateless_shared=is_fb)
         try:
-            # Queueing and the actual request each get a bounded wait. A queued
-            # seat receives its full configured request budget after admission.
-            await asyncio.wait_for(sem.acquire(), timeout=timeout_sec)
-            request_started = time.perf_counter()
-            await asyncio.wait_for(collect_reply(), timeout=timeout_sec)
+            async def _collect() -> None:
+                async with sem:
+                    async for ev in self._stream_raw_cli(
+                        session_id=f"ping_{agent_id}_{int(time.time() * 1000)}",
+                        agent_id=agent_id,
+                        driver_key=eff_drv,
+                        binary_path=bpath,
+                        help_text=help_text,
+                        model=eff_model,
+                        effort=eff_effort,
+                        prompt=prompt,
+                        use_warm=False,
+                        cwd_override=ping_cwd,
+                        discuss_readonly=True,
+                    ):
+                        if ev.get("type") == "delta" and ev.get("text"):
+                            chunks.append(ev["text"])
+
+            await asyncio.wait_for(_collect(), timeout=timeout_sec)
+            elapsed_ms = int((time.perf_counter() - start_ts) * 1000)
             reply = "".join(chunks).strip()
             if not reply:
-                error = classify_cli_error(
-                    eff_drv, stderr="CLI exited 0 with empty stdout.", exit_code=0,
-                    model=eff_model, effort=eff_effort,
+                empty_err = classify_cli_error(
+                    eff_drv,
+                    raw_err="",
+                    stderr="CLI exited 0 with empty stdout.",
+                    exit_code=0,
+                    model=eff_model,
+                    effort=eff_effort,
                 )
+                return {
+                    "agent_id": agent_id,
+                    "ok": False,
+                    "binary_path": bpath,
+                    "driver": eff_drv,
+                    "shared_fallback": is_fb,
+                    "model": eff_model,
+                    "effort": eff_effort,
+                    "supports_effort": spec.get("supports_effort", True),
+                    "elapsed_ms": elapsed_ms,
+                    "reply": "",
+                    "error_kind": empty_err.error_kind,
+                    "stderr": empty_err.stderr,
+                    "exit_code": empty_err.exit_code,
+                    "error": str(empty_err),
+                }
+            return {
+                "agent_id": agent_id,
+                "ok": True,
+                "binary_path": bpath,
+                "driver": eff_drv,
+                "shared_fallback": is_fb,
+                "model": eff_model,
+                "effort": eff_effort,
+                "supports_effort": spec.get("supports_effort", True),
+                "elapsed_ms": elapsed_ms,
+                "reply": reply[:120],
+                "error_kind": "",
+                "stderr": "",
+                "exit_code": 0,
+                "error": "",
+            }
         except asyncio.TimeoutError:
-            timeout_phase = "queue" if request_started is None else "request"
-            duration = f"{timeout_sec:g}"
-            if timeout_phase == "queue":
-                message = f"连通测试等待同一引擎的空闲通道超过 {duration} 秒。请点击「重测此席位」。"
-            else:
-                label = DRIVER_SPECS.get(eff_drv, {}).get("cli_name", eff_drv)
-                progress = "已收到部分回复，仍未完成" if "".join(chunks).strip() else "未收到模型正文"
-                message = (
-                    f"{label} 请求等待 {duration} 秒，{progress}"
-                    f"（模型 {eff_model or '默认'} · 档位 {eff_effort or '默认'}）。"
-                    "请点击「重测此席位」按当前配置重试。"
-                )
-            error = CLIInvocationError(
-                message, error_kind="queue_timeout" if timeout_phase == "queue" else "timeout",
-                stderr=f"Connectivity {timeout_phase} timeout ({duration}s)",
-                driver=eff_drv, model=eff_model, effort=eff_effort,
+            t_err = classify_cli_error(
+                eff_drv,
+                is_timeout=True,
+                timeout_sec=timeout_sec,
+                model=eff_model,
+                effort=eff_effort,
             )
-            reply = "".join(chunks).strip()
+            return {
+                "agent_id": agent_id,
+                "binary_path": bpath,
+                "driver": eff_drv,
+                "shared_fallback": is_fb,
+                "model": eff_model,
+                "effort": eff_effort,
+                "supports_effort": spec.get("supports_effort", True),
+                "ok": False,
+                "elapsed_ms": int((time.perf_counter() - start_ts) * 1000),
+                "reply": "".join(chunks).strip()[:120],
+                "error_kind": t_err.error_kind,
+                "stderr": t_err.stderr,
+                "exit_code": t_err.exit_code,
+                "error": str(t_err),
+            }
         except CLIInvocationError as exc:
-            error = exc
+            return {
+                "agent_id": agent_id,
+                "ok": False,
+                "binary_path": bpath,
+                "driver": eff_drv,
+                "shared_fallback": is_fb,
+                "model": eff_model,
+                "effort": eff_effort,
+                "supports_effort": spec.get("supports_effort", True),
+                "elapsed_ms": int((time.perf_counter() - start_ts) * 1000),
+                "reply": "",
+                "error_kind": exc.error_kind,
+                "stderr": exc.stderr,
+                "exit_code": exc.exit_code,
+                "error": str(exc),
+            }
         except Exception as exc:
-            error = classify_cli_error(eff_drv, raw_err=str(exc), model=eff_model, effort=eff_effort)
-        finally:
-            if request_started is not None:
-                sem.release()
-
-        finished = time.perf_counter()
-        return {
-            "agent_id": agent_id,
-            "ok": error is None,
-            "binary_path": bpath,
-            "driver": eff_drv,
-            "shared_fallback": is_fb,
-            "model": eff_model,
-            "effort": eff_effort,
-            "supports_effort": spec.get("supports_effort", True),
-            "elapsed_ms": int((finished - start_ts) * 1000),
-            "queue_ms": int(((request_started or finished) - queue_started) * 1000),
-            "request_elapsed_ms": int((finished - request_started) * 1000) if request_started else 0,
-            "timeout_sec": timeout_sec,
-            "timeout_phase": timeout_phase,
-            "reply": reply[:120],
-            "error_kind": error.error_kind if error else "",
-            "stderr": error.stderr if error else "",
-            "exit_code": error.exit_code if error else 0,
-            "error": str(error) if error else "",
-        }
+            c_err = classify_cli_error(
+                eff_drv,
+                raw_err=str(exc),
+                model=eff_model,
+                effort=eff_effort,
+            )
+            return {
+                "agent_id": agent_id,
+                "ok": False,
+                "binary_path": bpath,
+                "driver": eff_drv,
+                "shared_fallback": is_fb,
+                "model": eff_model,
+                "effort": eff_effort,
+                "supports_effort": spec.get("supports_effort", True),
+                "elapsed_ms": int((time.perf_counter() - start_ts) * 1000),
+                "reply": "",
+                "error_kind": c_err.error_kind,
+                "stderr": c_err.stderr,
+                "exit_code": c_err.exit_code,
+                "error": str(c_err),
+            }
 
     async def stream_discussion_turn(
         self,
@@ -3611,7 +3578,7 @@ class UnifiedAgentRunner:
         chunks: List[str] = []
         bound_ws, real_ws = is_real_bound_workspace(eff_ws)
         discuss_cwd = real_ws if bound_ws else self._discussion_sandbox_cwd()
-        sem = self._get_binary_semaphore(bpath)
+        sem = self._get_binary_semaphore(bpath, stateless_shared=use_stateless)
 
         is_unlimited = bool(ov and ov.get("unlimited_timeout"))
         raw_idle = int(getattr(self.settings, "idle_timeout_sec", DEFAULT_IDLE_TIMEOUT_SEC) or DEFAULT_IDLE_TIMEOUT_SEC)
@@ -3860,21 +3827,10 @@ class UnifiedAgentRunner:
                         staged_prompt = f"{att_blk}\n\n{prompt}"
                 final_cmd = build_cmd_fn(staged_prompt, staged_imgs)
                 handle = await spawn_supervised_cli(final_cmd, cwd=cwd, env=env, stdin=stdin)
-                self._register_raw_proc(seat_key, handle.proc)
-                stderr_task = asyncio.create_task(_read_stderr_tail(handle.proc.stderr))
-                return handle, call_tmp, staged_prompt, stderr_task
+                return handle, call_tmp, staged_prompt
             except BaseException:
                 self._cleanup_isolated_call_tmp(call_tmp)
                 raise
-
-        async def close_call(handle, call_tmp, stderr_task):
-            self._unregister_raw_proc(seat_key, handle.proc)
-            try:
-                await terminate_and_reap_process_group(handle, handle.proc)
-            finally:
-                stderr_task.cancel()
-                await asyncio.gather(stderr_task, return_exceptions=True)
-                self._cleanup_isolated_call_tmp(call_tmp)
 
         if driver_key == "agy":
             supports_stream_json = "stream-json" in help_text or "--output-format" in help_text
@@ -3949,7 +3905,6 @@ class UnifiedAgentRunner:
                     if isinstance(warm_exc, CLIInvocationError) and warm_exc.error_kind in (
                         "unsupported_effort_or_model",
                         "quota_rate_limit",
-                        "service_unavailable",
                         "auth_expired",
                         "timeout",
                     ):
@@ -3971,8 +3926,9 @@ class UnifiedAgentRunner:
                     c.extend(["--effort", agy_effort])
                 return c
 
-            sup_handle, call_tmp_dir, _, stderr_task = await spawn_call_with_attachments(_build_agy_cmd, asyncio.subprocess.DEVNULL)
+            sup_handle, call_tmp_dir, _ = await spawn_call_with_attachments(_build_agy_cmd, asyncio.subprocess.DEVNULL)
             proc = sup_handle.proc
+            self._register_raw_proc(seat_key, proc)
             try:
                 assert proc.stdout is not None
                 emitted = False
@@ -4020,14 +3976,11 @@ class UnifiedAgentRunner:
                                     yield {"type": "status", "detail": act}
                             elif evt.get("event") == "result":
                                 res = evt.get("result", {})
-                                if res.get("status") not in ("SUCCESS", None):
-                                    stream_err = str(res.get("error") or res.get("response") or f"Antigravity 状态异常: {res.get('status')}")
-                                    if res.get("error") or res.get("response"):
-                                        raise classify_cli_error("agy", raw_err=stream_err, exit_code=proc.returncode,
-                                                                 model=model, effort=agy_effort)
-                                elif not emitted and res.get("response"):
+                                if not emitted and res.get("response"):
                                     emitted = True
                                     yield {"type": "delta", "text": res["response"]}
+                                if res.get("status") not in ("SUCCESS", None) and not emitted:
+                                    stream_err = str(res.get("error") or f"Antigravity 状态异常: {res.get('status')}")
                         except json.JSONDecodeError:
                             if not line_s.startswith("warning:"):
                                 emitted = True
@@ -4042,7 +3995,7 @@ class UnifiedAgentRunner:
 
                 rc = await proc.wait()
                 if rc != 0 or stream_err or not emitted:
-                    err_txt = await stderr_task
+                    err_txt = (await proc.stderr.read()).decode("utf-8", errors="replace").strip() if proc.stderr else ""
                     raise classify_cli_error(
                         "agy",
                         raw_err=stream_err,
@@ -4054,7 +4007,9 @@ class UnifiedAgentRunner:
                 yield {"type": "terminal", "ok": True}
                 return
             finally:
-                await close_call(sup_handle, call_tmp_dir, stderr_task)
+                self._unregister_raw_proc(seat_key, proc)
+                await terminate_and_reap_process_group(sup_handle, proc)
+                self._cleanup_isolated_call_tmp(call_tmp_dir)
 
         if driver_key == "grok":
             grok_eff = normalize_model_effort("grok", model=model, effort=effort, help_text=help_text)
@@ -4081,8 +4036,9 @@ class UnifiedAgentRunner:
             def _build_grok_cmd(eff_p: str, _imgs: List[str]) -> List[str]:
                 return [*cmd[:2], eff_p, *cmd[3:]]
 
-            sup_handle, call_tmp_dir, _, stderr_task = await spawn_call_with_attachments(_build_grok_cmd, asyncio.subprocess.DEVNULL)
+            sup_handle, call_tmp_dir, _ = await spawn_call_with_attachments(_build_grok_cmd, asyncio.subprocess.DEVNULL)
             proc = sup_handle.proc
+            self._register_raw_proc(seat_key, proc)
             try:
                 assert proc.stdout is not None
                 emitted = False
@@ -4173,7 +4129,7 @@ class UnifiedAgentRunner:
 
                 rc = await proc.wait()
                 if rc != 0 or stream_err or not emitted:
-                    err_txt = await stderr_task
+                    err_txt = (await proc.stderr.read()).decode("utf-8", errors="replace").strip() if proc.stderr else ""
                     raise classify_cli_error(
                         "grok",
                         raw_err=stream_err,
@@ -4185,19 +4141,157 @@ class UnifiedAgentRunner:
                 yield {"type": "terminal", "ok": True}
                 return
             finally:
-                await close_call(sup_handle, call_tmp_dir, stderr_task)
+                self._unregister_raw_proc(seat_key, proc)
+                await terminate_and_reap_process_group(sup_handle, proc)
+                self._cleanup_isolated_call_tmp(call_tmp_dir)
 
-        existing_tid = self._codex_threads.get(seat_key) if use_warm else None
-        codex_eff = normalize_model_effort("codex", model=model, effort=effort, help_text=help_text)
-        def _build_codex_or_ext_cmd(eff_p: str, imgs: List[str]) -> List[str]:
-            if driver_key != "codex" and DRIVER_SPECS.get(driver_key, {}).get("cmd_template"):
-                tpl = DRIVER_SPECS[driver_key]["cmd_template"]
+        if driver_key == "claude":
+            claude_eff = normalize_model_effort("claude", model=model, effort=effort, help_text=help_text)
+            supports_stream_json = "stream-json" in help_text or "--output-format" in help_text
+
+            def _build_claude_cmd(eff_p: str, _imgs: List[str]) -> List[str]:
+                c = [binary_path, "-p", eff_p]
+                if supports_stream_json:
+                    c.extend(["--output-format", "stream-json"])
+                    if "--verbose" in help_text:
+                        c.append("--verbose")
+                if model and "--model" in help_text:
+                    c.extend(["--model", model])
+                if claude_eff and "--effort" in help_text:
+                    c.extend(["--effort", claude_eff])
+                if discuss_readonly:
+                    if "--tools" in help_text:
+                        c.extend(["--tools", "Read,Grep,Glob,LS"])
+                    elif "--permission-mode" in help_text:
+                        c.extend(["--permission-mode", "plan"])
+                return c
+
+            sup_handle, call_tmp_dir, _ = await spawn_call_with_attachments(_build_claude_cmd, asyncio.subprocess.DEVNULL)
+            proc = sup_handle.proc
+            self._register_raw_proc(seat_key, proc)
+            try:
+                assert proc.stdout is not None
+                emitted = False
+                stream_err = ""
+                if supports_stream_json:
+                    while True:
+                        line_b = await proc.stdout.readline()
+                        if not line_b:
+                            break
+                        line_s = line_b.decode("utf-8", errors="replace").strip()
+                        if not line_s:
+                            continue
+                        try:
+                            evt = json.loads(line_s)
+                        except json.JSONDecodeError:
+                            emitted = True
+                            yield {"type": "delta", "text": line_s + "\n"}
+                            continue
+                        etype = str(evt.get("type") or "")
+                        if etype in ("content_block_delta", "text_delta"):
+                            delta_obj = evt.get("delta") if isinstance(evt.get("delta"), dict) else {}
+                            txt_s = str(delta_obj.get("text") or evt.get("text") or "")
+                            if txt_s:
+                                emitted = True
+                                yield {"type": "delta", "text": txt_s}
+                        elif etype == "assistant":
+                            msg_obj = evt.get("message") if isinstance(evt.get("message"), dict) else {}
+                            c_blocks = msg_obj.get("content") if isinstance(msg_obj.get("content"), list) else []
+                            joined = "".join(
+                                str(b.get("text") or "")
+                                for b in c_blocks
+                                if isinstance(b, dict) and b.get("type") == "text"
+                            )
+                            if joined and not emitted:
+                                emitted = True
+                                yield {"type": "delta", "text": joined}
+                        elif etype == "result":
+                            if evt.get("is_error"):
+                                stream_err = str(evt.get("result") or evt.get("error") or "Claude CLI error")
+                            elif not emitted and evt.get("result"):
+                                emitted = True
+                                yield {"type": "delta", "text": str(evt["result"])}
+                        elif etype == "error":
+                            stream_err = str(evt.get("message") or evt.get("error") or stream_err)
+                else:
+                    while True:
+                        chunk = await proc.stdout.read(256)
+                        if not chunk:
+                            break
+                        emitted = True
+                        yield {"type": "delta", "text": chunk.decode("utf-8", errors="replace")}
+                rc = await proc.wait()
+                if rc != 0 or stream_err or not emitted:
+                    err_txt = (await proc.stderr.read()).decode("utf-8", errors="replace").strip() if proc.stderr else ""
+                    raise classify_cli_error(
+                        "claude",
+                        raw_err=stream_err,
+                        stderr=err_txt,
+                        exit_code=rc,
+                        model=model,
+                        effort=claude_eff,
+                    )
+                yield {"type": "terminal", "ok": True}
+                return
+            finally:
+                self._unregister_raw_proc(seat_key, proc)
+                await terminate_and_reap_process_group(sup_handle, proc)
+                self._cleanup_isolated_call_tmp(call_tmp_dir)
+
+        if driver_key != "codex" and DRIVER_SPECS.get(driver_key, {}).get("cmd_template"):
+            tpl = DRIVER_SPECS[driver_key]["cmd_template"]
+            uses_prompt_placeholder = any("{prompt}" in str(t) for t in tpl)
+
+            def _build_tpl_cmd(eff_p: str, _imgs: List[str]) -> List[str]:
                 return [
                     str(tok).format(binary=binary_path, model=model, effort=effort, prompt=eff_p, cwd=cwd)
                     for tok in tpl
                 ]
+
+            sup_handle, call_tmp_dir, eff_stdin_p = await spawn_call_with_attachments(
+                _build_tpl_cmd,
+                asyncio.subprocess.DEVNULL if uses_prompt_placeholder else asyncio.subprocess.PIPE,
+            )
+            proc = sup_handle.proc
+            self._register_raw_proc(seat_key, proc)
+            try:
+                if not uses_prompt_placeholder and proc.stdin is not None:
+                    proc.stdin.write(eff_stdin_p.encode("utf-8"))
+                    await proc.stdin.drain()
+                    proc.stdin.close()
+                assert proc.stdout is not None
+                emitted = False
+                while True:
+                    chunk = await proc.stdout.read(256)
+                    if not chunk:
+                        break
+                    txt_c = chunk.decode("utf-8", errors="replace")
+                    if txt_c:
+                        emitted = True
+                        yield {"type": "delta", "text": txt_c}
+                rc = await proc.wait()
+                if rc != 0 or not emitted:
+                    err_txt = (await proc.stderr.read()).decode("utf-8", errors="replace").strip() if proc.stderr else ""
+                    raise classify_cli_error(
+                        driver_key,
+                        raw_err="",
+                        stderr=err_txt,
+                        exit_code=rc,
+                        model=model,
+                        effort=effort,
+                    )
+                yield {"type": "terminal", "ok": True}
+                return
+            finally:
+                self._unregister_raw_proc(seat_key, proc)
+                await terminate_and_reap_process_group(sup_handle, proc)
+                self._cleanup_isolated_call_tmp(call_tmp_dir)
+
+        existing_tid = self._codex_threads.get(seat_key) if use_warm else None
+        codex_eff = normalize_model_effort("codex", model=model, effort=effort, help_text=help_text)
+        def _build_codex_or_ext_cmd(eff_p: str, imgs: List[str]) -> List[str]:
             c = [binary_path, "exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only"]
-            if codex_eff in CANONICAL_EFFORT_LEVELS:
+            if codex_eff in ORDERED_EFFORT_LEVELS:
                 c.extend(["-c", f'model_reasoning_effort="{codex_eff}"'])
             if model:
                 c.extend(["-m", model])
@@ -4212,10 +4306,11 @@ class UnifiedAgentRunner:
             c.append("-")
             return c
 
-        sup_handle, call_tmp_dir, eff_stdin_prompt, stderr_task = await spawn_call_with_attachments(
+        sup_handle, call_tmp_dir, eff_stdin_prompt = await spawn_call_with_attachments(
             _build_codex_or_ext_cmd, asyncio.subprocess.PIPE
         )
         proc = sup_handle.proc
+        self._register_raw_proc(seat_key, proc)
         try:
             assert proc.stdin is not None and proc.stdout is not None
             proc.stdin.write(eff_stdin_prompt.encode("utf-8"))
@@ -4298,7 +4393,7 @@ class UnifiedAgentRunner:
             # A startup warning is also emitted as an item of type "error". A
             # completed turn with a real assistant message confirms recovery.
             if rc != 0 or turn_failed or not emitted or (stream_err and not (turn_completed and completed_item_count)):
-                stderr_txt = await stderr_task
+                stderr_txt = (await proc.stderr.read()).decode("utf-8", errors="replace").strip() if proc.stderr else ""
                 raise classify_cli_error(
                     driver_key,
                     raw_err=stream_err,
@@ -4309,7 +4404,9 @@ class UnifiedAgentRunner:
                 )
             yield {"type": "terminal", "ok": True}
         finally:
-            await close_call(sup_handle, call_tmp_dir, stderr_task)
+            self._unregister_raw_proc(seat_key, proc)
+            await terminate_and_reap_process_group(sup_handle, proc)
+            self._cleanup_isolated_call_tmp(call_tmp_dir)
 
     @staticmethod
     async def _collect_git_diff_async(cwd: str) -> str:
@@ -4351,7 +4448,6 @@ class UnifiedAgentRunner:
         persona_key: str = "",
         session_id: str = "",
         on_pgid_spawned=None,
-        file_edits: bool = False,
     ) -> AsyncGenerator[dict, None]:
         """
         多席位动态主刀实时流式执行引擎：
@@ -4362,9 +4458,6 @@ class UnifiedAgentRunner:
         cfg, bpath, help_text, eff_drv, is_fb = self._require_binary(target_aid)
         pspec = get_persona_spec(persona_key or cfg.persona, fallback_agent_id=target_aid)
         cwd = self._effective_workspace_cwd(session_workspace)
-        # In a large project only the roundtable backend publishes the proposed text changes.
-        if file_edits:
-            allow_workspace_write = False
 
         raw_wb_items = whiteboard.get("items")
         chair_c_list = [str(x).strip() for x in (whiteboard.get("chair_constraints") or []) if str(x).strip()]
@@ -4444,9 +4537,7 @@ class UnifiedAgentRunner:
         )
         risks_block = "\n".join(risk_pts) if risk_pts else "- 注意边界输入、并发竞争与异常回退保护"
 
-        if file_edits:
-            mode_instruction = EDIT_INSTRUCTION
-        elif allow_workspace_write:
+        if allow_workspace_write:
             mode_instruction = "（当前已授权写入本地项目工作区：请严格围绕已确认共识与已勾选任务直接修改或创建目标项目文件，并运行必要的语法/单测校验，完成后总结改动清单与验证结果）"
         elif has_real_project:
             mode_instruction = "（当前为只读安全预演模式：请勿改动磁盘文件，严格围绕已确认共识与已勾选任务输出完整详尽的实施方案与关键 Unified Diff 代码补丁预览）"
@@ -4510,6 +4601,31 @@ class UnifiedAgentRunner:
                             cmd.append("--sandbox")
                         elif "--mode" in help_text and "plan" in help_text and "--disable-slash-commands" not in help_text:
                             cmd.extend(["--mode", "plan"])
+                elif eff_drv == "claude":
+                    claude_eff = normalize_model_effort("claude", model=cand_model, effort=cand_effort, help_text=help_text)
+                    cmd = [bpath, "-p", exec_prompt]
+                    if "stream-json" in help_text or "--output-format" in help_text:
+                        cmd.extend(["--output-format", "stream-json"])
+                        if "--verbose" in help_text:
+                            cmd.append("--verbose")
+                    if cand_model.strip() and "--model" in help_text:
+                        cmd.extend(["--model", cand_model.strip()])
+                    if claude_eff and "--effort" in help_text:
+                        cmd.extend(["--effort", claude_eff])
+                    if allow_workspace_write:
+                        if "--permission-mode" in help_text:
+                            cmd.extend(["--permission-mode", "acceptEdits"])
+                    else:
+                        if "--tools" in help_text:
+                            cmd.extend(["--tools", "Read,Grep,Glob,LS"])
+                        elif "--permission-mode" in help_text:
+                            cmd.extend(["--permission-mode", "plan"])
+                elif DRIVER_SPECS.get(eff_drv, {}).get("cmd_template"):
+                    tpl = DRIVER_SPECS[eff_drv]["cmd_template"]
+                    cmd = [
+                        str(tok).format(binary=bpath, model=cand_model, effort=cand_effort, prompt=exec_prompt, cwd=cwd)
+                        for tok in tpl
+                    ]
                 else:
                     grok_eff = normalize_model_effort("grok", model=cand_model, effort=cand_effort, help_text=help_text)
                     cmd = [bpath, "-p", exec_prompt]
@@ -4533,7 +4649,7 @@ class UnifiedAgentRunner:
                         cmd = list(cmd)
                         cmd[2] = f"{att_b}\n\n{exec_prompt}"
                 sup_handle = await spawn_supervised_cli(
-                    protect_project_command(cmd, cwd) if file_edits else cmd,
+                    cmd,
                     cwd=cwd,
                     env=exec_env,
                     stdin=asyncio.subprocess.DEVNULL,
@@ -4590,6 +4706,37 @@ class UnifiedAgentRunner:
                                     if not collected and res.get("response"):
                                         collected.append(res["response"])
                                         yield {"type": "exec_delta", "text": res["response"]}
+                                continue
+                            except json.JSONDecodeError:
+                                pass
+                        elif eff_drv == "claude" and stripped_s.startswith("{"):
+                            try:
+                                evt = json.loads(stripped_s)
+                                ctype = str(evt.get("type") or "")
+                                if ctype in ("content_block_delta", "text_delta"):
+                                    d_obj = evt.get("delta") if isinstance(evt.get("delta"), dict) else {}
+                                    ctxt = str(d_obj.get("text") or evt.get("text") or "")
+                                    if ctxt:
+                                        collected.append(ctxt)
+                                        yield {"type": "exec_delta", "text": ctxt}
+                                elif ctype == "assistant" and not collected:
+                                    msg_o = evt.get("message") if isinstance(evt.get("message"), dict) else {}
+                                    c_blks = msg_o.get("content") if isinstance(msg_o.get("content"), list) else []
+                                    joined_c = "".join(
+                                        str(b.get("text") or "")
+                                        for b in c_blks
+                                        if isinstance(b, dict) and b.get("type") == "text"
+                                    )
+                                    if joined_c:
+                                        collected.append(joined_c)
+                                        yield {"type": "exec_delta", "text": joined_c}
+                                elif ctype == "result":
+                                    if evt.get("is_error"):
+                                        stream_err = str(evt.get("result") or evt.get("error") or "Claude CLI error")
+                                    elif not collected and evt.get("result"):
+                                        r_txt = str(evt["result"])
+                                        collected.append(r_txt)
+                                        yield {"type": "exec_delta", "text": r_txt}
                                 continue
                             except json.JSONDecodeError:
                                 pass
@@ -4678,7 +4825,7 @@ class UnifiedAgentRunner:
                         cmd.extend(["--image", img_p])
                     cmd.append("-")
             sup_handle = await spawn_supervised_cli(
-                protect_project_command(cmd, cwd) if file_edits else cmd,
+                cmd,
                 cwd=cwd,
                 env=exec_env,
                 stdin=asyncio.subprocess.PIPE,

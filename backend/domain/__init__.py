@@ -29,7 +29,9 @@ DRIVER_PROVIDER_LABELS: Dict[str, Tuple[str, str]] = {
     "agy": ("Google", "Antigravity CLI"),
     "antigravity": ("Google", "Antigravity CLI"),
     "codex": ("OpenAI", "Codex CLI"),
+    "claude": ("Anthropic", "Claude Code CLI"),
     "grok": ("xAI", "Grok CLI"),
+    "ollama": ("Open / CN", "Ollama / 开源网关 CLI"),
 }
 
 IMMUTABLE_SEAT_CATALOG: Dict[str, dict] = {
@@ -344,6 +346,10 @@ def normalize_driver_family_key(effective_driver: str, binary_path: str = "") ->
         return "driver:grok"
     if drv == "codex":
         return "driver:codex"
+    if drv in ("claude", "claude-code"):
+        return "driver:claude"
+    if drv == "ollama":
+        return "driver:ollama"
     if bpath:
         return f"mockbin:{bpath}"
     if drv and drv != "auto":

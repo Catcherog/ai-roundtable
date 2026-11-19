@@ -18,8 +18,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
-import stat
 import time
 import uuid
 from contextlib import AsyncExitStack
@@ -77,15 +75,16 @@ from .domain import (
 )
 from .drivers import is_process_group_alive, load_driver_catalog
 from .engine import run_post_execution_verification
-from .project_edits import apply_edit_reply
 from .attachments import SessionAttachmentManager
 from .storage import RoundtableSQLiteStore
 from .workspace_backup import (
     HONEST_ROLLBACK_DISCLOSURE,
+    MAX_BACKUP_WORKSPACE_BYTES,
     WorkspaceAdmissionError,
     WorkspaceBackup,
     WorkspaceLockBusyError,
     WorkspaceWriteLock,
+    precheck_workspace_capacity,
 )
 
 
@@ -464,9 +463,9 @@ class MeetingSession:
             "whiteboard": self.whiteboard,
         }
 
-    def to_persisted_dict(self, *, include_messages: bool = True) -> dict:
+    def to_persisted_dict(self) -> dict:
         clean_msgs = []
-        for m in (self.messages if include_messages else ()):
+        for m in self.messages[-500:]:
             mc = dict(m)
             sanitize_persisted_message(mc, fallback_badge="已中断")
             clean_msgs.append(mc)
@@ -479,6 +478,8 @@ class MeetingSession:
         wb_copy["scenario_pack"] = self.scenario_pack
         wb_copy["artifact_type"] = self.artifact_type
         wb_copy["executor_agent"] = self.effective_executor_agent()
+        if isinstance(wb_copy.get("exec_logs"), list) and len(wb_copy["exec_logs"]) > 300:
+            wb_copy["exec_logs"] = wb_copy["exec_logs"][-300:]
         return {
             "session_id": self.session_id,
             "rev": int(self.rev),
@@ -537,18 +538,11 @@ class RoundtableOrchestrator:
         self.config_file = os.path.join(self.data_dir, "config.json")
         self.sessions_file = os.path.join(self.data_dir, "sessions.json")
         self._persist_handle: Optional[asyncio.TimerHandle] = None
-        self._dirty_sessions: Set[str] = set()
-        self._history_lock = asyncio.Lock()
         self._last_driver_finish_ts: Dict[str, float] = {}
         self._workspace_write_locks: Dict[Path, asyncio.Lock] = {}
         self._turn_seq_counter: int = 0
         self._cleanup_stale_runtime_files()
         self.store = RoundtableSQLiteStore(os.path.join(self.data_dir, "state.sqlite3"))
-        for sid in self.store.pending_purges():
-            try:
-                self._finish_meeting_purge(sid)
-            except (ValueError, OSError):
-                pass  # Keep the confirmed deletion available for retry in the trash.
         self.settings = RuntimeSettings.create_default(workspace_dir=workspace_dir)
         self._load_persisted_config()
         self.attachments = SessionAttachmentManager(self.data_dir)
@@ -567,13 +561,7 @@ class RoundtableOrchestrator:
         try:
             await self.runner.shutdown()
         finally:
-            if self._persist_handle:
-                self._persist_handle.cancel()
-                self._persist_handle = None
-            try:
-                self._flush_persisted_sessions_sync(wait=True)
-            finally:
-                self.store.close()
+            self.store.close()
 
     def _scan_crash_interrupted_backups(self) -> None:
         """启动时扫描 ~/.ai-roundtable/backups/：凡处于 prepared/running 无 after 清单的快照转入 recovery_required，严禁静默删文件。"""
@@ -589,9 +577,6 @@ class RoundtableOrchestrator:
             if not sess:
                 continue
             if bk.state in ("prepared", "running") and bk.after_entries is None:
-                # An empty scoped manifest predates the first possible project write.
-                if bk.target_paths == []:
-                    continue
                 sess.recovery_required = True
                 sess.pending_recovery_backup = bk
                 sess.whiteboard["recovery_required"] = True
@@ -730,6 +715,16 @@ class RoundtableOrchestrator:
                         self.settings.single_cli_concurrency = max(1, min(6, int(data["single_cli_concurrency"])))
                     except Exception:
                         pass
+                sub_tier = str(data.get("subscription_tier") or "all").strip().lower()
+                if sub_tier in ("all", "free", "plus_pro", "max_ultra", "api_local"):
+                    self.settings.subscription_tier = sub_tier
+                raw_vsubs = data.get("vendor_subscriptions")
+                if isinstance(raw_vsubs, dict):
+                    self.settings.vendor_subscriptions = {
+                        str(k).strip().lower(): str(v).strip()[:40]
+                        for k, v in raw_vsubs.items()
+                        if str(k).strip() and isinstance(v, str) and str(v).strip()
+                    }
 
                 agents_cfg = data.get("agents", {})
                 if isinstance(agents_cfg, dict):
@@ -760,7 +755,7 @@ class RoundtableOrchestrator:
                 normalized_changed = self._normalize_agent_efforts()
                 self.settings.invalidate_status_cache()
                 self._sync_agent_meta_names()
-                if schema_ver < 11 or normalized_changed:
+                if schema_ver < 12 or normalized_changed:
                     self._save_persisted_config()
         except Exception:
             pass
@@ -796,11 +791,13 @@ class RoundtableOrchestrator:
         try:
             os.makedirs(self.data_dir, exist_ok=True)
             payload = {
-                "config_schema_version": 11,
+                "config_schema_version": 12,
                 "workspace_dir": self.settings.workspace_dir,
                 "allow_single_cli_fallback": self.settings.allow_single_cli_fallback,
                 "roster_preset": self.settings.roster_preset,
                 "single_cli_concurrency": self.settings.single_cli_concurrency,
+                "subscription_tier": self.settings.subscription_tier,
+                "vendor_subscriptions": dict(self.settings.vendor_subscriptions),
                 "pacing_mode": self.settings.pacing_mode,
                 "idle_timeout_sec": self.settings.idle_timeout_sec,
                 "turn_timeout_sec": self.settings.turn_timeout_sec,
@@ -836,76 +833,103 @@ class RoundtableOrchestrator:
             for aid in AGENT_ORDER
         }
 
-    def _session_from_record(self, item: dict, inspected: dict) -> MeetingSession:
-        msgs = item.get("messages") or []
-        sid = str(item["session_id"])
-        upd_ts = float(item.get("updated_ts") or time.time())
-        raw_mode = str(item.get("collab_mode", "deep_deliberation"))
-        raw_auto_exec = item.get("auto_preview_exec")
-        norm_mode, norm_auto_exec = normalize_collab_mode(
-            raw_mode,
-            auto_preview_exec=bool(raw_auto_exec) if raw_auto_exec is not None else None,
-        )
-        sess_ws = str(item.get("workspace_dir") or "").strip()
-        if sess_ws and not os.path.isdir(sess_ws):
-            sess_ws = ""
-        raw_personas = item.get("seat_personas")
-        personas = (
-            dict(raw_personas)
-            if isinstance(raw_personas, dict)
-            else self._default_personas_from_settings()
-        )
-        raw_efforts = item.get("seat_efforts")
-        seat_efforts = dict(raw_efforts) if isinstance(raw_efforts, dict) else {}
-        exec_ag = str(item.get("executor_agent") or "astra").strip().lower()
-        raw_wb_dict = item.get("whiteboard") if isinstance(item.get("whiteboard"), dict) else {}
-        raw_pack = str(item.get("scenario_pack") or raw_wb_dict.get("scenario_pack") or "")
-        raw_art = str(item.get("artifact_type") or raw_wb_dict.get("artifact_type") or "")
-        sess = MeetingSession(
-            session_id=sid,
-            title=str(item.get("title") or "新会议"),
-            topic=str(item.get("topic") or ""),
-            workspace_dir=sess_ws if "workspace_dir" in item else self.settings.workspace_dir,
-            collab_mode=norm_mode,
-            scenario_pack=raw_pack,
-            artifact_type=raw_art,
-            auto_preview_exec=norm_auto_exec,
-            stage=str(item.get("stage") or "idle"),
-            created_at=str(item.get("created_at") or now_display_time()),
-            updated_ts=upd_ts,
-            enabled_agents=item.get("enabled_agents") or list(DEFAULT_ENABLED_AGENTS),
-            rev=int(item.get("rev") or 0),
-            seat_personas=personas,
-            seat_efforts=seat_efforts,
-            executor_agent=exec_ag if exec_ag in AGENT_ORDER else "astra",
-            messages=msgs,
-            whiteboard=raw_wb_dict,
-        )
-        if sess.topic and sess.whiteboard.get("topic_title"):
-            sess.title = sess.whiteboard["topic_title"]
-        if sess.stage == "awaiting_chair" and sess.whiteboard.get("consensus_status", "").startswith("第 "):
-            sess.whiteboard["consensus_status"] = "待主持人继续推进"
-        self._sync_seat_readiness(sess, inspected=inspected)
-        return sess
-
     def _load_persisted_sessions(self) -> None:
-        self.store.migrate_legacy_sessions_json_if_needed(Path(self.sessions_file))
-        self.store.migrate_legacy_sessions_json_if_needed(Path(self.data_dir) / "data" / "sessions.json")
-        records = self.store.load_all_sessions()
-        if not records:
-            return
-        inspected = self.settings.inspect_status()
-        self._sync_agent_meta_names(inspected=inspected)
-        for record in records:
-            try:
-                sess = self._session_from_record(record, inspected)
-            except (ValueError, TypeError, KeyError):
-                continue  # Leave the original database row intact for recovery.
-            self.sessions[sess.session_id] = sess
-            if any(m.get("streaming") or str(m.get("badge") or "") in STALE_STREAMING_BADGES
-                   for m in record.get("messages", []) if isinstance(m, dict)):
-                self._dirty_sessions.add(sess.session_id)
-        self._flush_persisted_sessions_sync()
+        try:
+            self.store.migrate_legacy_sessions_json_if_needed(Path(self.sessions_file))
+            self.store.migrate_legacy_sessions_json_if_needed(Path(self.data_dir) / "data" / "sessions.json")
+            raw_list = self.store.load_all_sessions(limit=50)
+            if not raw_list and os.path.isfile(self.sessions_file):
+                with open(self.sessions_file, "r", encoding="utf-8") as f:
+                    raw_list = json.load(f)
+            if not isinstance(raw_list, list) or not raw_list:
+                return
+            inspected = self.settings.inspect_status()
+            self._sync_agent_meta_names(inspected=inspected)
+            kept_empty_draft = False
+            dirty_healed = False
+            candidates_slice = [x for x in raw_list[-50:] if isinstance(x, dict) and x.get("session_id")]
+            # 倒序检查空白会话：仅保留最新 1 个空白草稿，消除重复空白「新会议」导致的历史计数虚高
+            allowed_empty_sid: Optional[str] = None
+            for rev_it in reversed(candidates_slice):
+                r_msgs = rev_it.get("messages") if isinstance(rev_it.get("messages"), list) else []
+                if _empty_session_draft(rev_it.get("topic"), r_msgs, rev_it.get("whiteboard")):
+                    if allowed_empty_sid is None:
+                        allowed_empty_sid = str(rev_it["session_id"])
+                    else:
+                        dirty_healed = True
+
+            for item in candidates_slice:
+                try:
+                    msgs = item.get("messages") if isinstance(item.get("messages"), list) else []
+                    upd_ts = float(item.get("updated_ts") or time.time())
+                    sid = str(item["session_id"])
+                    if _empty_session_draft(item.get("topic"), msgs, item.get("whiteboard")):
+                        if sid != allowed_empty_sid or kept_empty_draft:
+                            dirty_healed = True
+                            continue
+                        kept_empty_draft = True
+
+                    for m_chk in msgs:
+                        if isinstance(m_chk, dict) and (
+                            m_chk.get("streaming")
+                            or str(m_chk.get("badge") or "") in STALE_STREAMING_BADGES
+                        ):
+                            dirty_healed = True
+
+                    raw_mode = str(item.get("collab_mode", "deep_deliberation"))
+                    raw_auto_exec = item.get("auto_preview_exec")
+                    norm_mode, norm_auto_exec = normalize_collab_mode(
+                        raw_mode,
+                        auto_preview_exec=bool(raw_auto_exec) if raw_auto_exec is not None else None,
+                    )
+                    sess_ws = str(item.get("workspace_dir") or "").strip()
+                    if sess_ws and not os.path.isdir(sess_ws):
+                        sess_ws = ""
+                    raw_personas = item.get("seat_personas")
+                    personas = (
+                        dict(raw_personas)
+                        if isinstance(raw_personas, dict)
+                        else self._default_personas_from_settings()
+                    )
+                    raw_efforts = item.get("seat_efforts")
+                    seat_efforts = dict(raw_efforts) if isinstance(raw_efforts, dict) else {}
+                    exec_ag = str(item.get("executor_agent") or "astra").strip().lower()
+                    raw_wb_dict = item.get("whiteboard") if isinstance(item.get("whiteboard"), dict) else {}
+                    raw_pack = str(item.get("scenario_pack") or raw_wb_dict.get("scenario_pack") or "")
+                    raw_art = str(item.get("artifact_type") or raw_wb_dict.get("artifact_type") or "")
+                    sess = MeetingSession(
+                        session_id=sid,
+                        title=str(item.get("title") or "新会议"),
+                        topic=str(item.get("topic") or ""),
+                        workspace_dir=sess_ws if "workspace_dir" in item else self.settings.workspace_dir,
+                        collab_mode=norm_mode,
+                        scenario_pack=raw_pack,
+                        artifact_type=raw_art,
+                        auto_preview_exec=norm_auto_exec,
+                        stage=str(item.get("stage") or "idle"),
+                        created_at=str(item.get("created_at") or now_display_time()),
+                        updated_ts=upd_ts,
+                        enabled_agents=item.get("enabled_agents") or list(DEFAULT_ENABLED_AGENTS),
+                        rev=int(item.get("rev") or 0),
+                        seat_personas=personas,
+                        seat_efforts=seat_efforts,
+                        executor_agent=exec_ag if exec_ag in AGENT_ORDER else "astra",
+                        messages=msgs,
+                        whiteboard=raw_wb_dict,
+                    )
+                    if sess.topic and sess.whiteboard.get("topic_title"):
+                        sess.title = sess.whiteboard["topic_title"]
+                    if sess.stage == "awaiting_chair" and sess.whiteboard.get("consensus_status", "").startswith("第 "):
+                        sess.whiteboard["consensus_status"] = "待主持人继续推进"
+                    self._sync_seat_readiness(sess, inspected=inspected)
+                    self.sessions[sid] = sess
+                except Exception:
+                    dirty_healed = True
+                    continue
+            if dirty_healed:
+                self._flush_persisted_sessions_sync()
+        except Exception:
+            pass
 
     def _persist_single_session(
         self,
@@ -915,34 +939,27 @@ class RoundtableOrchestrator:
         rewrite_all_messages: bool = False,
         immediate: bool = False,
     ) -> None:
-        if self.sessions.get(sess.session_id) is not sess:
-            return
-        single_pair = None
-        if single_msg_idx is not None and not rewrite_all_messages and 0 <= single_msg_idx < len(sess.messages):
-            message = dict(sess.messages[single_msg_idx])
-            sanitize_persisted_message(message, fallback_badge="已中断")
-            single_pair = (single_msg_idx, message)
+        pdict = sess.to_persisted_dict()
+        single_pair: Optional[Tuple[int, dict]] = None
+        if single_msg_idx is not None and 0 <= single_msg_idx < len(pdict["messages"]):
+            single_pair = (single_msg_idx, pdict["messages"][single_msg_idx])
         self.store.upsert_session_incremental(
-            sess.to_persisted_dict(include_messages=single_pair is None),
+            pdict,
             single_msg_seq_and_obj=single_pair,
             rewrite_all_messages=rewrite_all_messages,
             wait=immediate,
         )
 
     def _flush_persisted_sessions_sync(self, wait: bool = False) -> None:
-        for sid in tuple(self._dirty_sessions):
-            sess = self.sessions.get(sid)
-            if sess is not None:
-                self._persist_single_session(sess, rewrite_all_messages=True, immediate=wait)
-            self._dirty_sessions.discard(sid)
-        if wait:
-            self.store.flush()
+        try:
+            for s in list(self.sessions.values())[-50:]:
+                self.store.upsert_session_incremental(s.to_persisted_dict(), rewrite_all_messages=True, wait=False)
+            if wait:
+                self.store.flush()
+        except Exception:
+            pass
 
-    def _save_persisted_sessions(self, immediate: bool = False, *, session: Optional[MeetingSession] = None) -> None:
-        if session is None:
-            self._dirty_sessions.update(self.sessions)
-        elif self.sessions.get(session.session_id) is session:
-            self._dirty_sessions.add(session.session_id)
+    def _save_persisted_sessions(self, immediate: bool = False) -> None:
         if immediate:
             if self._persist_handle:
                 self._persist_handle.cancel()
@@ -982,8 +999,6 @@ class RoundtableOrchestrator:
                 if (
                     ex_s.title == "新会议" and not ex_s.is_busy
                     and _empty_session_draft(ex_s.topic, ex_s.messages, ex_s.whiteboard)
-                    and not self.attachments.list_attachments(ex_s.session_id)
-                    and not ex_s.recovery_required and not ex_s.has_unacked_rollbackable()
                 ):
                     ex_s.collab_mode = norm_mode
                     ex_s.auto_preview_exec = norm_auto_exec
@@ -999,9 +1014,9 @@ class RoundtableOrchestrator:
                     ex_s.updated_ts = time.time()
                     self._sync_seat_readiness(ex_s)
                     self.default_session_id = ex_s.session_id
-                    self._save_persisted_sessions(session=ex_s)
+                    self._save_persisted_sessions()
                     return ex_s
-        sid = f"s_{uuid.uuid4().hex}"
+        sid = f"s_{uuid.uuid4().hex[:8]}"
         init_enabled = (
             [a for a in AGENT_ORDER if a in pack_spec["enabled_agents"]]
             if pack_spec
@@ -1032,86 +1047,25 @@ class RoundtableOrchestrator:
         self._sync_seat_readiness(sess)
         self.sessions[sid] = sess
         self.default_session_id = sid
-        self._save_persisted_sessions(session=sess)
+        self._save_persisted_sessions()
         return sess
 
     async def delete_session(self, session_id: str) -> Optional[str]:
-        """Move an idle meeting to the local trash, retaining its files and transcript."""
-        async with self._history_lock:
-            sess = self.sessions.get(session_id)
-            if sess is None:
-                return self.default_session_id if self.store.is_trashed(session_id) else None
-            async with sess.session_lock:
-                if sess.is_busy or sess.stage in ("opening_parallel", "cross_talk", "chair_interrupt", "executing"):
-                    raise ExecutionAdmissionConflictError("请先结束正在进行的研讨或执行，再移入最近删除。",
-                                                          details={"reason": "session_busy"})
-                if sess.recovery_required or sess.has_unacked_rollbackable():
-                    raise ExecutionAdmissionConflictError("请先处理项目恢复或回滚，再移入最近删除。",
-                                                          details={"reason": "pending_workspace_recovery"})
-                self._persist_single_session(sess, rewrite_all_messages=True, immediate=True)
-                if not self.store.set_trashed(session_id, True):
-                    raise ExecutionAdmissionConflictError("会议状态已变化，或有项目恢复待处理。请刷新后核对。")
-                self._dirty_sessions.discard(session_id)
-                del self.sessions[session_id]
-                if not self.sessions:
-                    fresh = self.create_session(title="新会议")
-                    self._save_persisted_sessions(immediate=True, session=fresh)
-                elif self.default_session_id == session_id:
-                    self.default_session_id = max(self.sessions.values(), key=lambda item: item.updated_ts).session_id
-                self._commit_sse_event_sync(sess, "session_trashed", {"active_session_id": self.default_session_id})
-                for queue in list(sess.subscribers):
-                    if not queue.full():
-                        queue.put_nowait(None)
-            await self.runner.reset_session_context(session_id)
-            return self.default_session_id
-
-    async def restore_session(self, session_id: str) -> Optional[MeetingSession]:
-        async with self._history_lock:
-            if session_id in self.sessions:
-                return self.sessions[session_id]
-            records = self.store.load_all_sessions(trashed_id=session_id)
-            if not records:
-                return None
-            sess = self._session_from_record(records[0], self.settings.inspect_status())
-            if not self.store.set_trashed(session_id, False):
-                raise ExecutionAdmissionConflictError("本会议已确认永久删除，清理尚未完成。")
-            self.sessions[session_id] = sess
-            return sess
-
-    def _finish_meeting_purge(self, sid: str) -> None:
-        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", sid):
-            raise ValueError("会议编号无效")
-        data = Path(self.data_dir).resolve()
-        for name in ("attachments", "backups"):
-            parent = data / name
-            target = parent / sid
-            for path in (parent, target):
-                if os.path.lexists(path):
-                    info = path.lstat()
-                    if not stat.S_ISDIR(info.st_mode) or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
-                        raise ValueError("会议数据目录不是普通目录")
-            if target.is_dir():
-                shutil.rmtree(target)
-        self.store.finish_purge(sid)
-
-    async def purge_session(self, sid: str, confirmation: dict) -> None:
-        title = confirmation.get("confirm_title")
-        deleted_at = confirmation.get("deleted_at")
-        if confirmation.get("confirm_session_id") != sid or not isinstance(title, str) or type(deleted_at) not in (float, int):
-            raise ExecutionAdmissionConflictError("请输入最近删除中的完整会议标题，并再次确认永久删除。")
-        async with self._history_lock:
-            state = self.store.begin_purge(sid, title, deleted_at)
-            if state == "done":
-                return
-            if state == "pending_workspace_recovery":
-                raise ExecutionAdmissionConflictError("先恢复会议并处理项目恢复记录，再决定是否永久删除。")
-            if state != "pending":
-                raise ExecutionAdmissionConflictError("会议的标题或删除状态已变化，请重新核对。", details={"reason": state})
-            try:
-                await asyncio.to_thread(self._finish_meeting_purge, sid)
-            except (OSError, ValueError) as exc:
-                raise ExecutionAdmissionConflictError("会议文件清理未完成，请在最近删除中重试。",
-                                                      details={"reason": "cleanup_pending"}) from exc
+        sess = self.sessions.get(session_id)
+        if not sess:
+            return None
+        await self.cancel_active_flow(sess, reason_tag="会话已删除", persist=False)
+        await self.runner.reset_session_context(session_id)
+        del self.sessions[session_id]
+        self.attachments.delete_session_attachments(session_id)
+        self.store.delete_session(session_id, wait=True)
+        if not self.sessions:
+            fresh = self.create_session(title="新会议", collab_mode="deep_deliberation")
+            self.default_session_id = fresh.session_id
+        elif self.default_session_id == session_id:
+            self.default_session_id = list(self.sessions.keys())[-1]
+        self._save_persisted_sessions(immediate=True)
+        return self.default_session_id
 
     def _refresh_epistemic_status(self, sess: MeetingSession, status_map: Optional[Dict[str, dict]] = None) -> dict:
         smap = status_map if status_map is not None else self.settings.inspect_status()
@@ -1250,9 +1204,8 @@ class RoundtableOrchestrator:
                 "consensus_status": s.whiteboard.get("consensus_status", "待输入议题"),
                 "created_at": s.created_at,
                 "message_count": len(s.messages),
-                "history_protected": s.is_busy or s.recovery_required or s.has_unacked_rollbackable(),
             }
-            for s in sorted(self.sessions.values(), key=lambda item: item.updated_ts, reverse=True)
+            for s in reversed(list(self.sessions.values()))
         ]
 
     def get_session(self, session_id: str) -> Optional[MeetingSession]:
@@ -1278,7 +1231,8 @@ class RoundtableOrchestrator:
         allow_default_sandbox: bool = False,
     ) -> Tuple[bool, str, dict]:
         """
-        绑定时检查项目路径边界。写入时再根据文件体积选择快照方式。
+        工作区爆炸半径前置硬拦截与 128 MiB 准入容量预检：
+        拒绝磁盘根目录、用户家目录 $HOME、~/.ai-roundtable、.app 包内路径、本机凭证与密钥目录及超 128 MiB 目录。
         """
         cleaned = str(raw_path or "").strip()
         if not cleaned:
@@ -1350,7 +1304,21 @@ class RoundtableOrchestrator:
                         {"reason": "sensitive_credentials_dir_forbidden"},
                     )
 
-        return True, str(real_target), {}
+        # 5. 128 MiB 准入容量前置预检
+        cap_ok, total_b, largest_dirs, cap_err = precheck_workspace_capacity(str(real_target))
+        if not cap_ok:
+            return (
+                False,
+                cap_err,
+                {
+                    "reason": "workspace_too_large",
+                    "total_bytes": total_b,
+                    "max_bytes": MAX_BACKUP_WORKSPACE_BYTES,
+                    "largest_dirs": largest_dirs,
+                },
+            )
+
+        return True, str(real_target), {"total_bytes": total_b, "largest_dirs": largest_dirs}
 
     def validate_safe_workspace_path(self, raw_path: str, *, allow_default_sandbox: bool = False) -> Tuple[bool, str]:
         ok, res_or_err, _ = self.validate_safe_workspace_path_detailed(
@@ -1459,7 +1427,7 @@ class RoundtableOrchestrator:
             sess.updated_ts = time.time()
 
         if real_ws:
-            await asyncio.to_thread(invalidate_workspace_index, real_ws)
+            invalidate_workspace_index(real_ws)
         await self._broadcast_meta(sess)
         await self.broadcast(sess, "whiteboard_update", sess.whiteboard)
         self._persist_single_session(sess, immediate=True)
@@ -1518,9 +1486,24 @@ class RoundtableOrchestrator:
         if "single_cli_concurrency" in payload:
             try:
                 self.settings.single_cli_concurrency = max(1, min(6, int(payload["single_cli_concurrency"])))
-                self.runner.refresh_binary_limits()
             except Exception:
                 pass
+        if "subscription_tier" in payload:
+            st_val = str(payload.get("subscription_tier") or "all").strip().lower()
+            if st_val in ("all", "free", "plus_pro", "max_ultra", "api_local"):
+                self.settings.subscription_tier = st_val
+        if "vendor_subscriptions" in payload and isinstance(payload["vendor_subscriptions"], dict):
+            next_vsubs = dict(self.settings.vendor_subscriptions)
+            for vk, vv in payload["vendor_subscriptions"].items():
+                vk_s = str(vk or "").strip().lower()
+                vv_s = str(vv or "").strip()[:40]
+                if not vk_s:
+                    continue
+                if not vv_s or vv_s == "auto":
+                    next_vsubs.pop(vk_s, None)
+                else:
+                    next_vsubs[vk_s] = vv_s
+            self.settings.vendor_subscriptions = next_vsubs
 
         if "post_exec_verify_cmd" in payload and isinstance(payload["post_exec_verify_cmd"], str):
             vcmd_clean = payload["post_exec_verify_cmd"].strip()[:500]
@@ -1720,7 +1703,7 @@ class RoundtableOrchestrator:
             await self.broadcast(sess, "seat_update", st)
         await self.broadcast(sess, "whiteboard_update", sess.whiteboard)
         await self._broadcast_meta(sess)
-        self._save_persisted_sessions(session=sess)
+        self._save_persisted_sessions()
         return {
             "rev": sess.rev,
             "enabled_agents": list(sess.enabled_agents),
@@ -1948,8 +1931,6 @@ class RoundtableOrchestrator:
         if not clean_id:
             return False
         async with sess.session_lock:
-            if self.get_session(sess.session_id) is not sess:
-                return False
             removed_disk = await asyncio.to_thread(self.attachments.delete_attachment, sess.session_id, clean_id)
             sess_atts = sess.whiteboard.get("session_attachments")
             removed_wb = False
@@ -2427,7 +2408,7 @@ class RoundtableOrchestrator:
             wb["wb_version"] = int(wb.get("wb_version") or 1) + 1
         await self.broadcast(sess, "whiteboard_update", wb)
         await self._broadcast_meta(sess)
-        self._save_persisted_sessions(session=sess)
+        self._save_persisted_sessions()
         return wb
 
     def get_system_status(self) -> dict:
@@ -2450,6 +2431,8 @@ class RoundtableOrchestrator:
             "available_drivers": avail_drvs,
             "can_recommend_heterogeneous": len(avail_drvs) >= 2,
             "single_cli_concurrency": self.settings.single_cli_concurrency,
+            "subscription_tier": self.settings.subscription_tier,
+            "vendor_subscriptions": dict(self.settings.vendor_subscriptions),
             "pacing_mode": self.settings.pacing_mode,
             "idle_timeout_sec": self.settings.idle_timeout_sec,
             "turn_timeout_sec": self.settings.turn_timeout_sec,
@@ -2701,7 +2684,7 @@ class RoundtableOrchestrator:
             if sess.seat_states.get(aid, {}).get("status") in ("thinking", "speaking", "queued"):
                 await self._set_seat(sess, aid, "idle", "已跳过本轮")
             await self.broadcast(sess, "whiteboard_update", sess.whiteboard)
-            self._save_persisted_sessions(session=sess)
+            self._save_persisted_sessions()
         return {"ok": True, "agent_id": aid, "badge": "已跳过本轮"}
 
     async def cancel_active_flow(
@@ -2759,7 +2742,7 @@ class RoundtableOrchestrator:
                     st["badge"] = "已就绪" if st["binary_ready"] else "未检测到 CLI"
             await self.broadcast(sess, "seat_update", st)
         if persist:
-            self._save_persisted_sessions(session=sess)
+            self._save_persisted_sessions()
 
     async def _finalize_task_idle_state(
         self,
@@ -2828,7 +2811,7 @@ class RoundtableOrchestrator:
         sess.updated_ts = time.time()
         sess.whiteboard["consensus_status"] = consensus_status
         await self._broadcast_meta(sess)
-        self._save_persisted_sessions(session=sess)
+        self._save_persisted_sessions()
 
     async def _set_seat(
         self,
@@ -2880,7 +2863,7 @@ class RoundtableOrchestrator:
         sess.messages.append(msg)
         await self.broadcast(sess, "msg_start", msg)
         await self.broadcast(sess, "msg_done", msg)
-        self._save_persisted_sessions(session=sess)
+        self._save_persisted_sessions()
         return msg
 
     def _get_ready_enabled_agents(self, sess: MeetingSession) -> Tuple[List[str], List[str]]:
@@ -3090,7 +3073,6 @@ class RoundtableOrchestrator:
         return {
             "unsupported_effort_or_model": "档位不兼容",
             "quota_rate_limit": "配额限流",
-            "service_unavailable": "模型服务繁忙",
             "auth_expired": "鉴权失效",
             "timeout": "响应超时",
             "binary_missing": "缺少 CLI",
@@ -3449,7 +3431,7 @@ class RoundtableOrchestrator:
                 await self.broadcast(sess, "msg_done", msg_obj)
                 await self._set_seat(sess, agent_id, "idle", "已跳过本轮", elapsed_ms=elapsed_skip)
                 await self.broadcast(sess, "whiteboard_update", sess.whiteboard)
-                self._save_persisted_sessions(session=sess)
+                self._save_persisted_sessions()
                 return False, None, "已跳过本轮", None
             if not seat_task.done():
                 seat_task.cancel()
@@ -3493,7 +3475,7 @@ class RoundtableOrchestrator:
             await self.broadcast(sess, "msg_done", msg_obj)
             await self._set_seat(sess, agent_id, "idle", err_badge)
             await self.broadcast(sess, "whiteboard_update", sess.whiteboard)
-            self._save_persisted_sessions(session=sess)
+            self._save_persisted_sessions()
             return False, None, err_badge, None
         except Exception as exc:
             msg_obj["activity"] = ""
@@ -3521,7 +3503,7 @@ class RoundtableOrchestrator:
             await self.broadcast(sess, "msg_done", msg_obj)
             await self._set_seat(sess, agent_id, "idle", "调用异常")
             await self.broadcast(sess, "whiteboard_update", sess.whiteboard)
-            self._save_persisted_sessions(session=sess)
+            self._save_persisted_sessions()
             return False, None, "调用异常", None
         finally:
             if sess.active_seat_tasks.get(agent_id) is seat_task:
@@ -3697,7 +3679,7 @@ class RoundtableOrchestrator:
             raise
         finally:
             await self._finalize_task_idle_state(sess, owner_task)
-            self._save_persisted_sessions(immediate=True, session=sess)
+            self._save_persisted_sessions(immediate=True)
             await self._broadcast_meta(sess)
 
     @staticmethod
@@ -3999,8 +3981,6 @@ class RoundtableOrchestrator:
         attachments: Optional[List[dict]] = None,
     ) -> None:
         await self.cancel_active_flow(sess, reason_tag="切换新议题")
-        if self.get_session(sess.session_id) is not sess:
-            raise ExecutionAdmissionConflictError("此会议已移入最近删除，请先恢复。")
         sess.round_driver_records.clear()
         await self.runner.reset_session_context(sess.session_id)
         draft_items = list(sess.whiteboard.get("items") or []) if not sess.messages and not reset_history else []
@@ -4658,7 +4638,7 @@ class RoundtableOrchestrator:
             raise
         finally:
             await self._finalize_task_idle_state(sess, owner_task)
-            self._save_persisted_sessions(immediate=True, session=sess)
+            self._save_persisted_sessions(immediate=True)
             await self._broadcast_meta(sess)
 
     async def chair_interrupt(
@@ -4775,7 +4755,7 @@ class RoundtableOrchestrator:
             raise
         finally:
             await self._finalize_task_idle_state(sess, owner_task)
-            self._save_persisted_sessions(immediate=True, session=sess)
+            self._save_persisted_sessions(immediate=True)
             await self._broadcast_meta(sess)
 
     async def cue_agent(self, sess: MeetingSession, agent_id: str, instruction: str) -> None:
@@ -4818,7 +4798,7 @@ class RoundtableOrchestrator:
             raise
         finally:
             await self._finalize_task_idle_state(sess, owner_task)
-            self._save_persisted_sessions(immediate=True, session=sess)
+            self._save_persisted_sessions(immediate=True)
             await self._broadcast_meta(sess)
 
     async def redebate_disagreement(self, sess: MeetingSession, payload: dict) -> dict:
@@ -4912,7 +4892,7 @@ class RoundtableOrchestrator:
                 raise
             finally:
                 await self._finalize_task_idle_state(sess, owner_task)
-                self._save_persisted_sessions(immediate=True, session=sess)
+                self._save_persisted_sessions(immediate=True)
                 await self._broadcast_meta(sess)
 
         sess.active_task = asyncio.create_task(_run_redebate_flow())
@@ -5245,7 +5225,7 @@ class RoundtableOrchestrator:
             sess.whiteboard.pop("_synthesis_dossier_block", None)
             if clear_task_on_exit:
                 await self._finalize_task_idle_state(sess, owner_task)
-                self._save_persisted_sessions(immediate=True, session=sess)
+                self._save_persisted_sessions(immediate=True)
                 await self._broadcast_meta(sess)
 
     def build_session_export_bytes(self, sess: MeetingSession) -> Tuple[bytes, str]:
@@ -5355,11 +5335,7 @@ class RoundtableOrchestrator:
         """显式确认并归档上一轮可回滚快照，解锁新一轮工作区写入准入。"""
         async with sess.session_lock:
             if sess.last_backup is not None:
-                backup = sess.last_backup
-                backup.mark_acknowledged()
-                self.store.record_exec_recovery(run_id=backup.run_id, session_id=sess.session_id,
-                                                workspace_realpath=backup.cwd, backup_dir=str(backup.backup_dir),
-                                                state="acknowledged", wait=True)
+                sess.last_backup.mark_acknowledged()
                 sess.last_backup = None
             sess.whiteboard["can_rollback"] = False
             sess.whiteboard["verification_failed"] = False
@@ -5670,7 +5646,7 @@ class RoundtableOrchestrator:
         if do_real_write:
             try:
                 backup = await asyncio.to_thread(
-                    WorkspaceBackup.capture_for_execution,
+                    WorkspaceBackup.capture,
                     frozen_ws,
                     session_id=sess.session_id,
                     run_id=run_id,
@@ -5891,7 +5867,7 @@ class RoundtableOrchestrator:
                 backup_dir=str(backup.backup_dir),
                 state="rolled_back",
             )
-            await asyncio.to_thread(invalidate_workspace_index, backup.cwd)
+            invalidate_workspace_index(backup.cwd)
         finally:
             async with sess.session_lock:
                 if sess.exec_state == "preparing":
@@ -5986,11 +5962,9 @@ class RoundtableOrchestrator:
                     pgid=int(pgid),
                 )
 
-        file_edits = backup is not None and backup.target_paths is not None
         try:
             if backup is not None:
-                snap_line = ("大项目按本轮目标文件备份，可跨目录写入。" if file_edits
-                             else f"[CAS Snapshot] 已完成写前无 Git 依赖字节清单与 fsync 落盘 (run={run_id})")
+                snap_line = f"[CAS Snapshot] 已完成写前无 Git 依赖字节清单与 fsync 落盘 (run={run_id})"
                 sess.whiteboard["exec_logs"].append(snap_line)
                 await self.broadcast(sess, "term_log", {"line": snap_line})
 
@@ -6004,13 +5978,9 @@ class RoundtableOrchestrator:
                 session_id=sess.session_id,
                 on_pgid_spawned=_on_pgid_spawned,
             )
-            if file_edits:
-                exec_kwargs["file_edits"] = True
             try:
                 exec_gen = self.runner.stream_agent_execution(**exec_kwargs)
             except TypeError:
-                if file_edits:
-                    raise
                 exec_kwargs.pop("session_id", None)
                 exec_kwargs.pop("on_pgid_spawned", None)
                 exec_gen = self.runner.stream_agent_execution(**exec_kwargs)
@@ -6020,7 +5990,7 @@ class RoundtableOrchestrator:
                 if etype == "term_log":
                     sess.whiteboard["exec_logs"].append(ev["line"])
                     await self.broadcast(sess, "term_log", {"line": ev["line"]})
-                elif etype == "exec_delta" and not file_edits:
+                elif etype == "exec_delta":
                     delta_txt = ev.get("text", "")
                     if delta_txt:
                         if exec_ttft_ms is None:
@@ -6032,22 +6002,6 @@ class RoundtableOrchestrator:
                 elif etype == "exec_artifact":
                     summary_txt = str(ev.get("summary") or "").strip()
                     diff_txt = str(ev.get("diff") or "").strip()
-                    if file_edits:
-                        apply_task = asyncio.create_task(asyncio.to_thread(apply_edit_reply, backup, summary_txt))
-                        try:
-                            summary_txt, modified_paths = await asyncio.shield(apply_task)
-                        except asyncio.CancelledError:
-                            # 保持工作区锁，直到本批次提交或补偿完毕。
-                            while not apply_task.done():
-                                try:
-                                    await asyncio.shield(apply_task)
-                                except asyncio.CancelledError:
-                                    continue
-                            raise
-                        change_note = ("已写入 " + "、".join(modified_paths)) if modified_paths else "本轮没有文件变更"
-                        summary_txt = (summary_txt + "\n\n" + change_note).strip()
-                        diff_txt = ""
-                        ev = {**ev, "summary": summary_txt, "diff": ""}
                     if summary_txt or diff_txt:
                         received_substantive_artifact = True
                         elapsed_ms = int((time.perf_counter() - exec_start_ts) * 1000)
@@ -6059,8 +6013,6 @@ class RoundtableOrchestrator:
                         msg_obj["ttft_ms"] = exec_ttft_ms or elapsed_ms
                         msg_obj["elapsed_ms"] = elapsed_ms
                         msg_obj["badge"] = "已写入本地项目" if allow_workspace_write else "交付完成"
-                        if file_edits and not modified_paths:
-                            msg_obj["badge"] = "无文件变更"
                         await self.broadcast(sess, "msg_done", msg_obj)
                         await self.broadcast(sess, "exec_artifact", ev)
                         await self.broadcast(sess, "whiteboard_update", sess.whiteboard)
@@ -6089,7 +6041,6 @@ class RoundtableOrchestrator:
                         verify_cmd,
                         workspace_realpath=frozen_ws,
                         env=build_host_env(),
-                        protect_project=file_edits,
                     )
                     sess.whiteboard["last_verification"] = v_rep
                     if v_rep["passed"]:
@@ -6176,7 +6127,7 @@ class RoundtableOrchestrator:
                             backup_dir=str(backup.backup_dir),
                             state="rollbackable" if changed else "completed_noop",
                         )
-                        await asyncio.to_thread(invalidate_workspace_index, frozen_ws)
+                        invalidate_workspace_index(frozen_ws)
                     except Exception as exc:
                         sess.last_backup = None
                         sess.recovery_required = True

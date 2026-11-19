@@ -226,8 +226,6 @@ class AsyncHTTPServer:
                     await self._send_json(writer, 405, {"error": "静态资源仅支持 GET/HEAD"})
                     return
                 await self._serve_static(path, writer, head_only=(method == "HEAD"))
-        except ExecutionAdmissionConflictError as conflict:
-            await self._send_json(writer, conflict.status_code, conflict.to_dict())
         except _LineTooLongError as line_err:
             try:
                 await self._send_json(writer, line_err.status_code, {"error": "请求行或请求头超出长度限制"})
@@ -553,9 +551,6 @@ class AsyncHTTPServer:
                 return
             override_agents = data.get("agents") if isinstance(data.get("agents"), dict) else None
             target_aid = str(data.get("agent_id", "")).strip().lower()
-            if target_aid and target_aid not in self.orchestrator.settings.agents:
-                await self._send_json(writer, 400, {"error": "未知的实测席位"})
-                return
             results = await self.orchestrator.run_cli_connectivity_test(
                 override_agents=override_agents,
                 target_agent_id=target_aid,
@@ -566,13 +561,9 @@ class AsyncHTTPServer:
                 {
                     "ok": True,
                     "results": results,
-                    **({} if data.get("include_system") is False else {"system": self.orchestrator.get_system_status()}),
+                    "system": self.orchestrator.get_system_status(),
                 },
             )
-            return
-
-        if method == "GET" and path == "/api/sessions/trash":
-            await self._send_json(writer, 200, {"sessions": self.orchestrator.store.list_trashed_sessions()})
             return
 
         if method == "GET" and path == "/api/sessions":
@@ -606,25 +597,8 @@ class AsyncHTTPServer:
             sub_action = segs[4] if len(segs) >= 5 else ""
             third_action = segs[5] if len(segs) >= 6 else ""
 
-            if method == "POST" and action == "purge" and len(segs) == 4:
-                confirmation, err = self._parse_json_strict(body_bytes)
-                if err or confirmation is None:
-                    await self._send_json(writer, 400, {"error": err or "缺少删除确认"})
-                    return
-                await self.orchestrator.purge_session(sid, confirmation)
-                await self._send_json(writer, 200, {"ok": True})
-                return
-
-            if method == "POST" and action == "restore" and len(segs) == 4:
-                restored = await self.orchestrator.restore_session(sid)
-                if not restored:
-                    await self._send_json(writer, 404, {"error": "未找到可恢复的会议"})
-                else:
-                    await self._send_json(writer, 200, {"ok": True, "restored_session_id": sid,
-                                                        "sessions": self.orchestrator.list_sessions()})
-                return
-
-            if method == "DELETE" and len(segs) == 3:
+            if method == "DELETE" and action == "":
+                self.attachments.delete_session_attachments(sid)
                 next_sid = await self.orchestrator.delete_session(sid)
                 if not next_sid:
                     await self._send_json(writer, 404, {"error": f"未找到会议会话 {sid}"})
@@ -655,36 +629,36 @@ class AsyncHTTPServer:
                 if method == "POST" and sub_action == "":
                     ctype_low = str(headers.get("content-type") or "").split(";", 1)[0].strip().lower()
                     try:
-                        async with sess.session_lock:
-                            if self.orchestrator.get_session(sid) is not sess:
-                                await self._send_json(writer, 404, {"error": "会议已移入最近删除"})
+                        if ctype_low == "application/octet-stream":
+                            raw_hdr_name = headers.get("x-attachment-filename", "")
+                            fname = urllib.parse.unquote(raw_hdr_name).strip() or "attachment"
+                            dmime = str(headers.get("x-attachment-mime") or "").strip()
+                            saved = await asyncio.to_thread(
+                                self.attachments.save_raw_attachment,
+                                sid,
+                                filename=fname,
+                                raw_bytes=body_bytes,
+                                declared_mime=dmime,
+                            )
+                        else:
+                            att_req, jerr = self._parse_json_strict(body_bytes)
+                            if jerr is not None or att_req is None:
+                                await self._send_json(writer, 400, {"error": jerr or "附件请求 JSON 非法"})
                                 return
-                            if ctype_low == "application/octet-stream":
-                                raw_hdr_name = headers.get("x-attachment-filename", "")
-                                fname = urllib.parse.unquote(raw_hdr_name).strip() or "attachment"
-                                dmime = str(headers.get("x-attachment-mime") or "").strip()
-                                saved = await asyncio.to_thread(
-                                    self.attachments.save_raw_attachment,
-                                    sid,
-                                    filename=fname,
-                                    raw_bytes=body_bytes,
-                                    declared_mime=dmime,
-                                )
-                            else:
-                                att_req, jerr = self._parse_json_strict(body_bytes)
-                                if jerr is not None or att_req is None:
-                                    await self._send_json(writer, 400, {"error": jerr or "附件请求 JSON 非法"})
-                                    return
-                                fname = str(att_req.get("filename") or "attachment").strip()
-                                dmime = str(att_req.get("mime_type") or "").strip()
-                                b64 = str(att_req.get("data_base64") or "").strip()
-                                saved = await asyncio.to_thread(
-                                    self.attachments.save_base64_attachment,
-                                    sid,
-                                    filename=fname,
-                                    data_base64=b64,
-                                    declared_mime=dmime,
-                                )
+                            fname = str(att_req.get("filename") or "attachment").strip()
+                            dmime = str(att_req.get("mime_type") or "").strip()
+                            b64 = str(att_req.get("data_base64") or "").strip()
+                            saved = await asyncio.to_thread(
+                                self.attachments.save_base64_attachment,
+                                sid,
+                                filename=fname,
+                                data_base64=b64,
+                                declared_mime=dmime,
+                            )
+                        if self.orchestrator.get_session(sid) is not sess:
+                            await asyncio.to_thread(self.attachments.delete_session_attachments, sid)
+                            await self._send_json(writer, 404, {"error": "会话已删除"})
+                            return
                     except ValueError as ve:
                         await self._send_json(writer, 400, {"error": str(ve)})
                         return
@@ -824,10 +798,7 @@ class AsyncHTTPServer:
                 executor_agent = str(payload.get("executor_agent", "")).strip().lower() or None
                 scenario_pack = str(payload.get("scenario_pack", "")).strip().lower() or None
                 artifact_type = str(payload.get("artifact_type", "")).strip().lower() or None
-                reset_history = payload.get("reset_history", False)
-                if type(reset_history) is not bool or (reset_history and payload.get("confirm_reset_session_id") != sid):
-                    await self._send_json(writer, 409, {"error": "请先确认清空原发言并重开此会议"})
-                    return
+                reset_history = bool(payload.get("reset_history", False))
                 start_kwargs = dict(
                     topic=topic,
                     collab_mode=collab_mode,
@@ -1088,27 +1059,119 @@ class AsyncHTTPServer:
             self.orchestrator.unsubscribe_session_sse(sess, queue)
 
 
-async def run_async_server(
-    host: str, port: int, workspace_dir: str, *, notify_parent: bool = False, listen_fd: Optional[int] = None,
-) -> None:
+def _is_tcp_port_actively_listening(host: str, port: int) -> bool:
     import socket
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM) if listen_fd is None else socket.socket(fileno=listen_fd)
+
+    if port <= 0:
+        return False
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        if listen_fd is None:
-            listener.bind((host, port))
-        else:
-            listener.set_inheritable(False)
-            if (listener.family != socket.AF_INET or listener.type != socket.SOCK_STREAM
-                    or host != "127.0.0.1" or listener.getsockname() != (host, port)):
-                raise ValueError("Mac 启动器传入的监听地址无效")
-        port = listener.getsockname()[1]
+        probe.settimeout(0.05)
+        return probe.connect_ex((host, port)) == 0
+    except OSError:
+        return False
+    finally:
+        try:
+            probe.close()
+        except OSError:
+            pass
+
+
+def _bind_server_listener(host: str, requested_port: int, *, allow_fallback: bool = False) -> Tuple["object", int]:
+    import errno
+    import socket
+
+    if allow_fallback and requested_port > 0:
+        candidates = [requested_port] + list(range(requested_port + 1, requested_port + 96)) + [0]
+    else:
+        candidates = [requested_port]
+
+    last_err: Optional[OSError] = None
+    for cand_port in candidates:
+        if cand_port > 0 and _is_tcp_port_actively_listening(host, cand_port):
+            last_err = OSError(errno.EADDRINUSE, f"Address already in use: {host}:{cand_port}")
+            if allow_fallback:
+                continue
+            raise last_err
+
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            if os.name == "posix" and sys.platform != "cygwin":
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind((host, cand_port))
+            listener.listen(128)
+            bound_port = int(listener.getsockname()[1])
+            return listener, bound_port
+        except OSError as exc:
+            last_err = exc
+            try:
+                listener.close()
+            except OSError:
+                pass
+            if allow_fallback and exc.errno in (errno.EADDRINUSE, errno.EACCES):
+                continue
+            raise
+
+    if last_err is not None:
+        raise last_err
+    raise OSError("无法绑定本地控制面监听端口")
+
+
+async def run_async_server(host: str, port: int, workspace_dir: str, *, notify_parent: bool = False) -> None:
+    import signal
+
+    listener, port = _bind_server_listener(host, port, allow_fallback=notify_parent)
+    try:
         app = AsyncHTTPServer(host=host, port=port, workspace_dir=workspace_dir)
         server = await asyncio.start_server(
             app.handle_client, sock=listener, limit=max(MAX_REQUEST_LINE_BYTES, MAX_HEADER_LINE_BYTES) + 256,
         )
     except BaseException:
-        listener.close()
+        try:
+            listener.close()
+        except Exception:
+            pass
         raise
+
+    stop_requested = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def _trigger_graceful_stop() -> None:
+        if not stop_requested.is_set():
+            stop_requested.set()
+            server.close()
+
+    if os.name == "posix":
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(sig, _trigger_graceful_stop)
+            except (NotImplementedError, RuntimeError, ValueError):
+                pass
+
+    raw_parent_pid = os.environ.get("AI_ROUNDTABLE_BOOT_PARENT_PID", "").strip()
+    parent_watch_task: Optional[asyncio.Task] = None
+    if raw_parent_pid.isdigit() and int(raw_parent_pid) > 1:
+        expected_ppid = int(raw_parent_pid)
+
+        async def _watch_parent_liveness() -> None:
+            while not stop_requested.is_set():
+                await asyncio.sleep(1.5)
+                parent_gone = False
+                if os.name == "posix" and os.getppid() == 1 and expected_ppid != 1:
+                    parent_gone = True
+                else:
+                    try:
+                        os.kill(expected_ppid, 0)
+                    except ProcessLookupError:
+                        parent_gone = True
+                    except PermissionError:
+                        parent_gone = False
+                if parent_gone:
+                    _trigger_graceful_stop()
+                    return
+
+        parent_watch_task = asyncio.create_task(_watch_parent_liveness())
+
     if notify_parent:
         print(f"ROUNDTABLE_PORT={port}", flush=True)
     asyncio.create_task(app.orchestrator.runner.prewarm())
@@ -1132,7 +1195,17 @@ async def run_async_server(
     try:
         async with server:
             await server.serve_forever()
+    except asyncio.CancelledError:
+        if not stop_requested.is_set():
+            raise
     finally:
+        stop_requested.set()
+        if parent_watch_task is not None and not parent_watch_task.done():
+            parent_watch_task.cancel()
+            try:
+                await parent_watch_task
+            except BaseException:
+                pass
         await app.orchestrator.shutdown()
 
 
@@ -1142,14 +1215,12 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8765, help="监听端口 (默认 8765)")
     parser.add_argument("--workspace", default="", help="新建会话默认工作目录（默认未绑定纯研讨模式）")
     parser.add_argument("--notify-parent", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--listen-fd", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--wait-for-parent", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.wait_for_parent and sys.stdin.buffer.readline(16).strip() != b"START":
         return
     try:
-        asyncio.run(run_async_server(args.host, args.port, args.workspace,
-                                     notify_parent=args.notify_parent, listen_fd=args.listen_fd))
+        asyncio.run(run_async_server(args.host, args.port, args.workspace, notify_parent=args.notify_parent))
     except KeyboardInterrupt:
         print("\n服务已关闭。")
 
