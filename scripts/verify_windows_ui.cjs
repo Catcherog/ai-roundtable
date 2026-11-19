@@ -28,14 +28,26 @@ async function until(fn, ms=30000) {
   const childQuery=spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',
     "Get-CimInstance Win32_Process -Filter 'ParentProcessId = "+proc.pid+"' | Where-Object Name -eq 'python.exe' | Select-Object -ExpandProperty ProcessId"],{encoding:'utf8'});
   assert.equal(childQuery.status,0,childQuery.stderr);backendPid=Number(childQuery.stdout.trim());assert.ok(backendPid>0);
-  await cmd('Runtime.enable');await until(()=>js("!!document.querySelector('#sseConnDot.online')"));
-  const openSettings=async()=>{await js("document.getElementById('railSettingsBtn').click()");await until(()=>js("!document.getElementById('settingsModal').classList.contains('hidden')"));};
+  await cmd('Runtime.enable');
+  const waitForMeeting=()=>until(()=>js("!!document.querySelector('#sseConnDot.online[title*=鉴权]') && Number(document.getElementById('railSessionCount').textContent)>0 && !document.getElementById('topicInput').disabled"));
+  const openSettings=async()=>{await waitForMeeting();await js("document.getElementById('railSettingsBtn').click()");await until(()=>js("!document.getElementById('settingsModal').classList.contains('hidden')"));};
   const save=async()=>{await js("document.getElementById('saveSettingsBtn').click()");await until(()=>js("document.getElementById('settingsModal').classList.contains('hidden')"));};
-  await openSettings();await js("document.querySelector('[data-settings-tab=seats]').click();const f=document.getElementById('cfgCarbonModel');f.value='gemini-4-argon';f.dispatchEvent(new Event('change',{bubbles:true}));document.getElementById('cfgCarbonEffort').value='medium';");await save();
+  const modelChip='#v4ModelChipsCarbon [data-chip-model="gemini-4-argon"]';
+  const effortChip='#v4EffortSegCarbon [data-eff-val="medium"]';
+  const clickControl=async selector=>{const target=JSON.stringify(selector);await until(()=>js(`!!document.querySelector(${target})?.getClientRects().length`));await js(`document.querySelector(${target}).click()`);};
+  const readConfig=()=>JSON.parse(fs.readFileSync(path.join(state,'config.json'),'utf8'));
+  await openSettings();
+  await js("const driver=document.getElementById('cfgCarbonDriver');driver.value='agy';driver.dispatchEvent(new Event('change',{bubbles:true}))");
+  await clickControl(modelChip);await clickControl(effortChip);
+  assert.equal(await js("document.getElementById('cfgCarbonModel').value"),'gemini-4-argon');
+  assert.equal(await js("document.getElementById('cfgCarbonEffort').value"),'medium');
+  await save();
+  await until(()=>{const seat=readConfig().agents.carbon;return seat.driver==='agy' && seat.model==='gemini-4-argon' && seat.discussion_effort==='medium';});
   const prev=await js('performance.timeOrigin');await cmd('Page.reload');
-  await until(()=>js("performance.timeOrigin!=="+prev+" && !!document.querySelector('#sseConnDot.online')"));
+  await until(()=>js("performance.timeOrigin!=="+prev));
   await openSettings();assert.equal(await js("document.getElementById('cfgCarbonModel').value"),'gemini-4-argon');
   assert.equal(await js("document.getElementById('cfgCarbonEffort').value"),'medium');
+  await until(()=>js(`document.querySelector(${JSON.stringify(modelChip)})?.classList.contains('active') && document.querySelector(${JSON.stringify(effortChip)})?.classList.contains('active')`));
   for(const [key,count] of [['full_jury_6',6],['classic_triad',3]]){
     await js("document.querySelector('[data-settings-tab=lineup]').click();document.querySelector('[data-modal-lineup="+key+"]').click();");await save();
     await until(()=>js("document.getElementById('ringSeatCountLabel').textContent.startsWith('"+count+"')"));if(count===6)await openSettings();
@@ -46,7 +58,7 @@ async function until(fn, ms=30000) {
   await js("document.querySelector('#v4AttachmentTray .v4-att-remove').click()");
   await until(()=>js("!document.querySelector('#v4AttachmentTray .v4-att-card')"));
   console.log('PASS WebView2 attachment drop, authenticated upload and removal');
-  const stored=JSON.parse(fs.readFileSync(path.join(state,'config.json'),'utf8'));assert.equal(stored.agents.carbon.model,'gemini-4-argon');assert.deepEqual(errors,[]);
+  assert.equal(readConfig().agents.carbon.model,'gemini-4-argon');assert.deepEqual(errors,[]);
   console.log('PASS native Windows EXE, WebView2 trust bridge, live SSE, saved model after reload, six-to-three roster');
  }finally{
   if(ws)ws.close();
