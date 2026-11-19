@@ -1,6 +1,6 @@
 # AI 圆桌使用手册
 
-[返回项目首页](../README.md) · [下载 Windows x64](https://github.com/Catcherog/ai-roundtable/releases/latest/download/AI-Roundtable-Windows-x64.zip) · [下载 Apple 芯片 Mac 版](https://github.com/Catcherog/ai-roundtable/releases/latest/download/AI-Roundtable-macOS-arm64.zip) · [English overview](../README.en.md)
+[项目中文首页](../README.zh-CN.md) · [下载 Windows x64](https://github.com/Catcherog/ai-roundtable/releases/latest/download/AI-Roundtable-Windows-x64.zip) · [下载 Apple 芯片 Mac 版](https://github.com/Catcherog/ai-roundtable/releases/latest/download/AI-Roundtable-macOS-arm64.zip) · [English overview](../README.md)
 
 ## 安装与首次打开
 
@@ -27,7 +27,7 @@
 ## 从议题到纪要
 
 1. **选一个场景。** 有两个选项时，点开场页的「方案利弊红蓝辩证包」；看界面截图选「产品体验与多模态走查包」，审代码选「工程研发与代码审查包」。只想快速听个意见，也可以展开阵容预设，选「单席专注」。
-2. **输入一个可以做决定的问题。** 初次使用可照抄[首页的待办 App 取舍题](../README.md#第一场会就问一道有取舍的题)，点「开始研讨」。真实评审时把时间、资源和什么情况下算失败也写进题目。
+2. **输入一个可以做决定的问题。** 初次使用可照抄[首页的待办 App 取舍题](../README.zh-CN.md#第一场会就问一道有取舍的题)，点「开始研讨」。真实评审时把时间、资源和什么情况下算失败也写进题目。
 3. **让追问有落点。** 用 `@席位名` 指定回答者，或在白板风险项上点「定向讨论」。需要看源码时，输入 `@` 搜索文件，可以继续加上 `:起始行-结束行`。界面会显示选中的引用范围。
 4. **整理白板。** 共识、风险与任务可以手工添加和编辑。开会前写下的约束会带入第一轮。将风险「采纳为共识」会把它移入共识栏；取消勾选任务会将它排除在本轮执行范围之外。
 5. **形成决议并导出。** 等本轮结束后点「形成决议」，需要时将决议条目同步至白板。「复制纪要」可用于粘贴，「导出 .md」生成文件。桌面版优先保存到「下载」目录并提示路径，浏览器版走浏览器下载。纪要包含完整研讨记录，分享前可以删去不适合公开的内容。

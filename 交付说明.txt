@@ -8,4 +8,4 @@ Apple 芯片 Mac：需要 macOS 12 或以上、Python 3.9+。解压 AI-Roundtabl
 从源码构建 Windows 版需要 PowerShell 7 和 .NET 8 SDK，运行 pwsh -File scripts/build_windows.ps1。
 构建 Mac 版需要 Apple Command Line Tools，运行 bash scripts/build_macos_app.sh。
 发行页的 SHA256SUMS.txt 用于核对下载包。源码包内的同名清单用于逐文件校验。
-中英文介绍见 README.md 和 README.en.md。安装与工作区回滚说明见 docs/guide.zh-CN.md。
+英文介绍见 README.md，中文介绍见 README.zh-CN.md。安装与工作区回滚说明见 docs/guide.zh-CN.md。

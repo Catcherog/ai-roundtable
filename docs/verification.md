@@ -1,6 +1,6 @@
 # 验证记录 · Verification
 
-[简体中文](../README.md) · [English](../README.en.md)
+[English](../README.md) · [简体中文](../README.zh-CN.md)
 
 ## 真实 CLI 并行 · Live CLI concurrency
 

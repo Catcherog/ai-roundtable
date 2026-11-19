@@ -1,67 +1,78 @@
-<p align="center"><img src="docs/images/roundtable-avatar.png" alt="AI 圆桌项目头像" width="104" height="104"></p>
-<h1 align="center">AI 圆桌</h1>
-<p align="center"><strong>好方案，值得一个反对席。</strong></p>
-<p align="center">简体中文 · <a href="README.en.md">English</a></p>
+<h1 align="center">AI Roundtable</h1>
+<p align="center"><strong>Give your best idea a dissenting voice.</strong></p>
+<p align="center">English · <a href="README.zh-CN.md">简体中文</a></p>
 
-AI 圆桌是一款 Windows 和 macOS 桌面应用。把一个需要取舍的问题交给 **1–6 个 AI 席位**，让一席提案、一席找反例、一席把争论落到可以验证的下一步。你可以中途点名追问，沿着白板找到一条建议的原话，最后决定哪些结论和任务值得留下。
+AI Roundtable is a Windows and macOS desktop app for decisions that deserve a second opinion. Give **1–6 AI seats** the same question. One can propose a plan, another can look for the case that breaks it, and a third can design a test. As chair, you can question a specific seat, trace a whiteboard item to the remark behind it, and choose which tasks go forward.
 
-手头只有一个能用的 AI 命令行工具就能开会。也可以让 **Codex、Claude Code、Antigravity、Grok 或 Ollama** 坐到同一桌，逐席选择模型和推理档位。
+Start with one working command-line AI tool, or seat **Codex, Claude Code, Antigravity, Grok and Ollama** at the same table. Each seat can use its own model and supported reasoning settings. The app interface is in Simplified Chinese.
 
-**[下载 Windows x64 版](https://github.com/Catcherog/ai-roundtable/releases/latest/download/AI-Roundtable-Windows-x64.zip)** · **[下载 Apple 芯片 Mac 版](https://github.com/Catcherog/ai-roundtable/releases/latest/download/AI-Roundtable-macOS-arm64.zip)** · [版本与校验值](https://github.com/Catcherog/ai-roundtable/releases/latest)
+**[Download for Windows x64](https://github.com/Catcherog/ai-roundtable/releases/latest/download/AI-Roundtable-Windows-x64.zip)** · **[Download for Apple silicon](https://github.com/Catcherog/ai-roundtable/releases/latest/download/AI-Roundtable-macOS-arm64.zip)** · [Release notes & checksums](https://github.com/Catcherog/ai-roundtable/releases/latest)
 
-[核心亮点](#核心亮点) · [试开第一场会](#第一场会就问一道有取舍的题) · [安装与使用手册](docs/guide.zh-CN.md) · [v4.0.2 升级提醒](#从-v402-升级)
+[Highlights](#highlights) · [Try your first session](#try-a-question-that-forces-a-choice) · [User guide (Chinese)](docs/guide.zh-CN.md) · [Upgrading from v4.0.2](#upgrading-from-v402)
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/roundtable-5.5.1-dark.png">
-  <img src="docs/images/roundtable-5.5.1.png" alt="5.5.1 开场界面。三个 AI 席位已就座，主持人选好方案辩证，准备讨论离线记录和跨设备同步哪个先做。">
+  <img src="docs/images/roundtable-5.5.1.png" alt="The 5.5.1 start screen with three seats, the trade-off debate selected, and a question about offline capture versus cross-device sync ready to send.">
 </picture>
 
-## 核心亮点
+<a name="核心亮点"></a>
 
-- **先独立判断，再交换意见。** 在「深度研讨」的首轮，各席拿到同一份上下文，看不到同批其他席位刚写的答案。到了交叉质询，再让大家对着彼此的理由发问。选「正反辩证」会换一种节奏，提案席要在反方指出问题后回应或修正方案。
-- **分清模型共识和主持人决定。** 同一套 Codex 分饰架构师、审计官和工程师时，纪要会标出同源。不同驱动参与并完成质询后，白板可以记录交叉共识。你亲自拍板的条目标为「主持指定约束」，复盘时仍看得清是谁做的决定。
-- **只追一个有争议的点。** 在白板上选中一条风险，点「双席再辩 1 轮」，让正反两席围绕它作答。也可以用 `@席位名` 指定回答者。有来源标记的白板条目可以点回原发言，核对对方说过什么、附了什么条件。
-- **让评审对得上代码和画面。** 绑定项目后，用 `@文件名:起始行-结束行` 把一段实现带进讨论。做体验走查时可以粘贴或拖入截图，请支持看图的模型指出哪个按钮可能让人点错，并说明画面里的依据。
-- **散会时带走一份能复查的纪要。** 白板分别保留已采纳的判断、尚待解决的风险和待办。放弃的方案单独留档。导出的 Markdown 连同任务勾选状态、弃案和各席原始发言一起保存，下次评审能接着上次的取舍谈。
-- **从结论走到一次可控的改动。** 勾选本轮要做的任务、指定执行席，先用「只读预演」看建议或补丁。选择「写入工作区」后，圆桌先为受管文件建立快照。回滚时如果发现后来有人手改过文件，会列出冲突供你核对。[执行与回滚说明](docs/guide.zh-CN.md#执行与回滚)
+## Highlights
 
-**一个工具能同时带几席？** 在 v3.0.0 的一次 Apple 芯片 Mac 实测中，同一套已登录的 Antigravity CLI 同时运行了 6 个进程。六席完成首轮共用 29.3 秒，含汇总用时 57.7 秒。[查看模型、测试条件及 3–6 席完整记录](docs/verification.md)
+- **Get independent first impressions.** In Deep discussion, the opening seats start from the same context before they see each other’s answers. They can then question one another’s assumptions. Trade-off debate uses a different sequence. The proposer has to answer the critic’s objection and can revise the plan.
+- **See who actually agrees.** One Codex installation can play architect, auditor and engineer. The minutes flag that shared origin. When different drivers participate and complete a round of questioning, the board can record a cross-checked conclusion. Decisions you make yourself carry the chair’s label.
+- **Reopen one point of disagreement.** Pick a risk on the board and give two seats one more round on that point. Use `@` and a seat name to direct a question. On a board item linked to a message, click its author badge to read the original wording and qualifications.
+- **Review the evidence in context.** Bind a project folder and cite a file and line range, such as `@backend/storage.py:73-84`. For a design review, paste or drop in a screenshot and ask an image-capable model which control a first-time user would click and what drew their eye there.
+- **Keep the reasoning alongside the decision.** The whiteboard tracks accepted conclusions, open risks and tasks. Set a discarded proposal aside and it gets its own place in the record. Export Markdown to keep the task selections, discarded options and original remarks together for the next review.
+- **Turn selected tasks into a reviewable change.** Choose the tasks and the seat doing the work, then start with a read-only preview of its proposal or patch. If you enable workspace writes, Roundtable snapshots managed files first. A rollback checks for later edits and shows conflicts so you can inspect them. [Execution and rollback guide (Chinese)](docs/guide.zh-CN.md#执行与回滚)
 
-## 看一场真实讨论
+**How many seats can one tool serve at once?** In one v3.0.0 run on an Apple silicon Mac, a single signed-in Antigravity CLI installation ran six processes at the same time. All six opening statements finished in 29.3 seconds. The session took 57.7 seconds including the summary. [Model, test conditions and results for three through six seats](docs/verification.md)
 
-**如果水果投票并列第一，怎么选出唯一赢家？** 一次三席会议里，架构师提议只给并列水果加投一轮。审计官抓住了规则公布的时间，开票后再定怎么处理平票，很容易让人怀疑偏袒。工程师又补了一条容易漏掉的规则，同一场投票重复结算时，要沿用第一次抽签的结果。
+<a name="看一场真实讨论"></a>
 
-最后能写进程序的规则具体了许多。投票前先公布规则，最多加投一轮，仍平票再等概率抽签，同一场投票只认第一个有效结果。三席共用 Codex，讨论记录保留了每条补充的来路。[查看这场早期版本会议的原始截图](docs/images/roundtable-session.png)
+## A real three-seat discussion
 
-## 你手边的事，适合哪一桌？
+**How should a fruit poll return a single winner when the top choices tie?** In one session, the architect suggested a runoff among the tied choices. The auditor spotted a fairness issue. Voters should know the tie-breaker before the poll opens. The engineer noticed a different failure mode. Recalculating the same poll should reuse the first draw.
 
-| 要做的决定 | 开场页选择 | 可以这样问 |
+The resulting rule could go straight into an implementation. Announce the rule before voting, allow one runoff, draw with equal odds if the tie persists, and keep the first valid result for that poll. All three roles used Codex. [Read the original exchange in a screenshot from an earlier release](docs/images/roundtable-session.png)
+
+<a name="你手边的事适合哪一桌"></a>
+
+## Pick a session for the decision at hand
+
+| Bring this | Choose this preset in the app | Try asking |
 | --- | --- | --- |
-| 在两个产品方向中选一个 | 方案利弊红蓝辩证包 | 预算只够做一个。哪条证据会让支持 A 的人改选 B？ |
-| 审一段即将改动的代码 | 工程研发与代码审查包 | 这段逻辑遇到重复提交会发生什么？请指出对应代码，再给一个能验证判断的用例。 |
-| 查清界面为什么让人点错 | 产品体验与多模态走查包 | 请看这张截图。第一次来的用户会点哪里？哪个视觉线索把他引向那里？ |
-| 快速排查问题或打磨文稿 | 故障排查与文稿打磨包 | 这份故障说明里，哪些是已经观察到的现象？还需要什么证据才能判断原因？ |
+| Two competing product plans | Trade-off debate (方案利弊红蓝辩证包) | “We can fund one. What evidence would make the advocate for A switch to B?” |
+| Code you are about to change | Engineering review (工程研发与代码审查包) | “What happens if this operation is submitted twice? Cite the relevant lines and propose a test.” |
+| A screen that confuses users | Design critique (产品体验与多模态走查包) | “Where would a new user click first? Point to the visual cue that steers them there.” |
+| An incident report or a draft | Troubleshooting and editing (故障排查与文稿打磨包) | “Which statements describe observations? What evidence would we need before naming the cause?” |
 
-## 第一场会，就问一道有取舍的题
+<a name="第一场会就问一道有取舍的题"></a>
 
-1. 先在终端确认一个受支持的工具能回答问题。使用 Ollama 时，先准备好要调用的本地模型。在圆桌的「设置 → 席位与模型」为参会席位选好驱动和模型，点「保存配置」。
-2. 回到开场页选择「方案利弊红蓝辩证包」，贴入下面的议题，点「开始研讨」。这场会可以直接开，无需绑定项目。
+## Try a question that forces a choice
 
-   > 我们两个人做的待办 App 一周后上线，只够做「离线记录」或「跨设备同步」中的一个。请正反两席各替一个方案辩护，再各说一条会让自己改主意的证据。最后，给我一个明天就能做的验证。
+1. Make sure a supported AI tool can answer a question in your terminal. For Ollama, prepare a local model first. Open Settings (Ctrl+, on Windows or ⌘, on Mac), assign a tool and model to each participating seat under **Seats & models** (席位与模型), then save.
+2. Select **Trade-off debate** (方案利弊红蓝辩证包), paste the prompt below and click **Start** (开始研讨). You can try this without binding a project folder.
 
-3. 等首轮结束，加一个新条件「首批用户每天都坐没信号的地铁」。看看哪一席改变了判断、它原先依赖什么假设。讨论完点「形成决议」，核对白板后用「导出 .md」保存纪要。
+   > Our two-person team ships a to-do app in a week. We can build one feature, either offline capture or cross-device sync. Ask one seat to argue for each. What evidence would make each side change its mind? Give us one test we can run tomorrow.
 
-## 安装与数据
+3. After the opening exchange, add one fact. **“Our first users commute on trains with no signal.”** See who revises their advice and which assumption changed. Click **Form a decision** (形成决议), review the board, then use **Export .md** (导出 .md) to save the minutes.
 
-| 平台 | 首次打开 |
+<a name="安装与数据"></a>
+
+## Installation and data
+
+| Platform | First launch |
 | --- | --- |
-| Windows 10/11 x64 | 完整解压 ZIP，双击 `AI-Roundtable.exe`。包内已有 Python 和 .NET，桌面窗口需要 Edge WebView2。[微软运行时下载](https://developer.microsoft.com/microsoft-edge/webview2/) |
-| Apple 芯片 Mac | 需要 macOS 12 或更高版本和 Python 3.9+。解压后将 `AI圆桌.app` 拖入「应用程序」。[首次打开说明](docs/guide.zh-CN.md#安装与首次打开) |
+| Windows 10/11 x64 | Extract the entire ZIP and open `AI-Roundtable.exe`. Python and .NET are bundled. The desktop window uses Microsoft’s [Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/). |
+| Apple silicon | Requires macOS 12 or later and Python 3.9+. Extract the ZIP and move `AI圆桌.app` to Applications. If macOS asks you to verify its source, check the release checksum and see [Apple’s guidance](https://support.apple.com/en-us/102445). |
 
-会议和设置保存在本机。桌面包使用你自己的模型服务或本地模型。使用云端 CLI 时，议题、附件或引用的代码可能发给对应服务，并使用你的额度。[模型配置](docs/guide.zh-CN.md#配置-16-个席位) · [源码运行与构建](docs/guide.zh-CN.md#源码运行与目录) · [并发实测与 Windows 验证记录](docs/verification.md)
+Meetings and settings are stored on your computer. Bring your own model access or local model. Cloud tools may send questions, attachments and cited code to their provider and use your quota. [Model setup (Chinese)](docs/guide.zh-CN.md#配置-16-个席位) · [Run or build from source (Chinese)](docs/guide.zh-CN.md#源码运行与目录) · [Concurrency measurements and Windows checks](docs/verification.md)
 
-### 从 v4.0.2 升级
+<a name="从-v402-升级"></a>
 
-**先彻底退出应用，再备份整个数据目录。** Mac 默认是 `~/.ai-roundtable/`，Windows 默认是 `%USERPROFILE%\.ai-roundtable`。设置过 `AI_ROUNDTABLE_HOME` 的用户请备份自定义目录。5.5.1 保存时只保留最近 50 场会议，整场重写时只保留最近 500 条发言。删除会议后无法从回收站恢复。受管文件总量超过 128 MiB 的项目请选择较小的子目录。需要旧版历史保留方式或大项目根目录支持时，可以[继续使用 v4.0.2](https://github.com/Catcherog/ai-roundtable/releases/tag/v4.0.2)。
+### Upgrading from v4.0.2
 
-[反馈问题或分享你的圆桌用法](https://github.com/Catcherog/ai-roundtable/issues)
+**Quit the app and back up the whole data directory first.** The default is `~/.ai-roundtable/` on Mac or `%USERPROFILE%\.ai-roundtable` on Windows. If you set `AI_ROUNDTABLE_HOME`, back up that directory instead. On save, 5.5.1 retains the 50 most recent meetings. A full rewrite of a meeting retains its last 500 messages. Deleted meetings have no recovery bin. For projects with more than 128 MiB of managed files, bind a smaller subfolder. If you depend on the older history or large-folder behavior, you can [stay on v4.0.2](https://github.com/Catcherog/ai-roundtable/releases/tag/v4.0.2).
+
+[Report an issue or share a question worth debating](https://github.com/Catcherog/ai-roundtable/issues)
