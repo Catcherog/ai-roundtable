@@ -498,6 +498,8 @@ def _normalize_and_sync_whiteboard(
         wb["disagreements"] = []
     if not isinstance(wb.get("abandoned_proposals"), list):
         wb["abandoned_proposals"] = []
+    if not isinstance(wb.get("absorbed_highlights"), list):
+        wb["absorbed_highlights"] = []
     if not isinstance(wb.get("round_summaries"), list):
         wb["round_summaries"] = []
     if not isinstance(wb.get("resolution_meta"), dict):

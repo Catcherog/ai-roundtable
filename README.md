@@ -1,78 +1,173 @@
-<h1 align="center">AI Roundtable</h1>
-<p align="center"><strong>Give your best idea a dissenting voice.</strong></p>
-<p align="center">English · <a href="README.zh-CN.md">简体中文</a></p>
+<h1 align="center">AI Roundtable · AI 圆桌</h1>
 
-AI Roundtable is a Windows and macOS desktop app for decisions that deserve a second opinion. Give **1–6 AI seats** the same question. One can propose a plan, another can look for the case that breaks it, and a third can design a test. As chair, you can question a specific seat, trace a whiteboard item to the remark behind it, and choose which tasks go forward.
+<p align="center">
+  <strong>Give your best idea a dissenting voice — and walk away with a decision brief you can ship.</strong>
+</p>
 
-Start with one working command-line AI tool, or seat **Codex, Claude Code, Antigravity, Grok and Ollama** at the same table. Each seat can use its own model and supported reasoning settings. The app interface is in Simplified Chinese.
+<p align="center">
+  <code>Windows 10/11 x64</code> · <code>macOS 12+ Apple silicon</code> · <code>100% Python stdlib</code> · <code>Local SQLite</code> · <code>Bring Your Own CLI</code>
+</p>
 
-**[Download for Windows x64](https://github.com/Catcherog/ai-roundtable/releases/latest/download/AI-Roundtable-Windows-x64.zip)** · **[Download for Apple silicon](https://github.com/Catcherog/ai-roundtable/releases/latest/download/AI-Roundtable-macOS-arm64.zip)** · [Release notes & checksums](https://github.com/Catcherog/ai-roundtable/releases/latest)
+<p align="center">
+  <strong>English</strong> · <a href="README.zh-CN.md">简体中文</a> · <a href="docs/guide.zh-CN.md">使用手册</a> · <a href="docs/verification.md">Benchmarks &amp; CI Checks</a>
+</p>
 
-[Highlights](#highlights) · [Try your first session](#try-a-question-that-forces-a-choice) · [User guide (Chinese)](docs/guide.zh-CN.md) · [Upgrading from v4.0.2](#upgrading-from-v402)
+<p align="center">
+  <a href="https://github.com/Catcherog/ai-roundtable/releases/latest/download/AI-Roundtable-Windows-x64.zip"><strong>⬇ Download for Windows x64</strong></a>
+  &nbsp;·&nbsp;
+  <a href="https://github.com/Catcherog/ai-roundtable/releases/latest/download/AI-Roundtable-macOS-arm64.zip"><strong>⬇ Download for macOS (Apple silicon)</strong></a>
+  &nbsp;·&nbsp;
+  <a href="https://github.com/Catcherog/ai-roundtable/releases/latest">Release notes &amp; SHA-256</a>
+</p>
+
+AI Roundtable is a local-first Windows and macOS desktop app for architecture, code review, product prioritization, and troubleshooting decisions that deserve real pushback. Seat **1–6 AI roles** around the same problem — starting with a single CLI tool you already use, or mixing **Codex, Claude Code, Antigravity (Gemini), Grok, and Ollama** at the same table with per-seat models and reasoning effort levels.
+
+Instead of polite single-chat agreement or messy multi-tab copy-pasting, AI Roundtable runs a structured **blind opening → itemized cross-critique (`D1..Dn`) → targeted rebuttal → conditional challenger sign-off → multi-seat audited decision brief** pipeline, then lets you preview or apply selected tasks with pre-write byte snapshots and conflict-checked rollback. *(The app interface is in Simplified Chinese.)*
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/roundtable-5.5.1-dark.png">
-  <img src="docs/images/roundtable-5.5.1.png" alt="The 5.5.1 start screen with three seats, the trade-off debate selected, and a question about offline capture versus cross-device sync ready to send.">
+  <img src="docs/images/roundtable-5.5.1.png" alt="AI Roundtable start screen with three seats configured, trade-off debate selected, and a product prioritization prompt ready to launch.">
 </picture>
 
+## Why not just open three chat tabs?
+
+| Opening 3 chat tabs manually | Running a session in AI Roundtable |
+| :--- | :--- |
+| **Copy-paste fatigue & anchoring:** Later prompts get biased by how you summarize earlier answers. | **Blind parallel opening:** Every seat forms its initial architecture or root-cause thesis on an isolated snapshot before seeing peers. |
+| **Hand-wavy excuses pass unchallenged:** A criticized model says "not an issue" and moves on. | **Itemized `D1..Dn` ledger & Challenger Sign-Off:** Every critique gets an ID. Accepted fixes fast-path; counter-proof refusals wake the original challenger to verify or lock the dispute as a conditional fallback. |
+| **Summaries flatten away hard details:** Single-model summaries drop SQL schemas, thresholds, and edge cases, or resurrect rejected ideas. | **Lossless Self-Contained Decision Brief:** Extracts each seat's latest post-rebuttal contracts, runs reverse-anchored multi-seat sign-off, rescues omitted code blocks via **Delta Guard**, and quarantines rejected proposals in a negative list. |
+| **Fake "consensus" from one model:** Three prompts on the same model look like independent agreement. | **Epistemic provenance badges:** Flags `[Single-seat]`, `[Homogeneous multi-perspective]` (with orthogonal audit lenses per seat), vs. `[Heterogeneous cross-verified]` consensus, and separates `Chair directives`. |
+| **Disconnect between debate and code:** You still have to rewrite the final prompt for your coding agent. | **Contract-passthrough execution & CAS rollback:** Sends checked tasks + the full final contract + banned-proposal guardrails to your chosen executor seat, backed by pre-write snapshots. |
+
+## How a roundtable converges
+
+```mermaid
+flowchart LR
+    A["Question · @file:lines · Screenshot"] --> B["1. Blind Parallel Opening\n(Isolated snapshot)"]
+    B --> C["2. Steel-Man Cross-Critique\n(Assigns D1..Dn + Absorptions)"]
+    C --> D["3. Targeted Rebuttal\n& Conditional Challenger Sign-Off"]
+    D --> E["4. Reverse-Anchored Audit\n& Self-Contained Decision Brief"]
+    E --> F["5. Read-Only Diff Preview\nor Snapshot-Guarded Write"]
+```
+
+<details>
+<summary><strong>Preview: What the exported "Self-Contained Decision Brief" looks like</strong></summary>
+
+When you click **Form a decision** (`形成决议`) and **Copy Decision Brief** (`复制决策包`) or **Export .md** (`导出 .md`), you get a single Markdown package ready to paste into an RFC, pull request, or coding agent — without losing code contracts or letting rejected ideas sneak back in:
+
+```markdown
+# 《AI圆桌决策包》 — Cross-Region State Ledger & Retry Strategy
+> Epistemic status: `[异构独立引擎交叉核验]` | Strategy: Deep Deliberation | Audit: Verified by 3 auditor seats
+
+## 一、核心决策总览（TL;DR）
+- Adopt monotonic `fencing_ledger_v3` lease validation with 4-tier jittered backoff; ban unguarded raw pointer swaps.
+
+## 二、已确认共识与完整实施方案
+```sql
+CREATE TABLE fencing_ledger_v3 (epoch BIGINT PRIMARY KEY, fencing_token TEXT NOT NULL);
+```
+
+## 三、多 AI 思想精华与纠偏演进表
+| 核心议题 | 初始方案 | 纠偏来源与盲区指出 | 终态采纳方案与精华归属 |
+| :--- | :--- | :--- | :--- |
+| Split-brain guard | Raw lock table | UX/Audit flagged stale-leader overwrite | `fencing_ledger_v3` (Architect + Red Team) |
+
+## 四、已确认放弃与证伪淘汰方案（防回流负面清单）
+- [已淘汰] `CREATE TABLE raw_lock_v1` — Lacks fencing token under network partition; strictly banned in implementation.
+
+## 五、高价值少数派意见与条件触发预案
+- When billing settlement QPS > 5,000 or zero-RPO is required → switch async replication to semi-sync quorum (Source: Lead Eng).
+
+## 六、边界风险防线、参会披露与文件级待执行任务清单
+- [x] Implement `fencing_ledger_v3` schema & 250ms lease circuit breaker
+- [ ] Add background thread-pool hashing for payloads > 64MB
+
+## 附：会议白板全量台账同步（零遗漏核对）
+### 未合入独创技术契约与代码块差集补录 (Delta Guard)
+- Automatically appends any surviving per-seat code contract omitted by the lead synthesizer, with zero duplication.
+```
+</details>
+
 <a name="核心亮点"></a>
+<a name="highlights"></a>
 
 ## Highlights
 
-- **Get independent first impressions.** In Deep discussion, the opening seats start from the same context before they see each other’s answers. They can then question one another’s assumptions. Trade-off debate uses a different sequence. The proposer has to answer the critic’s objection and can revise the plan.
-- **See who actually agrees.** One Codex installation can play architect, auditor and engineer. The minutes flag that shared origin. When different drivers participate and complete a round of questioning, the board can record a cross-checked conclusion. Decisions you make yourself carry the chair’s label.
-- **Reopen one point of disagreement.** Pick a risk on the board and give two seats one more round on that point. Use `@` and a seat name to direct a question. On a board item linked to a message, click its author badge to read the original wording and qualifications.
-- **Review the evidence in context.** Bind a project folder and cite a file and line range, such as `@backend/storage.py:73-84`. For a design review, paste or drop in a screenshot and ask an image-capable model which control a first-time user would click and what drew their eye there.
-- **Keep the reasoning alongside the decision.** The whiteboard tracks accepted conclusions, open risks and tasks. Set a discarded proposal aside and it gets its own place in the record. Export Markdown to keep the task selections, discarded options and original remarks together for the next review.
-- **Turn selected tasks into a reviewable change.** Choose the tasks and the seat doing the work, then start with a read-only preview of its proposal or patch. If you enable workspace writes, Roundtable snapshots managed files first. A rollback checks for later edits and shows conflicts so you can inspect them. [Execution and rollback guide (Chinese)](docs/guide.zh-CN.md#执行与回滚)
-
-**How many seats can one tool serve at once?** In one v3.0.0 run on an Apple silicon Mac, a single signed-in Antigravity CLI installation ran six processes at the same time. All six opening statements finished in 29.3 seconds. The session took 57.7 seconds including the summary. [Model, test conditions and results for three through six seats](docs/verification.md)
+- **Five collaboration topologies for different stakes:** Choose **Deep Deliberation** (`深度研讨`), **Adversarial Red/Blue Review** (`正反辩证`, scaling across 2–6 seats with zero idle bystanders), **Divergent-Convergent Exploration** (`发散收敛`), **Source-Grounded Code Review** (`代码审查`), or **Rapid Consensus** (`快速合议`).
+- **Mutual error-correction without tag fatigue:** Seats steel-man the opposing mechanism before attacking concrete failure modes, cross-pollinate strengths (`跨席互认思想精华`), and update their own terminal contracts. If you ask follow-up questions after generating a decision, **Stale Resolution Guard** automatically highlights the post-decision delta at the top of your brief.
+- **Reopen a single point of contention:** Pick any risk or `D#` item on the whiteboard for a focused **1-round two-seat re-debate** (`焦点再辩`), `@mention` a specific seat mid-meeting, or click any whiteboard author badge to jump straight to the source message.
+- **Ground debates in real code and UI screenshots:** Bind a local folder to cite exact line ranges (`@backend/storage.py:73-84`), or drag-and-drop UI screenshots so multimodal seats can audit visual hierarchy and first-click confusion.
+- **Zero-dependency local architecture:** Pure Python 3.9+ standard library backend, local SQLite storage (`~/.ai-roundtable/`), process-tree watchdogs, and native WebView2 (Windows) / Cocoa WKWebView (macOS) shells. Your API keys and CLI logins stay in your own terminal tools.
+- **Measured parallel speed:** On an Apple silicon Mac, a single signed-in Antigravity CLI ran 6 concurrent seat processes — finishing all 6 opening statements in **29.3 s** and the full synthesized session in **57.7 s**. [See full 3–6 seat benchmarks and Windows CI checks](docs/verification.md).
 
 <a name="看一场真实讨论"></a>
+<a name="a-real-three-seat-discussion"></a>
 
 ## A real three-seat discussion
 
-**How should a fruit poll return a single winner when the top choices tie?** In one session, the architect suggested a runoff among the tied choices. The auditor spotted a fairness issue. Voters should know the tie-breaker before the poll opens. The engineer noticed a different failure mode. Recalculating the same poll should reuse the first draw.
+**How should a fruit poll return a single winner when the top choices tie?** In one session, the architect suggested a runoff among the tied choices. The auditor spotted a fairness flaw: voters must know the tie-breaker *before* the poll opens, or the rule looks rigged. The engineer caught an idempotency bug: recalculating the same poll must reuse the first random draw rather than re-rolling.
 
-The resulting rule could go straight into an implementation. Announce the rule before voting, allow one runoff, draw with equal odds if the tie persists, and keep the first valid result for that poll. All three roles used Codex. [Read the original exchange in a screenshot from an earlier release](docs/images/roundtable-session.png)
+The resulting rule went straight into code: announce the tie-breaker upfront, run at most one runoff, draw with equal odds if still tied, and persist the first valid draw per poll ID. [View the original session screenshot](docs/images/roundtable-session.png).
 
 <a name="你手边的事适合哪一桌"></a>
+<a name="pick-a-session-for-the-decision-at-hand"></a>
 
 ## Pick a session for the decision at hand
 
 | Bring this | Choose this preset in the app | Try asking |
-| --- | --- | --- |
-| Two competing product plans | Trade-off debate (方案利弊红蓝辩证包) | “We can fund one. What evidence would make the advocate for A switch to B?” |
-| Code you are about to change | Engineering review (工程研发与代码审查包) | “What happens if this operation is submitted twice? Cite the relevant lines and propose a test.” |
-| A screen that confuses users | Design critique (产品体验与多模态走查包) | “Where would a new user click first? Point to the visual cue that steers them there.” |
-| An incident report or a draft | Troubleshooting and editing (故障排查与文稿打磨包) | “Which statements describe observations? What evidence would we need before naming the cause?” |
+| :--- | :--- | :--- |
+| Two competing product or architecture plans | **Trade-off debate** (`方案利弊红蓝辩证包`) | “We can fund only one. What concrete failure case or metric would make the advocate for A switch to B?” |
+| Code you are about to refactor or ship | **Engineering review** (`工程研发与代码审查包`) | “What breaks if this endpoint is called twice concurrently? Cite exact lines and give a regression test.” |
+| A screen that confuses first-time users | **Design critique** (`产品体验与多模态走查包`) | “Where will a new user click first? Point to the visual cue that steers them there.” |
+| An incident postmortem or technical draft | **Troubleshooting & editing** (`故障排查与文稿打磨包`) | “Separate verified observations from unverified root-cause assumptions. What single check rules out the top suspect?” |
 
 <a name="第一场会就问一道有取舍的题"></a>
+<a name="try-a-question-that-forces-a-choice"></a>
 
-## Try a question that forces a choice
+## Try your first session in 2 minutes
 
-1. Make sure a supported AI tool can answer a question in your terminal. For Ollama, prepare a local model first. Open Settings (Ctrl+, on Windows or ⌘, on Mac), assign a tool and model to each participating seat under **Seats & models** (席位与模型), then save.
-2. Select **Trade-off debate** (方案利弊红蓝辩证包), paste the prompt below and click **Start** (开始研讨). You can try this without binding a project folder.
-
-   > Our two-person team ships a to-do app in a week. We can build one feature, either offline capture or cross-device sync. Ask one seat to argue for each. What evidence would make each side change its mind? Give us one test we can run tomorrow.
-
-3. After the opening exchange, add one fact. **“Our first users commute on trains with no signal.”** See who revises their advice and which assumption changed. Click **Form a decision** (形成决议), review the board, then use **Export .md** (导出 .md) to save the minutes.
-
-<a name="安装与数据"></a>
-
-## Installation and data
+### Option A: Desktop app (Windows & macOS)
 
 | Platform | First launch |
-| --- | --- |
-| Windows 10/11 x64 | Extract the entire ZIP and open `AI-Roundtable.exe`. Python and .NET are bundled. The desktop window uses Microsoft’s [Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/). |
-| Apple silicon | Requires macOS 12 or later and Python 3.9+. Extract the ZIP and move `AI圆桌.app` to Applications. If macOS asks you to verify its source, check the release checksum and see [Apple’s guidance](https://support.apple.com/en-us/102445). |
+| :--- | :--- |
+| **Windows 10/11 x64** | Extract the full ZIP and run `AI-Roundtable.exe`. Python and .NET are bundled; uses Microsoft [Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/). |
+| **macOS (Apple silicon)** | Requires macOS 12+ and Python 3.9+. Extract the ZIP and drag `AI圆桌.app` to Applications. ([First-launch verification tip](https://support.apple.com/en-us/102445)) |
 
-Meetings and settings are stored on your computer. Bring your own model access or local model. Cloud tools may send questions, attachments and cited code to their provider and use your quota. [Model setup (Chinese)](docs/guide.zh-CN.md#配置-16-个席位) · [Run or build from source (Chinese)](docs/guide.zh-CN.md#源码运行与目录) · [Concurrency measurements and Windows checks](docs/verification.md)
+### Option B: Run from source in 30 seconds (Zero `pip install`)
+
+Because the backend uses **100% Python standard library**, you can launch the full web workbench directly from source on macOS or Linux once at least one supported CLI (`codex`, `claude`, `agy`, `grok`, or `ollama`) works in your terminal:
+
+```bash
+git clone https://github.com/Catcherog/ai-roundtable.git
+cd ai-roundtable
+bash scripts/start_web.sh
+```
+
+### A first question worth testing
+
+1. Open **Settings** (`Ctrl+,` on Windows / `⌘,` on Mac), assign your working CLI and model under **Seats & models** (`席位与模型`), and save.
+2. Pick **Trade-off debate** (`方案利弊红蓝辩证包`), paste the prompt below, and click **Start** (`开始研讨`):
+
+   > Our two-person team ships a to-do app in a week. We can build only one feature: offline capture or cross-device sync. Have one seat argue for each, state what evidence would make each side switch, and give us one validation test we can run tomorrow.
+
+3. After Round 1 finishes, inject a live constraint: **“Our first users commute on subways with zero signal.”** Watch which seat revises its contract, click **Form a decision** (`形成决议`), and click **Copy Decision Brief** (`复制决策包`) to inspect the final package.
+
+<a name="安装与数据"></a>
+<a name="installation-and-data"></a>
+
+## Privacy, data & local storage
+
+- **100% local state:** All session history, whiteboards, attachments, and CAS workspace backups live on your machine (`~/.ai-roundtable/` on macOS, `%USERPROFILE%\.ai-roundtable` on Windows).
+- **Bring your own CLI / local model:** AI Roundtable includes no telemetry or middleman proxy. Cloud CLIs send prompts and cited files directly to their respective providers under your own account; use **Ollama** for fully offline local sessions.
+- **Guides & verification:** [Chinese User Guide](docs/guide.zh-CN.md) · [Build macOS `.app` / Windows `.exe` from source](docs/guide.zh-CN.md#源码运行与目录) · [Concurrency & CI verification](docs/verification.md) · [Windows Desktop CI workflow](https://github.com/Catcherog/ai-roundtable/actions/workflows/windows.yml)
 
 <a name="从-v402-升级"></a>
+<a name="upgrading-from-v402"></a>
 
 ### Upgrading from v4.0.2
 
-**Quit the app and back up the whole data directory first.** The default is `~/.ai-roundtable/` on Mac or `%USERPROFILE%\.ai-roundtable` on Windows. If you set `AI_ROUNDTABLE_HOME`, back up that directory instead. On save, 5.5.1 retains the 50 most recent meetings. A full rewrite of a meeting retains its last 500 messages. Deleted meetings have no recovery bin. For projects with more than 128 MiB of managed files, bind a smaller subfolder. If you depend on the older history or large-folder behavior, you can [stay on v4.0.2](https://github.com/Catcherog/ai-roundtable/releases/tag/v4.0.2).
+**Quit the app and back up your entire data directory first** (`~/.ai-roundtable/` on Mac, `%USERPROFILE%\.ai-roundtable` on Windows, or your custom `AI_ROUNDTABLE_HOME`). Current releases retain the 50 most recent meetings on save and up to 500 messages on full session rewrite; deleted meetings have no recycle bin, and workspace binding caps managed regular files at 128 MiB (bind a specific subfolder for monorepos). Users who rely on unlimited legacy retention can [stay on v4.0.2](https://github.com/Catcherog/ai-roundtable/releases/tag/v4.0.2).
 
-[Report an issue or share a question worth debating](https://github.com/Catcherog/ai-roundtable/issues)
+<p align="center">
+  <a href="https://github.com/Catcherog/ai-roundtable/issues">Report an issue or share a question worth debating →</a>
+</p>

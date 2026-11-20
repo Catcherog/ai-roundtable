@@ -2642,6 +2642,23 @@ body {
   border: 1px solid var(--astra-border);
 }
 
+.msg-copy-brief-btn {
+  background: var(--carbon-bg);
+  color: var(--carbon-color);
+  border: 1px solid var(--carbon-border);
+  border-radius: 9px;
+  padding: 3px 10px;
+  font-size: 11.6px;
+  font-weight: 720;
+  cursor: pointer;
+  transition: transform 0.15s var(--ease-smooth), opacity 0.15s ease;
+}
+
+.msg-copy-brief-btn:hover {
+  transform: translateY(-0.5px);
+  opacity: 0.9;
+}
+
 .msg-sync-wb-btn {
   background: var(--astra-bg);
   color: var(--astra-color);

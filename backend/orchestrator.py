@@ -474,6 +474,9 @@ class MeetingSession:
         wb_copy.pop("conflict_message", None)
         wb_copy.pop("conflict_item", None)
         wb_copy.pop("_synthesis_dossier_block", None)
+        wb_copy.pop("_resolution_draft_block", None)
+        wb_copy.pop("_resolution_audit_patches_block", None)
+        wb_copy.pop("_active_seat_ids", None)
         wb_copy["can_rollback"] = False
         wb_copy["scenario_pack"] = self.scenario_pack
         wb_copy["artifact_type"] = self.artifact_type
@@ -1798,14 +1801,20 @@ class RoundtableOrchestrator:
                 next_kind: Optional[str] = None
                 if any(k in htxt for k in ("放弃", "弃案", "淘汰", "证伪", "废案", "负面清单", "不采用", "否决", "剔除")):
                     next_kind = "abandoned"
+                elif any(k in htxt for k in ("少数派", "条件触发", "保留意见", "备选预案")):
+                    next_kind = "risk"
+                elif any(k in htxt for k in ("决策总览", "思想精华", "纠偏演进", "TL;DR")):
+                    next_kind = "decision"
+                elif any(k in htxt for k in ("边界风险", "风险防线", "未决争议", "参会披露")) and any(k in htxt for k in ("待执行", "任务清单", "行动清单", "走查清单", "交付清单")):
+                    next_kind = "risk"
                 elif any(k in htxt for k in ("待执行", "任务清单", "交付清单", "交付任务", "实施清单", "落地行动", "整改清单", "定稿清单", "走查清单")):
                     next_kind = "action"
                 elif any(k in htxt for k in ("风险", "防线", "边界", "回滚", "异常", "隐患", "审计", "未决争议", "缺席")):
                     next_kind = "risk" if (is_major_sec or major_kind != "action") else "action"
+                elif any(k in htxt for k in ("共识", "结论", "裁定", "取舍", "约束", "架构", "决议", "采纳", "成果", "实施方案")):
+                    next_kind = "decision" if (is_major_sec or major_kind != "action") else "action"
                 elif any(k in htxt for k in ("实施", "任务", "清单", "执行", "改动", "步骤", "文件", "落地", "走查", "矩阵", "排查", "定稿")):
                     next_kind = "action"
-                elif any(k in htxt for k in ("共识", "结论", "裁定", "取舍", "约束", "架构", "决议", "采纳", "成果")):
-                    next_kind = "decision" if (is_major_sec or major_kind != "action") else "action"
 
                 if next_kind:
                     cur_kind = next_kind
@@ -2985,6 +2994,7 @@ class RoundtableOrchestrator:
         phase_label: str,
         is_solo_mode: bool = False,
         cue_by_agent: Optional[Dict[str, str]] = None,
+        ingest_whiteboard: bool = True,
     ) -> List[Tuple[bool, Optional[str], str, Optional[bool]]]:
         """
         混合并发/串行批次调度器（含严格首轮盲评快照隔离 Section 1.1.2）：
@@ -2998,9 +3008,15 @@ class RoundtableOrchestrator:
         outcomes_by_agent: Dict[str, Tuple[bool, Optional[str], str, Optional[bool]]] = {}
         cues = cue_by_agent or {}
 
-        # 批次级输入快照冻结：杜绝串行回退或延迟调度下的同轮次串味污染
+        # 批次级输入快照冻结：杜绝串行回退或延迟调度下的同轮次串味污染，同时携带唯一 id 确保热会话第 2 轮零丢席
         frozen_history: List[dict] = [
-            {"speaker": m["speaker_name"], "content": m["content"]}
+            {
+                "id": str(m.get("id") or ""),
+                "speaker": m["speaker_name"],
+                "speaker_id": str(m.get("speaker") or ""),
+                "phase": str(m.get("phase_label") or ""),
+                "content": m["content"],
+            }
             for m in sess.messages
             if not m.get("streaming")
             and not m.get("error")
@@ -3034,6 +3050,7 @@ class RoundtableOrchestrator:
                             stage_key,
                             phase_label,
                             cue_instruction=cues.get(aid_s, ""),
+                            ingest_whiteboard=ingest_whiteboard,
                             is_solo_mode=is_solo_mode,
                             stateless=stateless_map.get(aid_s, False),
                             shared_cli_roster=roster_desc if stateless_map.get(aid_s, False) else "",
@@ -3055,6 +3072,7 @@ class RoundtableOrchestrator:
                     stage_key,
                     phase_label,
                     cue_instruction=cues.get(aid, ""),
+                    ingest_whiteboard=ingest_whiteboard,
                     is_solo_mode=is_solo_mode,
                     stateless=stateless_map.get(aid, False),
                     shared_cli_roster=roster_desc if stateless_map.get(aid, False) else "",
@@ -3132,7 +3150,13 @@ class RoundtableOrchestrator:
             completed_msgs = list(frozen_history)
         else:
             completed_msgs = [
-                {"speaker": m["speaker_name"], "content": m["content"]}
+                {
+                    "id": str(m.get("id") or ""),
+                    "speaker": m["speaker_name"],
+                    "speaker_id": str(m.get("speaker") or ""),
+                    "phase": str(m.get("phase_label") or ""),
+                    "content": m["content"],
+                }
                 for m in sess.messages
                 if m is not existing_msg_obj
                 and not m.get("streaming")
@@ -3141,8 +3165,16 @@ class RoundtableOrchestrator:
                 and m.get("content")
                 and m.get("speaker") != "system"
             ]
-        recent_snapshot = completed_msgs[-240:] if stage_key == "synthesis" else completed_msgs[-80:]
-        prompt_whiteboard = frozen_whiteboard if frozen_whiteboard is not None else sess.whiteboard
+        recent_snapshot = (
+            completed_msgs[-240:]
+            if stage_key in ("synthesis", "resolution_audit", "resolution_merge")
+            else completed_msgs[-80:]
+        )
+        base_wb = frozen_whiteboard if frozen_whiteboard is not None else sess.whiteboard
+        prompt_whiteboard = dict(base_wb) if isinstance(base_wb, dict) else {}
+        prompt_whiteboard["_active_seat_ids"] = list(sess.enabled_agents)
+        sess_seat_names = {aid_k: self._seat_name(sess, aid_k) for aid_k in ALL_SEAT_IDS}
+        prompt_whiteboard["_seat_names_map"] = sess_seat_names
 
         self._turn_seq_counter += 1
         turn_start_seq = self._turn_seq_counter
@@ -3244,11 +3276,13 @@ class RoundtableOrchestrator:
                 shared_cli_roster=use_roster,
                 collab_mode_key=sess.collab_mode,
                 turn_override=effective_override if effective_override else None,
+                seat_names_map=sess_seat_names,
+                current_msg_id=msg_id,
             )
             try:
                 stream_gen = self.runner.stream_discussion_turn(**turn_kwargs)
             except TypeError:
-                for opt_k in ("collab_mode_key", "turn_override"):
+                for opt_k in ("seat_names_map", "current_msg_id", "collab_mode_key", "turn_override"):
                     turn_kwargs.pop(opt_k, None)
                 try:
                     stream_gen = self.runner.stream_discussion_turn(**turn_kwargs)
@@ -3668,6 +3702,10 @@ class RoundtableOrchestrator:
             )
             await self._finalize_task_idle_state(sess, owner_task)
             if ok:
+                if isinstance(target_msg, dict) and target_msg.get("id"):
+                    self.runner.invalidate_seen_message_id(sess.session_id, str(target_msg["id"]))
+                self._refresh_resolution_staleness(sess)
+                await self.broadcast(sess, "whiteboard_update", sess.whiteboard)
                 await self._set_stage(sess, "awaiting_chair", f"{self._seat_name(sess, agent_id)} 恢复完成，待主持人推进")
             else:
                 await self._set_stage(
@@ -4089,6 +4127,22 @@ class RoundtableOrchestrator:
         sess.active_task = asyncio.create_task(self._orchestrate_full_meeting(sess))
         await self._broadcast_meta(sess)
 
+    def _build_seat_alias_lookup(self, sess: Optional[MeetingSession]) -> Dict[str, str]:
+        name_to_aid: Dict[str, str] = {
+            "架构师": "carbon",
+            "审计官": "grok",
+            "工程师": "astra",
+            "交互设计": "vega",
+            "性能专家": "titan",
+            "质量验证": "prism",
+        }
+        for aid_k in AGENT_ORDER:
+            name_to_aid[aid_k] = aid_k
+            sn = self._seat_name(sess, aid_k)
+            if sn:
+                name_to_aid[sn.strip().lower()] = aid_k
+        return name_to_aid
+
     def _analyze_round_disagreements_and_abandonments(
         self,
         sess: MeetingSession,
@@ -4097,22 +4151,68 @@ class RoundtableOrchestrator:
         round_label: str,
     ) -> List[dict]:
         """
-        解析交叉质询/答辩回合中的结构化分歧对象（disagreement_id）与立场变化（stance_delta），
-        生成回合分歧摘要供前端聊天流与白板渲染。
+        宽容多格式解析器 + D1..Dn 编号争议逐项闭环账本：
+        1. 兼容 `[反驳 @席位：...]`、`**[反驳 @席位]**：...`、`- **反驳 @席位**：...` 等多种自然书写变体；
+        2. 自动分配确定性争议编号 D1..Dn，并按 `[回应 D#：...]` 逐条判定结案，杜绝“修一漏二却全部销账”；
+        3. 完整提取跨席吸收精华 `absorbed_highlights` 与弃案，并生成前后端字段完全对齐的 `round_summaries`。
         """
         dis_list: List[dict] = sess.whiteboard.setdefault("disagreements", [])
-        name_to_aid: Dict[str, str] = {}
-        for aid_k in AGENT_ORDER:
-            name_to_aid[aid_k] = aid_k
-            sn = self._seat_name(sess, aid_k)
-            if sn:
-                name_to_aid[sn.strip().lower()] = aid_k
+        name_to_aid = self._build_seat_alias_lookup(sess)
+        existing_d_nums = [
+            int(m_d.group(1))
+            for d in dis_list
+            if isinstance(d, dict)
+            for m_d in [re.match(r"^D(\d+)$", str(d.get("issue_code") or ""))]
+            if m_d
+        ]
+        next_d_num = (max(existing_d_nums) + 1) if existing_d_nums else (len(dis_list) + 1)
 
-        rebut_re = re.compile(r"\[反驳\s*@?([^：:\]\s]+)\s*[：:]\s*([^\]]+)\]")
+        rebut_patterns = [
+            re.compile(r"\[(?:反驳|建议修正|质疑|纠偏)\s*@?([^：:\]\s]+)\s*[：:]\s*([^\]\n]+)\]"),
+            re.compile(r"(?:\*\*)?\[(?:反驳|建议修正|质疑|纠偏)\s*@?([^：:\]\s]+)\](?:\*\*)?\s*[：:]\s*([^\n]+)"),
+            re.compile(r"(?:^|\n)\s*(?:[-*•]|#{2,4})\s*(?:\*\*)?(?:反驳|建议修正|针对)\s*@([^：:\s*]+?)(?:\s*的?(?:纠偏|质疑|盲区))?(?:\*\*)?\s*[：:]\s*([^\n]+)"),
+        ]
+        absorb_patterns = [
+            re.compile(r"\[吸收\s*@?([^：:\]\s]+)\s*[：:]\s*([^\]\n]+)\]"),
+            re.compile(r"(?:\*\*)?\[吸收\s*@?([^：:\]\s]+)\](?:\*\*)?\s*[：:]\s*([^\n]+)"),
+            re.compile(r"(?:^|\n)\s*(?:[-*•]|#{2,4})\s*(?:\*\*)?(?:吸收|采纳)\s*@([^：:\s*]+?)(?:\s*的?精华)?(?:\*\*)?\s*[：:]\s*([^\n]+)"),
+        ]
+        itemized_reply_re = re.compile(
+            r"(?:\[|\*\*\[)?回应\s*(D\d+)\s*(?:\]|\*\*)?\s*[：:|｜]\s*([^\]\n]+)",
+            flags=re.IGNORECASE,
+        )
+        signoff_reply_re = re.compile(
+            r"(?:\[|\*\*\[)?验收\s*(D\d+)\s*(?:\]|\*\*)?\s*[：:|｜]\s*([^\]\n]+)",
+            flags=re.IGNORECASE,
+        )
+        sec_at_bullet_re = re.compile(
+            r"^\s*(?:[-*•]|\d+[.)、])\s*(?:\*\*)?@([^：:\s*\]]+)(?:\*\*)?\s*[：:]\s*(.+)$"
+        )
+        revise_tag_re = re.compile(r"\[修正原方案[:：]\s*([^\]\n]+)\]")
+        abandon_tag_re = re.compile(r"\[(?:放弃原方案|淘汰方案|废弃方案|弃案)[:：]\s*([^\]\n]+)\]")
+
+        absorbed_list: List[dict] = sess.whiteboard.setdefault("absorbed_highlights", [])
+        seen_absorbed: Set[str] = {
+            _norm_dedupe_key(str(x.get("text") or ""))
+            for x in absorbed_list
+            if isinstance(x, dict)
+        }
+        seen_round_claims: Set[str] = set()
         created_in_round: List[dict] = []
+        absorbed_in_round = 0
         revised_count = 0
         abandoned_count = 0
         no_obj_seats: List[str] = []
+
+        def _claim_matches_text(claim_txt: str, ref_txt: str) -> bool:
+            nc = _norm_dedupe_key(claim_txt)
+            nr = _norm_dedupe_key(ref_txt)
+            if not nc or not nr:
+                return False
+            if nc[:10] in nr or nr[:10] in nc:
+                return True
+            tokens = [t for t in re.findall(r"[A-Za-z0-9_]{3,}|[\u4e00-\u9fa5]{2,4}", ref_txt.lower()) if len(t) >= 2]
+            return sum(1 for tok in tokens[:8] if tok in claim_txt.lower()) >= 2
 
         for m in round_msgs:
             if not isinstance(m, dict) or m.get("error") or m.get("skipped"):
@@ -4122,45 +4222,279 @@ class RoundtableOrchestrator:
                 continue
             sp_name = self._seat_name(sess, sp)
             mid = str(m.get("id") or "")
+            ph_lbl = str(m.get("phase_label") or round_label)
             body = str(m.get("content") or "")
 
             if "[无异议]" in body:
                 no_obj_seats.append(sp_name)
 
-            if "[修正原方案" in body:
-                revised_count += 1
-                for d_ex in dis_list:
-                    if isinstance(d_ex, dict) and d_ex.get("target") == sp and not d_ex.get("resolved"):
-                        d_ex["rebuttal_msg_id"] = mid
-                        d_ex["stance_delta"] = "revised"
-                        d_ex["resolved"] = True
+            sectioned_critiques: List[Tuple[int, bool, str, str]] = []
+            cur_sec_mode = ""
+            line_offset = 0
+            for raw_ln_s in body.splitlines(keepends=True):
+                ln_s = raw_ln_s.strip()
+                m_hd = re.match(r"^#{2,4}\s+(.+)$", ln_s)
+                if m_hd:
+                    hd_txt = m_hd.group(1)
+                    if any(k in hd_txt for k in ("纠偏", "反驳", "盲区", "质疑", "脆弱", "漏洞")):
+                        cur_sec_mode = "critique"
+                    elif any(k in hd_txt for k in ("吸收", "采纳", "借鉴", "亮点")):
+                        cur_sec_mode = "absorb"
+                    else:
+                        cur_sec_mode = ""
+                elif cur_sec_mode and not any(tag_kw in ln_s for tag_kw in ("[吸收", "[反驳", "[建议修正", "[质疑", "[纠偏")):
+                    m_at_b = sec_at_bullet_re.match(ln_s)
+                    if m_at_b:
+                        raw_at_t = m_at_b.group(1).strip().strip("*@[]")
+                        raw_at_val = m_at_b.group(2).strip()
+                        if cur_sec_mode == "absorb":
+                            src_aid_s = name_to_aid.get(raw_at_t.lower()) or ""
+                            if src_aid_s != sp and len(raw_at_val) >= 4:
+                                src_name_s = self._seat_name(sess, src_aid_s) if src_aid_s in AGENT_META else raw_at_t
+                                hl_txt_s = self._smart_clip(raw_at_val, limit=260)
+                                nk_hl_s = _norm_dedupe_key(hl_txt_s)
+                                if hl_txt_s and nk_hl_s and nk_hl_s not in seen_absorbed:
+                                    seen_absorbed.add(nk_hl_s)
+                                    absorbed_in_round += 1
+                                    absorbed_list.append(
+                                        {
+                                            "id": f"hl_{uuid.uuid4().hex[:8]}",
+                                            "round_label": round_label,
+                                            "absorber": sp,
+                                            "absorber_name": sp_name,
+                                            "source_seat": src_aid_s,
+                                            "source_seat_name": src_name_s,
+                                            "text": hl_txt_s,
+                                            "source_msg_id": mid,
+                                        }
+                                    )
+                        elif cur_sec_mode == "critique" and len(raw_at_val) >= 6:
+                            sectioned_critiques.append((line_offset, False, raw_at_t, raw_at_val))
+                line_offset += len(raw_ln_s)
 
-            if "[放弃原方案" in body:
-                abandoned_count += 1
+            for ab_pat in absorb_patterns:
+                for abm in ab_pat.finditer(body):
+                    raw_src = abm.group(1).strip().strip("*@[]").lower()
+                    src_aid = name_to_aid.get(raw_src) or ""
+                    if src_aid == sp:
+                        continue
+                    src_name = self._seat_name(sess, src_aid) if src_aid in AGENT_META else abm.group(1).strip().strip("*@[]")
+                    hl_txt = self._smart_clip(abm.group(2).strip(), limit=260)
+                    nk_hl = _norm_dedupe_key(hl_txt)
+                    if hl_txt and nk_hl and nk_hl not in seen_absorbed:
+                        seen_absorbed.add(nk_hl)
+                        absorbed_in_round += 1
+                        absorbed_list.append(
+                            {
+                                "id": f"hl_{uuid.uuid4().hex[:8]}",
+                                "round_label": round_label,
+                                "absorber": sp,
+                                "absorber_name": sp_name,
+                                "source_seat": src_aid,
+                                "source_seat_name": src_name,
+                                "text": hl_txt,
+                                "source_msg_id": mid,
+                            }
+                        )
+
+            # 1) 按 [回应 D#：...] 逐项处理：接受修正直通闭环；反证拒改转入 pending_challenger_signoff，严禁自说自话销账！
+            addressed_codes: Set[str] = set()
+            for irm in itemized_reply_re.finditer(body):
+                d_code = irm.group(1).upper()
+                reply_detail = irm.group(2).strip()
+                addressed_codes.add(d_code)
                 for d_ex in dis_list:
-                    if isinstance(d_ex, dict) and d_ex.get("target") == sp and not d_ex.get("resolved"):
-                        d_ex["rebuttal_msg_id"] = mid
+                    if not isinstance(d_ex, dict) or str(d_ex.get("issue_code") or "").upper() != d_code:
+                        continue
+                    if d_ex.get("target") not in (sp, ""):
+                        continue
+                    d_ex["rebuttal_msg_id"] = mid
+                    d_ex["resolution_note"] = self._smart_clip(reply_detail, limit=240)
+                    reply_head = re.split(r"[|｜：:]", reply_detail, maxsplit=1)[0].strip()
+                    if any(k in reply_head for k in ("放弃", "淘汰", "撤回")) or (
+                        not reply_head and any(k in reply_detail for k in ("放弃", "淘汰", "撤回"))
+                    ):
                         d_ex["stance_delta"] = "abandoned"
+                        d_ex["verification_state"] = "accepted_by_defender"
                         d_ex["resolved"] = True
+                        abandoned_count += 1
+                    elif any(k in reply_head for k in ("条件预案", "少数派", "触发阈值", "条件触发")) or (
+                        "接受修正" not in reply_head
+                        and "反证" not in reply_head
+                        and any(k in reply_detail for k in ("条件预案", "少数派", "触发阈值", "条件触发"))
+                    ):
+                        d_ex["stance_delta"] = "conditional_fallback"
+                        d_ex["verification_state"] = "accepted_by_defender"
+                        d_ex["resolved"] = True
+                        revised_count += 1
+                    elif any(k in reply_head for k in ("接受修正", "采纳修正", "接受建议", "采纳建议")):
+                        d_ex["stance_delta"] = "revised"
+                        d_ex["verification_state"] = "accepted_by_defender"
+                        d_ex["resolved"] = True
+                        revised_count += 1
+                    elif any(k in reply_head for k in ("反证", "不成立", "维持原", "无需修改", "拒绝修改")) or any(
+                        k in reply_detail for k in ("量化反证", "维持原案", "无需修改", "拒绝修改")
+                    ):
+                        d_ex["stance_delta"] = "rebutted_with_proof"
+                        d_ex["verification_state"] = "pending_challenger_signoff"
+                        d_ex["resolved"] = False
+                    else:
+                        d_ex["stance_delta"] = "revised"
+                        d_ex["verification_state"] = "accepted_by_defender"
+                        d_ex["resolved"] = True
+                        revised_count += 1
 
-            matched_explicit = list(rebut_re.finditer(body))
-            if matched_explicit:
-                for rm in matched_explicit:
-                    raw_tgt = rm.group(1).strip().lower()
+            # 1b) 按质询方 [验收 D#：认可闭环 / 维持异议] 完成防自证验收闭环
+            for srm in signoff_reply_re.finditer(body):
+                s_code = srm.group(1).upper()
+                sign_detail = srm.group(2).strip()
+                addressed_codes.add(s_code)
+                for d_ex in dis_list:
+                    if not isinstance(d_ex, dict) or str(d_ex.get("issue_code") or "").upper() != s_code:
+                        continue
+                    if d_ex.get("challenger") not in (sp, ""):
+                        continue
+                    d_ex["challenger_signoff_msg_id"] = mid
+                    d_ex["challenger_note"] = self._smart_clip(sign_detail, limit=240)
+                    sign_head = re.split(r"[|｜：:]", sign_detail, maxsplit=1)[0].strip()
+                    if any(k in sign_head for k in ("认可闭环", "同意闭环", "确认闭环", "通过")):
+                        d_ex["stance_delta"] = "verified_proof"
+                        d_ex["verification_state"] = "verified_by_challenger"
+                        d_ex["resolved"] = True
+                        revised_count += 1
+                    elif any(k in sign_head for k in ("维持异议", "不认可", "不成立", "未解决", "保留分歧", "保留异议")) or any(
+                        k in sign_detail for k in ("维持异议", "不认可", "保留分歧", "保留异议")
+                    ):
+                        d_ex["stance_delta"] = "disputed_locked"
+                        d_ex["verification_state"] = "disputed_locked"
+                        d_ex["resolved"] = False
+                    else:
+                        d_ex["stance_delta"] = "verified_proof"
+                        d_ex["verification_state"] = "verified_by_challenger"
+                        d_ex["resolved"] = True
+                        revised_count += 1
+
+            # 2) 记录弃案并按相关性或兜底规则更新未决分歧
+            abandon_matches = list(abandon_tag_re.finditer(body))
+            if abandon_matches or "[放弃原方案" in body:
+                abandoned_count += max(1, len(abandon_matches))
+                for am in abandon_matches:
+                    self._record_abandoned_proposal(
+                        sess,
+                        am.group(1),
+                        author=sp,
+                        reason=f"{sp_name} 在「{ph_lbl}」阶段确认放弃/证伪淘汰",
+                        round_phase=ph_lbl,
+                        source_msg_id=mid,
+                    )
+                if not addressed_codes:
+                    open_for_sp = [d for d in dis_list if isinstance(d, dict) and d.get("target") == sp and not d.get("resolved")]
+                    ab_texts = [am.group(1) for am in abandon_matches]
+                    matched_any = False
+                    if len(open_for_sp) > 1 and ab_texts:
+                        for d_ex in open_for_sp:
+                            if any(_claim_matches_text(str(d_ex.get("claim") or ""), abt) for abt in ab_texts):
+                                d_ex["rebuttal_msg_id"] = mid
+                                d_ex["stance_delta"] = "abandoned"
+                                d_ex["resolved"] = True
+                                matched_any = True
+                    if not matched_any and len(open_for_sp) <= 1:
+                        for d_ex in open_for_sp:
+                            d_ex["rebuttal_msg_id"] = mid
+                            d_ex["stance_delta"] = "abandoned"
+                            d_ex["resolved"] = True
+
+            revise_matches = list(revise_tag_re.finditer(body))
+            if revise_matches or "[修正原方案" in body:
+                revised_count += max(1, len(revise_matches))
+                old_parts: List[str] = []
+                for rvm in revise_matches:
+                    raw_rv = rvm.group(1).strip()
+                    if "->" in raw_rv or "→" in raw_rv:
+                        op, np = re.split(r"->|→", raw_rv, maxsplit=1)
+                        if len(op.strip()) >= 4:
+                            old_parts.append(op.strip())
+                            self._record_abandoned_proposal(
+                                sess,
+                                op.strip(),
+                                author=sp,
+                                reason=f"已被 {sp_name} 修正终态方案（「{self._smart_clip(np.strip(), 80)}」）替代",
+                                round_phase=ph_lbl,
+                                source_msg_id=mid,
+                            )
+                    else:
+                        old_parts.append(raw_rv)
+                if not addressed_codes:
+                    open_for_sp = [d for d in dis_list if isinstance(d, dict) and d.get("target") == sp and not d.get("resolved")]
+                    matched_rev = False
+                    if len(open_for_sp) > 1 and old_parts:
+                        for d_ex in open_for_sp:
+                            if any(_claim_matches_text(str(d_ex.get("claim") or ""), op_s) for op_s in old_parts):
+                                d_ex["rebuttal_msg_id"] = mid
+                                d_ex["stance_delta"] = "revised"
+                                d_ex["resolved"] = True
+                                matched_rev = True
+                    if not matched_rev and len(open_for_sp) <= 1:
+                        for d_ex in open_for_sp:
+                            d_ex["rebuttal_msg_id"] = mid
+                            d_ex["stance_delta"] = "revised"
+                            d_ex["resolved"] = True
+
+            raw_pos_matches: List[Tuple[int, bool, str, str]] = list(sectioned_critiques)
+            for r_pat in rebut_patterns:
+                for rm in r_pat.finditer(body):
+                    matched_head = body[rm.start() : min(len(body), rm.start() + 18)]
+                    is_fix_suggestion = "建议修正" in matched_head
+                    raw_pos_matches.append(
+                        (rm.start(), is_fix_suggestion, rm.group(1).strip().strip("*@[]"), rm.group(2).strip())
+                    )
+            raw_pos_matches.sort(key=lambda x: x[0])
+
+            deduped_pos_matches: List[Tuple[int, bool, str, str]] = []
+            for pos_m, is_sug_m, tgt_m, clm_m in raw_pos_matches:
+                if deduped_pos_matches and abs(pos_m - deduped_pos_matches[-1][0]) <= 6:
+                    continue
+                deduped_pos_matches.append((pos_m, is_sug_m, tgt_m, clm_m))
+
+            merged_critiques: List[Tuple[str, str]] = []
+            for idx_cm, (pos_m, is_sug_m, tgt_m, clm_m) in enumerate(deduped_pos_matches):
+                if (
+                    is_sug_m
+                    and merged_critiques
+                    and idx_cm > 0
+                    and tgt_m.lower() == deduped_pos_matches[idx_cm - 1][2].lower()
+                    and not deduped_pos_matches[idx_cm - 1][1]
+                ):
+                    prev_t, prev_c = merged_critiques[-1]
+                    merged_critiques[-1] = (prev_t, f"{prev_c}（建议修正：{clm_m}）")
+                else:
+                    merged_critiques.append((tgt_m, clm_m))
+
+            if merged_critiques:
+                for raw_tgt_orig, raw_claim in merged_critiques:
+                    raw_tgt = raw_tgt_orig.lower()
                     tgt_aid = name_to_aid.get(raw_tgt) or str(m.get("target") or "")
                     if tgt_aid not in AGENT_META or tgt_aid == sp:
                         tgt_aid = next((a for a in active_agents if a != sp), "")
-                    claim_s = self._smart_clip(rm.group(2).strip(), limit=160)
+                    claim_s = self._smart_clip(raw_claim, limit=260)
+                    nk_c = f"{sp}:{tgt_aid}:{_norm_dedupe_key(claim_s)[:36]}"
+                    if not claim_s or nk_c in seen_round_claims:
+                        continue
+                    seen_round_claims.add(nk_c)
+                    issue_code = f"D{next_d_num}"
+                    next_d_num += 1
                     d_obj = {
-                        "disagreement_id": f"d_{uuid.uuid4().hex[:8]}",
+                        "disagreement_id": f"d_{issue_code.lower()}_{uuid.uuid4().hex[:6]}",
+                        "issue_code": issue_code,
                         "round_label": round_label,
                         "challenger": sp,
                         "challenger_name": sp_name,
                         "target": tgt_aid,
-                        "target_name": self._seat_name(sess, tgt_aid) if tgt_aid in AGENT_META else raw_tgt,
+                        "target_name": self._seat_name(sess, tgt_aid) if tgt_aid in AGENT_META else raw_tgt_orig,
                         "claim": claim_s,
                         "source_msg_id": mid,
                         "rebuttal_msg_id": "",
+                        "resolution_note": "",
                         "stance_delta": "challenged",
                         "resolved": False,
                     }
@@ -4170,8 +4504,11 @@ class RoundtableOrchestrator:
                 tgt_aid = str(m["target"])
                 pts = self._extract_key_points(body, max_items=1)
                 claim_s = pts[0] if pts else f"{sp_name} 对 {self._seat_name(sess, tgt_aid)} 提出边界质疑"
+                issue_code = f"D{next_d_num}"
+                next_d_num += 1
                 d_obj = {
-                    "disagreement_id": f"d_{uuid.uuid4().hex[:8]}",
+                    "disagreement_id": f"d_{issue_code.lower()}_{uuid.uuid4().hex[:6]}",
+                    "issue_code": issue_code,
                     "round_label": round_label,
                     "challenger": sp,
                     "challenger_name": sp_name,
@@ -4180,22 +4517,45 @@ class RoundtableOrchestrator:
                     "claim": claim_s,
                     "source_msg_id": mid,
                     "rebuttal_msg_id": "",
+                    "resolution_note": "",
                     "stance_delta": "challenged",
                     "resolved": False,
                 }
                 dis_list.append(d_obj)
                 created_in_round.append(d_obj)
 
-        if created_in_round or revised_count or abandoned_count or no_obj_seats:
+        open_dis_total = sum(1 for d in dis_list if isinstance(d, dict) and not d.get("resolved"))
+        if created_in_round or revised_count or abandoned_count or absorbed_in_round or no_obj_seats:
+            claim_previews = [
+                f"[{d.get('issue_code', 'D?')}] {d['challenger_name']} → {d['target_name']}：{self._smart_clip(d['claim'], 72)}"
+                for d in created_in_round[:3]
+            ]
+            stat_parts: List[str] = []
+            if absorbed_in_round:
+                stat_parts.append(f"跨席吸收精华 {absorbed_in_round} 项")
+            if created_in_round:
+                stat_parts.append(f"新增争议 {len(created_in_round)} 项")
+            if revised_count:
+                stat_parts.append(f"纠偏演进 {revised_count} 项")
+            if abandoned_count:
+                stat_parts.append(f"淘汰废案 {abandoned_count} 项")
+            stat_parts.append(f"当前未决 {open_dis_total} 项")
+            summary_txt = " · ".join(stat_parts)
+            if claim_previews:
+                summary_txt += " ｜ " + "；".join(claim_previews[:2])
             summary_entry = {
                 "id": f"rs_{uuid.uuid4().hex[:6]}",
                 "round_label": round_label,
                 "after_msg_id": str(round_msgs[-1].get("id") or "") if round_msgs else "",
                 "new_disagreements": len(created_in_round),
+                "open_disagreements": open_dis_total,
                 "revised_count": revised_count,
                 "abandoned_count": abandoned_count,
+                "absorbed_count": absorbed_in_round,
                 "no_objection_seats": no_obj_seats,
-                "claims": [f"{d['challenger_name']} → {d['target_name']}：{d['claim']}" for d in created_in_round[:3]],
+                "claims": claim_previews,
+                "highlights": claim_previews,
+                "summary": summary_txt,
             }
             sess.whiteboard.setdefault("round_summaries", []).append(summary_entry)
         return created_in_round
@@ -4207,21 +4567,26 @@ class RoundtableOrchestrator:
         sess: Optional[MeetingSession] = None,
     ) -> Dict[str, List[str]]:
         """
-        检查本轮质询输出中的被点名席位（target 及正文 @席位名）：
-        若某启用席位被其他席位点名质询，且未在该条质询完成后启动后续发言予以回应，
-        返回 {被点名席位ID: [发起质询的席位名称列表]}。
+        汇总本轮需唤醒进入定向答辩的席位：
+        同时覆盖 (1) D1..Dn 结构化未决分歧指向的目标席位（即使未写 @ 符号也绝不漏唤醒），
+        以及 (2) 尾标 target 或正文 @点名指向的席位。
         """
         pending: Dict[str, List[str]] = {}
-        name_to_aid = {
-            "carbon": "carbon",
-            "grok": "grok",
-            "astra": "astra",
-        }
-        for aid_k in AGENT_ORDER:
-            name_to_aid[aid_k] = aid_k
-            sname = self._seat_name(sess, aid_k)
-            if sname:
-                name_to_aid[sname.strip().lower()] = aid_k
+        name_to_aid = self._build_seat_alias_lookup(sess)
+        round_msg_ids = {str(cm.get("id") or "") for cm in cross_msgs if isinstance(cm, dict) and cm.get("id")}
+
+        if sess is not None:
+            for d in sess.whiteboard.get("disagreements") or []:
+                if not isinstance(d, dict) or d.get("resolved"):
+                    continue
+                if round_msg_ids and str(d.get("source_msg_id") or "") not in round_msg_ids:
+                    continue
+                tgt_aid = str(d.get("target") or "").lower()
+                chal_name = str(d.get("challenger_name") or "")
+                if tgt_aid in active_agents and chal_name:
+                    lst = pending.setdefault(tgt_aid, [])
+                    if chal_name not in lst:
+                        lst.append(chal_name)
 
         for cm in cross_msgs:
             if not isinstance(cm, dict) or cm.get("error") or cm.get("skipped"):
@@ -4236,9 +4601,27 @@ class RoundtableOrchestrator:
             primary_tgt = str(cm.get("target") or "").strip().lower()
             if primary_tgt in active_agents and primary_tgt != challenger_aid:
                 mentioned_aids.append(primary_tgt)
-            body_txt = str(cm.get("content") or "")
+            raw_body_txt = str(cm.get("content") or "")
+            # 剥离跨席吸收赞同段落与 `[吸收 @席位]` 行，避免正向吸收误唤醒无需答辩的席位
+            non_absorb_lines: List[str] = []
+            in_absorb_sec = False
+            for ln_c in raw_body_txt.splitlines():
+                s_c = ln_c.strip()
+                m_h = re.match(r"^#{2,4}\s+(.+)$", s_c)
+                if m_h:
+                    ht = m_h.group(1)
+                    in_absorb_sec = any(k in ht for k in ("吸收", "采纳", "借鉴", "亮点")) and not any(
+                        k in ht for k in ("纠偏", "反驳", "盲区", "质疑", "脆弱", "漏洞")
+                    )
+                    continue
+                if in_absorb_sec:
+                    continue
+                if re.search(r"(?:\[吸收|吸收\s*@|采纳\s*@)", s_c):
+                    continue
+                non_absorb_lines.append(ln_c)
+            body_txt = "\n".join(non_absorb_lines)
             alias_keys = sorted((k for k in name_to_aid.keys() if len(k) >= 2), key=len, reverse=True)
-            if alias_keys:
+            if alias_keys and cm.get("consensus") is not True and "[无异议]" not in raw_body_txt:
                 alias_pat = "|".join(re.escape(k) for k in alias_keys)
                 for raw_m in re.findall(rf"@({alias_pat})(?![A-Za-z0-9_])", body_txt, flags=re.IGNORECASE):
                     m_aid = name_to_aid.get(raw_m.lower())
@@ -4246,7 +4629,6 @@ class RoundtableOrchestrator:
                         mentioned_aids.append(m_aid)
 
             for tgt_aid in mentioned_aids:
-                # 若被点名席位在该质询完成后已经开启过新一轮发言，则视为已在后半段回应
                 already_replied = any(
                     isinstance(later_m, dict)
                     and later_m.get("speaker") == tgt_aid
@@ -4261,6 +4643,171 @@ class RoundtableOrchestrator:
                     if challenger_name not in challengers_for_tgt:
                         challengers_for_tgt.append(challenger_name)
         return pending
+
+    def _format_open_disagreements_for_seat(self, sess: MeetingSession, target_aid: Optional[str] = None) -> str:
+        open_items = [
+            d
+            for d in (sess.whiteboard.get("disagreements") or [])
+            if isinstance(d, dict)
+            and not d.get("resolved")
+            and (
+                target_aid is None
+                or (
+                    d.get("target") == target_aid
+                    and d.get("verification_state") not in ("pending_challenger_signoff", "disputed_locked")
+                )
+            )
+        ]
+        if not open_items:
+            return ""
+        lines: List[str] = []
+        for d in open_items[:10]:
+            code = d.get("issue_code") or "D?"
+            base = f"[{code}] @{d.get('challenger_name', '他席')} 质询 @{d.get('target_name', '被质询席')}：{d.get('claim', '')}"
+            if target_aid is None:
+                v_st = str(d.get("verification_state") or "")
+                r_note = str(d.get("resolution_note") or "").strip()
+                c_note = str(d.get("challenger_note") or "").strip()
+                if v_st == "disputed_locked":
+                    base += f"（答辩反证：{r_note or '维持原案'}；质询方维持异议：{c_note or '未消除边界风险'}）"
+                elif v_st == "pending_challenger_signoff" and r_note:
+                    base += f"（被质询方反证待裁决：{r_note}）"
+            lines.append(base)
+        return "待逐条闭环的编号争议：" + "；".join(lines)
+
+    async def _run_conditional_challenger_signoff(
+        self,
+        sess: MeetingSession,
+        active_agents: List[str],
+        stage_prefix: str,
+    ) -> None:
+        """
+        条件式质询方短验收：仅针对被质询方选择『量化反证/拒绝修改』的 D# 唤醒原质询席位验收，
+        对已『接受修正』给出新契约的 D# 零额外轮次直通，兼顾硬核防伪与研讨速度。
+        """
+        pending_by_challenger: Dict[str, List[dict]] = {}
+        for d in sess.whiteboard.get("disagreements") or []:
+            if not isinstance(d, dict) or d.get("resolved"):
+                continue
+            if d.get("verification_state") != "pending_challenger_signoff":
+                continue
+            c_aid = str(d.get("challenger") or "").lower()
+            if c_aid in active_agents:
+                pending_by_challenger.setdefault(c_aid, []).append(d)
+
+        if not pending_by_challenger:
+            return
+
+        signoff_order = [a for a in active_agents if a in pending_by_challenger]
+        signoff_cues: Dict[str, str] = {}
+        for c_aid in signoff_order:
+            items_for_c = pending_by_challenger[c_aid]
+            desc_list = [
+                f"[{d.get('issue_code', 'D?')}] 你原质询：「{d.get('claim', '')}」 → @{d.get('target_name', '对方')} 反证答辩：「{d.get('resolution_note', '维持原方案')}」"
+                for d in items_for_c[:8]
+            ]
+            signoff_cues[c_aid] = "待你验收的答辩反证项：" + "；".join(desc_list)
+
+        signoff_names = "、".join(self._seat_name(sess, a) for a in signoff_order)
+        sign_start_idx = len(sess.messages)
+        await self._set_stage(sess, "cross_talk", f"{stage_prefix}：{signoff_names} 质询方答辩验收")
+        await self._run_agent_batch(
+            sess,
+            signoff_order,
+            "challenger_signoff",
+            "质询验收",
+            cue_by_agent=signoff_cues,
+        )
+        sign_msgs = sess.messages[sign_start_idx:]
+        self._analyze_round_disagreements_and_abandonments(
+            sess,
+            sign_msgs,
+            signoff_order,
+            f"{stage_prefix} · 质询验收",
+        )
+        msg_by_spk = {
+            str(m.get("speaker") or "").lower(): m
+            for m in sign_msgs
+            if isinstance(m, dict) and not m.get("error") and not m.get("skipped")
+        }
+        for c_aid, items_for_c in pending_by_challenger.items():
+            cm = msg_by_spk.get(c_aid)
+            if not cm:
+                continue
+            c_body = str(cm.get("content") or "")
+            for d_item in items_for_c:
+                if d_item.get("verification_state") != "pending_challenger_signoff":
+                    continue
+                d_item["challenger_signoff_msg_id"] = str(cm.get("id") or "")
+                if ("[无异议]" in c_body or "认可闭环" in c_body or cm.get("consensus") is True) and not any(
+                    kw in c_body for kw in ("维持异议", "不认可", "不成立", "保留分歧", "未解决")
+                ):
+                    d_item["resolved"] = True
+                    d_item["stance_delta"] = "verified_proof"
+                    d_item["verification_state"] = "verified_by_challenger"
+                    d_item["challenger_note"] = self._smart_clip(c_body, limit=180)
+                else:
+                    d_item["resolved"] = False
+                    d_item["stance_delta"] = "disputed_locked"
+                    d_item["verification_state"] = "disputed_locked"
+                    d_item["challenger_note"] = self._smart_clip(c_body, limit=180)
+
+    async def _run_targeted_rebuttal_and_signoff(
+        self,
+        sess: MeetingSession,
+        cross_msgs: List[dict],
+        active_agents: List[str],
+        stage_prefix: str,
+        only_structured_disagreements: bool = False,
+    ) -> Dict[str, List[str]]:
+        """统一的 D1..Dn 定向答辩 + 反证拒改条件式质询验收闭环，覆盖深度研讨、发散收敛与代码审查。"""
+        if only_structured_disagreements:
+            round_msg_ids = {str(cm.get("id") or "") for cm in cross_msgs if isinstance(cm, dict) and cm.get("id")}
+            unanswered_map: Dict[str, List[str]] = {}
+            for d in sess.whiteboard.get("disagreements") or []:
+                if not isinstance(d, dict) or d.get("resolved"):
+                    continue
+                if round_msg_ids and str(d.get("source_msg_id") or "") not in round_msg_ids:
+                    continue
+                t_aid = str(d.get("target") or "").lower()
+                c_nm = str(d.get("challenger_name") or "")
+                if t_aid in active_agents and c_nm:
+                    lst = unanswered_map.setdefault(t_aid, [])
+                    if c_nm not in lst:
+                        lst.append(c_nm)
+        else:
+            unanswered_map = self._collect_unanswered_rebuttal_targets(cross_msgs, active_agents, sess=sess)
+
+        if not unanswered_map:
+            return unanswered_map
+
+        rebuttal_order = [a for a in active_agents if a in unanswered_map]
+        rebuttal_cues: Dict[str, str] = {}
+        for tgt_aid, challengers in unanswered_map.items():
+            itemized_txt = self._format_open_disagreements_for_seat(sess, tgt_aid)
+            rebuttal_cues[tgt_aid] = (
+                f"本轮互评中，{'、'.join(challengers)} 对你提出了质询。"
+                + (f"{itemized_txt}。" if itemized_txt else "")
+                + "请按 `[回应 D#：接受修正 | ...]` 或 `[回应 D#：量化反证 | ...]` 逐条闭环，并同步标注 `[修正原方案：旧 -> 新]` 或 `[放弃原方案：...]`。"
+            )
+        rebuttal_names = "、".join(self._seat_name(sess, a) for a in rebuttal_order)
+        reb_start_idx = len(sess.messages)
+        await self._set_stage(sess, "cross_talk", f"{stage_prefix}：{rebuttal_names} 逐项交锋答辩")
+        await self._run_agent_batch(
+            sess,
+            rebuttal_order,
+            "rebuttal",
+            "定向答辩",
+            cue_by_agent=rebuttal_cues,
+        )
+        self._analyze_round_disagreements_and_abandonments(
+            sess,
+            sess.messages[reb_start_idx:],
+            rebuttal_order,
+            f"{stage_prefix} · 定向答辩",
+        )
+        await self._run_conditional_challenger_signoff(sess, active_agents, stage_prefix)
+        return unanswered_map
 
     async def _orchestrate_full_meeting(self, sess: MeetingSession) -> None:
         owner_task = asyncio.current_task()
@@ -4341,11 +4888,12 @@ class RoundtableOrchestrator:
                     failed_agents = [solo_aid]
 
             elif mode_key == "adversarial_review":
-                # 正反辩证（非对称 4 步拓扑）：正方立论 -> 反向审计 -> 防御修正 -> 综合裁定
+                # 正反辩证（支持 2–6 席全员参战红蓝编组 + D1..Dn 逐项防御与终审复核）：绝不让第 4–6 席旁观闲置
                 proposer, auditor, arbiter = self._pick_adversarial_roles(sess, ready_agents)
                 prop_name = self._seat_name(sess, proposer)
-                aud_name = self._seat_name(sess, auditor)
-                arb_name = self._seat_name(sess, arbiter)
+                extra_seats = [a for a in ready_agents if a not in (proposer, auditor, arbiter)]
+                auditor_panel = [auditor] + extra_seats
+                aud_panel_names = "、".join(self._seat_name(sess, a) for a in auditor_panel)
 
                 await self._set_stage(sess, "opening_parallel", f"正反辩证 ①：{prop_name} 主方案立论")
                 ok_prop, _, prop_badge, _ = await self._run_single_agent_turn(
@@ -4359,12 +4907,13 @@ class RoundtableOrchestrator:
                 elif prop_badge != "已跳过本轮":
                     failed_agents.append(proposer)
 
-                # 若首选正方失败，尝试由其余席位递补或中止
                 if not ok_prop:
                     backup_props = [a for a in ready_agents if a not in (proposer, auditor)]
                     if backup_props:
                         proposer = backup_props[0]
                         prop_name = self._seat_name(sess, proposer)
+                        auditor_panel = [a for a in auditor_panel if a != proposer] or [auditor]
+                        aud_panel_names = "、".join(self._seat_name(sess, a) for a in auditor_panel)
                         ok_prop, _, _, _ = await self._run_single_agent_turn(
                             sess,
                             proposer,
@@ -4375,33 +4924,67 @@ class RoundtableOrchestrator:
                             active_agents.append(proposer)
 
                 if ok_prop:
-                    await self._set_stage(sess, "cross_talk", f"正反辩证 ②：{aud_name} 反向压力审计")
-                    ok_aud, _, aud_badge, _ = await self._run_single_agent_turn(
-                        sess,
-                        auditor,
-                        "adv_attack",
-                        "反向审计",
-                    )
-                    if ok_aud:
-                        if auditor not in active_agents:
-                            active_agents.append(auditor)
-                        await self._set_stage(sess, "cross_talk", f"正反辩证 ③：{prop_name} 防御修正")
+                    adv_start_idx = len(sess.messages)
+                    await self._set_stage(sess, "cross_talk", f"正反辩证 ②：{aud_panel_names} 反向压力审计")
+                    attack_cues = {
+                        aid_att: f"请针对 @{prop_name} 的正方主方案展开穿透式证伪压测，明确标注 `[反驳 @{prop_name}：...]` 与 `[建议修正 @{prop_name}：...]`，同时用 `[吸收 @{prop_name}：...]` 标出其不可丢弃的亮点。"
+                        for aid_att in auditor_panel
+                    }
+                    if len(auditor_panel) > 1:
+                        aud_outcomes = await self._run_agent_batch(
+                            sess,
+                            auditor_panel,
+                            "adv_attack",
+                            "反向审计",
+                            cue_by_agent=attack_cues,
+                        )
+                    else:
+                        aud_single = await self._run_single_agent_turn(
+                            sess,
+                            auditor_panel[0],
+                            "adv_attack",
+                            "反向审计",
+                            cue_instruction=attack_cues.get(auditor_panel[0], ""),
+                        )
+                        aud_outcomes = [aud_single]
+
+                    any_aud_ok = False
+                    for aid_att, (ok_a, _, bdg_a, _) in zip(auditor_panel, aud_outcomes):
+                        if ok_a:
+                            any_aud_ok = True
+                            if aid_att not in active_agents:
+                                active_agents.append(aid_att)
+                        elif bdg_a != "已跳过本轮" and aid_att not in failed_agents:
+                            failed_agents.append(aid_att)
+
+                    if any_aud_ok:
+                        self._analyze_round_disagreements_and_abandonments(
+                            sess, sess.messages[adv_start_idx:], active_agents, "正反辩证 · 反向审计"
+                        )
+                        def_cue = self._format_open_disagreements_for_seat(sess, proposer)
+                        def_start_idx = len(sess.messages)
+                        await self._set_stage(sess, "cross_talk", f"正反辩证 ③：{prop_name} 逐项防御修正")
                         await self._run_single_agent_turn(
                             sess,
                             proposer,
                             "adv_defend",
                             "防御修正",
+                            cue_instruction=def_cue,
                         )
-                    elif aud_badge != "已跳过本轮":
-                        failed_agents.append(auditor)
+                        self._analyze_round_disagreements_and_abandonments(
+                            sess, sess.messages[def_start_idx:], active_agents, "正反辩证 · 防御修正"
+                        )
+                        await self._run_conditional_challenger_signoff(sess, active_agents, "正反辩证 ③")
 
                     eff_arbiter = arbiter if (arbiter in ready_agents and arbiter not in failed_agents) else proposer
-                    await self._set_stage(sess, "cross_talk", f"正反辩证 ④：{self._seat_name(sess, eff_arbiter)} 综合裁定")
+                    verdict_cue = self._format_open_disagreements_for_seat(sess)
+                    await self._set_stage(sess, "cross_talk", f"正反辩证 ④：{self._seat_name(sess, eff_arbiter)} 终审复核与裁定")
                     ok_arb, _, arb_badge, _ = await self._run_single_agent_turn(
                         sess,
                         eff_arbiter,
                         "adv_verdict",
                         "综合裁定",
+                        cue_instruction=verdict_cue,
                     )
                     if ok_arb and eff_arbiter not in active_agents:
                         active_agents.append(eff_arbiter)
@@ -4409,7 +4992,7 @@ class RoundtableOrchestrator:
                         failed_agents.append(eff_arbiter)
 
             elif mode_key == "divergent_convergent":
-                # 发散收敛：第 1 轮三维度互斥正交发散 -> 第 2 轮三维矩阵评估与优选方案收敛
+                # 发散收敛：第 1 轮多维互斥正交发散 -> 第 2 轮全席对等互评与三维矩阵评估 -> 优选方案收敛
                 orthogonal_dims = [
                     "请聚焦维度一【架构/体验突破性方案】：跳出局部修补惯性，提出上限最高的结构性重塑或交互创新路径。",
                     "请聚焦维度二【最小改动渐进方案】：严格控制改动半径与回归面，提出最快可落地、低侵入的渐进实施路径。",
@@ -4433,19 +5016,36 @@ class RoundtableOrchestrator:
                 ]
                 if len(active_agents) >= 2:
                     lead_agent = self._pick_lead_synthesizer(sess, active_agents) or active_agents[0]
-                    evaluators = [a for a in active_agents if a != lead_agent]
-                    if evaluators:
-                        await self._set_stage(sess, "cross_talk", "第 2 轮：可行性与三维矩阵评估")
-                        await self._run_agent_batch(sess, evaluators, "div_evaluate", "矩阵评估")
+                    eval_cues = {
+                        aid: (
+                            "请横向评估其余席位的发散方案（"
+                            + "、".join(f"@{self._seat_name(sess, o)}" for o in active_agents if o != aid)
+                            + "），标出 `[吸收 @席位：...]` 可嫁接亮点与 `[反驳 @席位：...]` 成本/风险盲区。"
+                        )
+                        for aid in active_agents
+                    }
+                    div_eval_idx = len(sess.messages)
+                    await self._set_stage(sess, "cross_talk", "第 2 轮：全席对等互评与三维矩阵评估")
+                    await self._run_agent_batch(sess, active_agents, "div_evaluate", "矩阵评估", cue_by_agent=eval_cues)
+                    div_eval_msgs = sess.messages[div_eval_idx:]
+                    self._analyze_round_disagreements_and_abandonments(
+                        sess, div_eval_msgs, active_agents, "发散收敛 · 矩阵评估"
+                    )
+                    await self._run_targeted_rebuttal_and_signoff(
+                        sess, div_eval_msgs, active_agents, "第 2 轮", only_structured_disagreements=True
+                    )
+                    conv_cue = self._format_open_disagreements_for_seat(sess)
                     await self._set_stage(
                         sess,
                         "cross_talk",
                         f"第 2 轮：{self._seat_name(sess, lead_agent)} 优选方案收敛",
                     )
-                    await self._run_single_agent_turn(sess, lead_agent, "div_converge", "优选收敛")
+                    await self._run_single_agent_turn(
+                        sess, lead_agent, "div_converge", "优选收敛", cue_instruction=conv_cue
+                    )
 
             elif mode_key == "code_review":
-                # 代码审查：第 1 轮源码证据定位 -> 第 2 轮调用链交叉核验 -> 文件级修改方案
+                # 代码审查：第 1 轮源码证据定位 -> 第 2 轮全席调用链交叉核验 -> 定向答辩与验收 -> 文件级修改方案
                 await self._set_stage(sess, "opening_parallel", "第 1 轮：源码证据与耦合根因定位")
                 opening_outcomes = await self._run_agent_batch(
                     sess,
@@ -4461,19 +5061,37 @@ class RoundtableOrchestrator:
                     lead_agent = self._pick_lead_synthesizer(sess, active_agents)
                     if not lead_agent:
                         lead_agent = "astra" if "astra" in active_agents else active_agents[0]
-                    verifiers = [a for a in active_agents if a != lead_agent]
-                    if verifiers:
-                        await self._set_stage(sess, "cross_talk", "第 2 轮：调用链影响面与回归交叉核验")
-                        await self._run_agent_batch(sess, verifiers, "cr_verify", "调用链核验")
+                    cr_cues = {
+                        aid: (
+                            "请逐一交叉核验其余席位定位的源码证据与根因假设（"
+                            + "、".join(f"@{self._seat_name(sess, o)}" for o in active_agents if o != aid)
+                            + "），标出 `[吸收 @席位：...]` 与 `[反驳 @席位：...]` / `[建议修正 @席位：...]`。"
+                        )
+                        for aid in active_agents
+                    }
+                    cr_ver_idx = len(sess.messages)
+                    await self._set_stage(sess, "cross_talk", "第 2 轮：全席调用链影响面与回归交叉核验")
+                    await self._run_agent_batch(sess, active_agents, "cr_verify", "调用链核验", cue_by_agent=cr_cues)
+                    cr_ver_msgs = sess.messages[cr_ver_idx:]
+                    self._analyze_round_disagreements_and_abandonments(
+                        sess, cr_ver_msgs, active_agents, "代码审查 · 调用链核验"
+                    )
+                    await self._run_targeted_rebuttal_and_signoff(
+                        sess, cr_ver_msgs, active_agents, "第 2 轮", only_structured_disagreements=True
+                    )
+                    cr_plan_cue = self._format_open_disagreements_for_seat(sess)
                     await self._set_stage(
                         sess,
                         "cross_talk",
                         f"第 2 轮：{self._seat_name(sess, lead_agent)} 文件级修改方案",
                     )
-                    await self._run_single_agent_turn(sess, lead_agent, "cr_plan", "修改方案")
+                    await self._run_single_agent_turn(
+                        sess, lead_agent, "cr_plan", "修改方案", cue_instruction=cr_plan_cue
+                    )
 
             elif mode_key == "rapid_consensus":
                 # 快速合议：1 轮并行直出改造要点与核心风险 -> 仅在存在分歧或缺少任务项且未开启自动决议时追加整合
+                rapid_start_idx = len(sess.messages)
                 await self._set_stage(sess, "opening_parallel", "快速合议：单轮要点与风险直出")
                 opening_outcomes = await self._run_agent_batch(
                     sess,
@@ -4485,6 +5103,10 @@ class RoundtableOrchestrator:
                 failed_agents = [
                     aid for aid, (ok, _, bdg, _) in zip(ready_agents, opening_outcomes) if not ok and bdg != "已跳过本轮"
                 ]
+                if len(active_agents) >= 2:
+                    self._analyze_round_disagreements_and_abandonments(
+                        sess, sess.messages[rapid_start_idx:], active_agents, "快速合议 · 首轮直出"
+                    )
                 has_disagreement = any(cons is False for (_, _, _, cons) in opening_outcomes)
                 wb_items_now = sess.whiteboard.get("items") or []
                 has_action_items = any(isinstance(it, dict) and it.get("kind") == "action" for it in wb_items_now)
@@ -4502,7 +5124,7 @@ class RoundtableOrchestrator:
 
             else:
                 # 默认：深度研讨（deep_deliberation）
-                # 阶段 1：独立立论 -> 阶段 2：交叉质询（证伪审计协议）-> 定向答辩（最多 1 批次）-> 主控架构裁定
+                # 阶段 1：独立立论 -> 阶段 2：全覆盖对等互评矩阵 -> D1..Dn 定向交锋闭环 -> 主控架构裁定
                 drv_groups, _, _ = self._resolve_driver_groups(sess, ready_agents)
                 is_single_cli_multi = len(drv_groups) == 1 and len(ready_agents) > 1
                 stage_banner = (
@@ -4526,12 +5148,21 @@ class RoundtableOrchestrator:
                 if len(active_agents) >= 2:
                     lead_agent = self._pick_lead_synthesizer(sess, active_agents) or active_agents[0]
                     cross_start_idx = len(sess.messages)
-                    await self._set_stage(sess, "cross_talk", "第 2 阶段：交叉质询与边界证伪审计")
+                    cross_cues = {
+                        aid: (
+                            "本场需你逐一互评纠偏的其他参会席位："
+                            + "、".join(f"@{self._seat_name(sess, other)}" for other in active_agents if other != aid)
+                            + "。请务必对上述每位席位分别给出三元组：「1) [吸收 @席位：独创精华]；2) [反驳 @席位：前提盲区或失效反例]；3) [建议修正 @席位：可落地纠偏方案]」。"
+                        )
+                        for aid in active_agents
+                    }
+                    await self._set_stage(sess, "cross_talk", "第 2 阶段：全覆盖对等互评与纠偏矩阵")
                     await self._run_agent_batch(
                         sess,
                         active_agents,
                         "cross_talk",
                         "交叉质询",
+                        cue_by_agent=cross_cues,
                     )
 
                     cross_msgs = sess.messages[cross_start_idx:]
@@ -4541,39 +5172,23 @@ class RoundtableOrchestrator:
                         active_agents,
                         "第 2 阶段 · 交叉质询",
                     )
-                    unanswered_map = self._collect_unanswered_rebuttal_targets(cross_msgs, active_agents, sess=sess)
-                    all_no_objection = bool(cross_msgs) and not unanswered_map and not new_disagreements and all(
+                    unanswered_preview = self._collect_unanswered_rebuttal_targets(cross_msgs, active_agents, sess=sess)
+                    all_no_objection = bool(cross_msgs) and not unanswered_preview and not new_disagreements and all(
                         ("[无异议]" in str(m.get("content") or "")) or (m.get("consensus") is True)
                         for m in cross_msgs
                         if isinstance(m, dict) and not m.get("error") and not m.get("skipped")
                     )
-                    if unanswered_map:
-                        rebuttal_order = [a for a in active_agents if a in unanswered_map]
-                        rebuttal_cues = {
-                            tgt_aid: (
-                                f"本轮交叉质询中，{'、'.join(challengers)} 对你提出了定向质询。"
-                                f"请正面回应其指出的漏洞、前提失效点或代价权衡，给出具体修正方案（标注 `[修正原方案：...]` / `[放弃原方案：...]`）或量化反证。"
-                            )
-                            for tgt_aid, challengers in unanswered_map.items()
-                        }
-                        rebuttal_names = "、".join(self._seat_name(sess, a) for a in rebuttal_order)
-                        reb_start_idx = len(sess.messages)
-                        await self._set_stage(sess, "cross_talk", f"第 2 阶段：{rebuttal_names} 定向答辩")
-                        await self._run_agent_batch(
-                            sess,
-                            rebuttal_order,
-                            "rebuttal",
-                            "定向答辩",
-                            cue_by_agent=rebuttal_cues,
-                        )
-                        self._analyze_round_disagreements_and_abandonments(
-                            sess,
-                            sess.messages[reb_start_idx:],
-                            rebuttal_order,
-                            "第 2 阶段 · 定向答辩",
+                    if unanswered_preview:
+                        await self._run_targeted_rebuttal_and_signoff(
+                            sess, cross_msgs, active_agents, "第 2 阶段", only_structured_disagreements=False
                         )
 
-                    if not all_no_objection:
+                    remaining_cue = self._format_open_disagreements_for_seat(sess)
+                    has_wb_actions = any(
+                        isinstance(it, dict) and it.get("kind") == "action"
+                        for it in (sess.whiteboard.get("items") or [])
+                    )
+                    if not all_no_objection and not sess.auto_preview_exec and (bool(remaining_cue) or not has_wb_actions):
                         await self._set_stage(
                             sess,
                             "cross_talk",
@@ -4584,7 +5199,9 @@ class RoundtableOrchestrator:
                             lead_agent,
                             "lead_synthesis",
                             "架构裁定",
+                            cue_instruction=remaining_cue,
                         )
+                    await self.broadcast(sess, "whiteboard_update", sess.whiteboard)
 
             if not active_agents:
                 await self._finalize_task_idle_state(sess, owner_task)
@@ -4595,16 +5212,9 @@ class RoundtableOrchestrator:
                 exec_aid = sess.effective_executor_agent()
                 if exec_aid not in active_agents:
                     exec_aid = active_agents[-1]
-                last_valid_msg = next(
-                    (m for m in reversed(sess.messages) if not m.get("error") and not m.get("skipped") and m.get("content")),
-                    None,
-                )
-                already_converged = bool(
-                    last_valid_msg
-                    and last_valid_msg.get("phase_label") in ("架构裁定", "综合裁定", "优选收敛", "修改方案", "执行清单", "边界自检")
-                )
-                if already_converged:
-                    await self.update_whiteboard_manual(sess, {"op": "import_resolution", "message_id": last_valid_msg["id"]})
+                existing_res, is_res_stale, _ = self._refresh_resolution_staleness(sess)
+                if existing_res is not None and not is_res_stale:
+                    await self.update_whiteboard_manual(sess, {"op": "import_resolution", "message_id": existing_res["id"]})
                 else:
                     await self._finalize_consensus_internal(sess, clear_task_on_exit=False)
 
@@ -4726,19 +5336,23 @@ class RoundtableOrchestrator:
             ready_agents, _ = self._get_ready_enabled_agents(sess)
             targets = [a for a in mentioned if a in ready_agents] if mentioned else ready_agents
             if not targets and mentioned:
-                # 若显式点名的席位处于暂停态但本地 CLI 就绪，也允许单轮点名响应
                 targets = [a for a in mentioned if sess.seat_states.get(a, {}).get("binary_ready")]
             if not targets:
                 await self._finalize_task_idle_state(sess, owner_task)
                 await self._set_stage(sess, "awaiting_chair", "无可用 CLI 响应，请检查配置")
                 return
 
+            int_start_idx = len(sess.messages)
             lead_agent = self._pick_lead_synthesizer(sess, targets) if not mentioned and len(targets) >= 2 else None
             if lead_agent and len(targets) >= 2:
                 ok_c, _, _, _ = await self._run_single_agent_turn(sess, lead_agent, "interrupt_reply", "方案调整")
                 others = [a for a in targets if a != lead_agent]
                 if ok_c and others:
-                    await self._run_agent_batch(sess, others, "interrupt_reply", "协同回应")
+                    peer_cues = {
+                        aid_o: f"请结合主持人最新要求，独立审视 @{self._seat_name(sess, lead_agent)} 刚给出的调整方案：补充异构视角精华（`[吸收 @席位：...]`）或指出遗漏边界（`[反驳 @席位：...]` / `[修正原方案：...]` / `[放弃原方案：...]`）。"
+                        for aid_o in others
+                    }
+                    await self._run_agent_batch(sess, others, "interrupt_reply", "协同回应", cue_by_agent=peer_cues)
             elif len(targets) > 1:
                 await self._run_agent_batch(sess, targets, "interrupt_reply", "定向回应")
             else:
@@ -4749,6 +5363,11 @@ class RoundtableOrchestrator:
                     "定向回应",
                     is_solo_mode=len(ready_agents) == 1,
                 )
+            self._analyze_round_disagreements_and_abandonments(
+                sess, sess.messages[int_start_idx:], targets, "主持追问 · 协同纠偏"
+            )
+            self._refresh_resolution_staleness(sess)
+            await self.broadcast(sess, "whiteboard_update", sess.whiteboard)
             await self._finalize_task_idle_state(sess, owner_task)
             await self._set_stage(sess, "awaiting_chair", "已完成回应，待主持人决议")
         except asyncio.CancelledError:
@@ -4783,6 +5402,7 @@ class RoundtableOrchestrator:
     async def _run_cue_flow(self, sess: MeetingSession, agent_id: str, instruction: str) -> None:
         owner_task = asyncio.current_task()
         try:
+            cue_start_idx = len(sess.messages)
             await self._set_stage(sess, "chair_interrupt", f"{self._seat_name(sess, agent_id)} 专项回应中")
             await self._run_single_agent_turn(
                 sess,
@@ -4792,6 +5412,11 @@ class RoundtableOrchestrator:
                 cue_instruction=instruction,
                 is_solo_mode=len(sess.enabled_agents) == 1,
             )
+            self._analyze_round_disagreements_and_abandonments(
+                sess, sess.messages[cue_start_idx:], list(sess.enabled_agents), "定向点名 · 专项回应"
+            )
+            self._refresh_resolution_staleness(sess)
+            await self.broadcast(sess, "whiteboard_update", sess.whiteboard)
             await self._finalize_task_idle_state(sess, owner_task)
             await self._set_stage(sess, "awaiting_chair", "待主持人下一步指令")
         except asyncio.CancelledError:
@@ -4867,24 +5492,46 @@ class RoundtableOrchestrator:
                     challenger,
                     "redebate",
                     "焦点再辩",
-                    cue_instruction=f"争议焦点：「{claim_txt}」。请向 @{d_name} 给出最核心的证伪判据、边界条件或量化取舍要求。",
+                    cue_instruction=f"争议焦点{(f' [' + str(dis_obj.get('issue_code')) + ']') if (dis_obj and dis_obj.get('issue_code')) else ''}：「{claim_txt}」。请向 @{d_name} 给出最核心的证伪判据、边界条件或量化取舍要求。",
                 )
                 if ok1:
+                    code_hint = f" `[回应 {dis_obj.get('issue_code')}：接受修正/量化反证 | ...]`、" if (dis_obj and dis_obj.get("issue_code")) else " "
                     await self._run_single_agent_turn(
                         sess,
                         defender,
                         "redebate",
                         "焦点再辩",
-                        cue_instruction=f"争议焦点：「{claim_txt}」。请正面回应 @{c_name} 的判据，直接给出最终修正契约（`[修正原方案：...]` / `[放弃原方案：...]`）或反证结论。",
+                        cue_instruction=f"争议焦点：「{claim_txt}」。请正面回应 @{c_name} 的判据，直接给出最终修正契约（{code_hint}`[修正原方案：...]` / `[放弃原方案：...]`）或反证结论。",
                     )
                 new_msgs = sess.messages[start_idx:]
                 self._analyze_round_disagreements_and_abandonments(sess, new_msgs, [challenger, defender], "双席再辩")
-                if dis_obj is not None:
-                    dis_obj["resolved"] = True
-                    dis_obj["stance_delta"] = "redebated"
+                valid_rd_msgs = [
+                    m for m in new_msgs if isinstance(m, dict) and not m.get("error") and not m.get("skipped")
+                ]
+                def_msg = next((m for m in reversed(valid_rd_msgs) if m.get("speaker") == defender), None)
+                def_body = str((def_msg or {}).get("content") or "")
+                explicit_refusal = bool(
+                    def_msg is None
+                    or any(k in def_body for k in ("反证", "不成立", "维持原", "无需修改", "拒绝修改", "维持异议"))
+                    or (def_msg.get("consensus") is False and "[修正原方案" not in def_body and "接受修正" not in def_body)
+                )
+                if dis_obj is not None and not dis_obj.get("resolved"):
+                    if explicit_refusal:
+                        dis_obj["resolved"] = False
+                        dis_obj["stance_delta"] = "disputed_locked"
+                        dis_obj["verification_state"] = "disputed_locked"
+                        if def_body and not dis_obj.get("resolution_note"):
+                            dis_obj["resolution_note"] = self._smart_clip(def_body, limit=220)
+                    else:
+                        dis_obj["resolved"] = True
+                        dis_obj["stance_delta"] = "redebated"
+                        dis_obj["verification_state"] = "redebate_converged"
+                        if def_body and not dis_obj.get("resolution_note"):
+                            dis_obj["resolution_note"] = self._smart_clip(def_body, limit=220)
                 if target_wb_item is not None:
-                    target_wb_item["rebutted"] = True
+                    target_wb_item["rebutted"] = not explicit_refusal
                     target_wb_item["ver"] = int(target_wb_item.get("ver") or 1) + 1
+                self._refresh_resolution_staleness(sess)
                 await self.broadcast(sess, "whiteboard_update", sess.whiteboard)
                 await self._finalize_task_idle_state(sess, owner_task)
                 await self._set_stage(sess, "awaiting_chair", f"已完成 {c_name} ⇄ {d_name} 焦点再辩，待主持人形成决议")
@@ -4904,14 +5551,132 @@ class RoundtableOrchestrator:
             "claim": claim_txt,
         }
 
+    @staticmethod
+    def _extract_seat_lossless_essence_snapshot(clean_body: str, abandoned_norm_set: Set[str], max_chars: int = 3200) -> str:
+        """
+        倒序优先提取单席无损终态精华快照（保留最新契约小节、代码块、对比表格与量化阈值，整块剔除已弃案旧代码/行）：
+        彻底修复旧版正序 `re.search` 仅抓第 1 轮未纠偏初版草稿、丢弃后续答辩纠偏新版契约的逆序覆盖漏洞。
+        """
+        if not clean_body:
+            return ""
+
+        def _is_code_block_abandoned(cb_raw: str) -> bool:
+            inner = re.sub(r"^```[A-Za-z0-9_+\-]*\s*|\s*```$", "", cb_raw).strip()
+            nk_full = _norm_dedupe_key(inner)
+            if not nk_full:
+                return True
+            for ab_k in abandoned_norm_set:
+                if not ab_k or len(ab_k) < 8:
+                    continue
+                if ab_k in nk_full or (len(nk_full) >= 10 and nk_full in ab_k):
+                    return True
+            for ln_c in inner.splitlines():
+                s_c = ln_c.strip()
+                if not s_c or s_c.startswith(("--", "#", "//")):
+                    continue
+                nk_stmt = _norm_dedupe_key(s_c)
+                if len(nk_stmt) >= 10 and any(
+                    ab_k and len(ab_k) >= 10 and (nk_stmt in ab_k or ab_k in nk_stmt)
+                    for ab_k in abandoned_norm_set
+                ):
+                    return True
+            return False
+
+        # 先整块剥离命中弃案负面清单的旧代码块，防止残留空注释壳
+        purged_body = re.sub(
+            r"```[\s\S]*?```",
+            lambda m_cb: "" if _is_code_block_abandoned(m_cb.group(0)) else m_cb.group(0),
+            clean_body,
+        )
+
+        def _filter_abandoned_lines(raw_text: str) -> str:
+            kept: List[str] = []
+            for ln in raw_text.splitlines():
+                s_ln_chk = ln.strip()
+                if re.match(r"^\[[^\]\n]{2,24}\]$", s_ln_chk):
+                    continue
+                nk = _norm_dedupe_key(ln)
+                if nk and any(
+                    ab_k and len(ab_k) >= 8 and (ab_k in nk or (len(nk) >= 12 and nk in ab_k))
+                    for ab_k in abandoned_norm_set
+                ):
+                    continue
+                kept.append(ln)
+            return "\n".join(kept).strip()
+
+        sig_matches = list(
+            re.finditer(
+                r"(?:#{2,4}|\*\*)\s*(?:本席独创贡献与关键契约|本席核心贡献与关键契约|独创贡献|关键契约)[^\n]*\n([\s\S]+?)(?=\n#{2,4}\s|\n\[[^\]\n]{2,24}\]\n|\Z)",
+                purged_body,
+            )
+        )
+        has_self_revision = ("[修正原方案" in clean_body) or ("[放弃原方案" in clean_body)
+        max_sig_keep = 1 if has_self_revision else 2
+        chosen_blocks: List[str] = []
+        seen_block_norms: Set[str] = set()
+
+        for sig_m in reversed(sig_matches):
+            raw_sig = _filter_abandoned_lines(sig_m.group(1).strip())
+            nk_sig = _norm_dedupe_key(raw_sig)
+            if raw_sig and nk_sig and nk_sig not in seen_block_norms:
+                seen_block_norms.add(nk_sig)
+                chosen_blocks.append(raw_sig)
+                if len(chosen_blocks) >= max_sig_keep:
+                    break
+
+        code_matches = list(re.finditer(r"```[\s\S]*?```", purged_body))
+        for code_m in reversed(code_matches):
+            cb = code_m.group(0).strip()
+            nk_cb = _norm_dedupe_key(cb)
+            if not cb or not nk_cb:
+                continue
+            if all(cb not in ex and nk_cb not in _norm_dedupe_key(ex) for ex in chosen_blocks):
+                chosen_blocks.append(cb)
+            if len(chosen_blocks) >= 5:
+                break
+
+        body_no_code = re.sub(r"```[\s\S]*?```", "", purged_body)
+        substantive_lines: List[str] = []
+        seen_sub_norms: Set[str] = set()
+        for raw_ln in reversed(body_no_code.splitlines()):
+            s_ln = raw_ln.strip()
+            if not s_ln or len(s_ln) < 8 or s_ln.startswith("#"):
+                continue
+            if is_whiteboard_noise(s_ln):
+                continue
+            nk_l = _norm_dedupe_key(s_ln)
+            if not nk_l or nk_l in seen_sub_norms:
+                continue
+            if any(ab_k and len(ab_k) >= 8 and ab_k in nk_l for ab_k in abandoned_norm_set):
+                continue
+            if any(nk_l in _norm_dedupe_key(ex) for ex in chosen_blocks):
+                continue
+            if s_ln.startswith(("|", "-", "*", "•", "1.", "2.", "3.", "4.", "5.")) and (
+                not sig_matches
+                or s_ln.startswith("|")
+                or any(kw in s_ln for kw in ("契约", "接口", "阈值", "复杂度", "修正原方案", "回应 D", "条件预案"))
+            ):
+                seen_sub_norms.add(nk_l)
+                substantive_lines.append(s_ln)
+            if len(substantive_lines) >= (8 if sig_matches else 14):
+                break
+        if substantive_lines:
+            substantive_lines.reverse()
+            if sig_matches:
+                chosen_blocks.append("\n".join(substantive_lines))
+            else:
+                chosen_blocks.insert(0, "\n".join(substantive_lines))
+
+        merged = "\n\n".join(b for b in chosen_blocks if b).strip()
+        if len(merged) > max_chars:
+            merged = merged[:max_chars].rstrip() + "\n…（其余细节见下方完整讨论记录）"
+        return merged
+
     def _build_resolution_synthesis_dossier(self, sess: MeetingSession) -> Tuple[str, dict]:
         """
-        全轮次讨论成果防遗漏 & 确认放弃差方案显式隔离编译器：
-        扫描会话全部历史消息（零窗口截断）与结构化白板：
-        1. 提取主持初始诉求、历次插话追问与 [主持指定约束]（100% 强制保留账本）；
-        2. 识别所有经 [放弃原方案]、[修正原方案] 旧前缀、[白板: 弃案=...] 及主持明确否决淘汰的差方案，写入 abandoned_proposals；
-        3. 按轮次与席位汇总经质询存活/修正演进后的有效技术结论、风险护栏与具体行动项，剔除已被弃案覆盖的旧提议；
-        4. 返回可供 synthesis 模型精准收敛的结构化档案文本与统计元数据 resolution_meta。
+        双层无损多 AI 思想精华汇编 & 废案条目级精确隔离编译器：
+        第一层（结构化索引层）：主持硬约束、跨席互认精华、纠偏演进链、D1..Dn 争议状态与弃案负面清单；
+        第二层（逐席无损精华快照层）：按席位保留最高 1,800 字硬核契约、代码块、表格与量化阈值，严禁被 220 字摘要磨平。
         """
         wb = _normalize_and_sync_whiteboard(sess.whiteboard, topic=sess.topic, messages=sess.messages)
         self._refresh_epistemic_status(sess)
@@ -4920,7 +5685,7 @@ class RoundtableOrchestrator:
         seen_chair: Set[str] = set()
 
         def _add_chair(txt_c: str) -> None:
-            s_c = self._smart_clip(str(txt_c or "").strip(), limit=220)
+            s_c = self._smart_clip(str(txt_c or "").strip(), limit=360)
             nk_c = _norm_dedupe_key(s_c)
             if s_c and nk_c and nk_c not in seen_chair:
                 seen_chair.add(nk_c)
@@ -4932,15 +5697,34 @@ class RoundtableOrchestrator:
             if isinstance(it0, dict) and (it0.get("author") == "chair" or it0.get("origin_tier") == "chair_directive"):
                 _add_chair(it0.get("text", ""))
 
-        # 扫描全量发言：收集主持追问、弃案声明、修正演进链与各席分阶段核心产出
-        abandon_tag_re = re.compile(r"\[(?:放弃原方案|淘汰方案|废弃方案|弃案)[:：]\s*([^\]]+)\]")
-        revise_tag_re = re.compile(r"\[修正原方案[:：]\s*([^\]]+)\]")
-        chair_veto_re = re.compile(r"(?:明确放弃|确认放弃|不要采用|禁止采用|否决|砍掉|剔除方案)[:：]?\s*([^。；\n]{4,100})")
+        abandon_tag_re = re.compile(r"\[(?:放弃原方案|淘汰方案|废弃方案|弃案)[:：]\s*([^\]\n]+)\]")
+        revise_tag_re = re.compile(r"\[修正原方案[:：]\s*([^\]\n]+)\]")
+        absorb_patterns = [
+            re.compile(r"\[吸收\s*@?([^：:\]\s]+)\s*[：:]\s*([^\]\n]+)\]"),
+            re.compile(r"(?:\*\*)?\[吸收\s*@?([^：:\]\s]+)\](?:\*\*)?\s*[：:]\s*([^\n]+)"),
+        ]
+        chair_veto_re = re.compile(r"(?:明确放弃|确认放弃|不要采用|禁止采用|否决|砍掉|剔除方案)[:：]?\s*([^。；\n]{4,120})")
 
         covered_rounds: List[str] = []
         covered_seats: List[str] = []
-        round_outcomes_by_seat: List[str] = []
+        raw_outcomes_by_msg: List[Tuple[str, str, List[str]]] = []
+        per_seat_clean_turns: Dict[str, List[Tuple[str, str]]] = {}
+        seat_disp_by_id: Dict[str, str] = {}
         revised_highlights: List[str] = []
+        absorbed_highlights: List[str] = []
+        seen_absorbed_nk: Set[str] = set()
+
+        for ex_hl in wb.get("absorbed_highlights") or []:
+            if isinstance(ex_hl, dict) and str(ex_hl.get("text") or "").strip():
+                hl_t = self._smart_clip(str(ex_hl["text"]).strip(), limit=280)
+                nk_h = _norm_dedupe_key(hl_t)
+                if nk_h and nk_h not in seen_absorbed_nk:
+                    seen_absorbed_nk.add(nk_h)
+                    absorbed_highlights.append(
+                        f"  · [{ex_hl.get('absorber_name', '')} 吸收 @{ex_hl.get('source_seat_name', '')}] {hl_t}"
+                    )
+
+        sess_seat_names = {aid_k: self._seat_name(sess, aid_k) for aid_k in ALL_SEAT_IDS}
 
         for m in sess.messages:
             if not isinstance(m, dict) or m.get("error") or m.get("skipped"):
@@ -4950,7 +5734,7 @@ class RoundtableOrchestrator:
             ph = str(m.get("phase_label") or "")
             body = str(m.get("content") or "").strip()
             mid = str(m.get("id") or "")
-            if not body or sp == "system" or ph == "最终决议":
+            if not body or sp == "system" or ph in ("最终决议", "决议初稿", "终稿核验"):
                 continue
 
             if ph and ph not in covered_rounds:
@@ -4970,8 +5754,19 @@ class RoundtableOrchestrator:
                     )
                 continue
 
-            if sp in AGENT_META and sp_name not in covered_seats:
-                covered_seats.append(sp_name)
+            if sp in AGENT_META:
+                seat_disp_by_id[sp] = sp_name
+                if sp_name not in covered_seats:
+                    covered_seats.append(sp_name)
+
+            for ab_pat in absorb_patterns:
+                for abm in ab_pat.finditer(body):
+                    src_lbl = abm.group(1).strip().strip("*@[]")
+                    hl_t = self._smart_clip(abm.group(2).strip(), limit=280)
+                    nk_h = _norm_dedupe_key(hl_t)
+                    if hl_t and nk_h and nk_h not in seen_absorbed_nk:
+                        seen_absorbed_nk.add(nk_h)
+                        absorbed_highlights.append(f"  · [{sp_name} 吸收 @{src_lbl}] {hl_t}")
 
             for am in abandon_tag_re.finditer(body):
                 self._record_abandoned_proposal(
@@ -4993,16 +5788,21 @@ class RoundtableOrchestrator:
                             sess,
                             old_part,
                             author=sp,
-                            reason=f"已被 {sp_name} 修正后终态方案（「{self._smart_clip(new_part, 60)}」）替代",
+                            reason=f"已被 {sp_name} 修正后终态方案（「{self._smart_clip(new_part, 80)}」）替代",
                             round_phase=ph,
                             source_msg_id=mid,
                         )
                     if new_part:
-                        revised_highlights.append(f"  · [{sp_name} · {ph} · 修正终态] {self._smart_clip(new_part, 200)}")
+                        revised_highlights.append(
+                            f"  · [{sp_name} · {ph} · 纠偏演进] 旧案「{self._smart_clip(old_part, 90)}」 → 终态「{self._smart_clip(new_part, 320)}」"
+                        )
                 else:
-                    revised_highlights.append(f"  · [{sp_name} · {ph} · 修正终态] {self._smart_clip(rev_raw, 200)}")
+                    revised_highlights.append(f"  · [{sp_name} · {ph} · 修正终态] {self._smart_clip(rev_raw, 320)}")
 
-            clean_b, tail_typed = parse_structured_tail_with_kinds(body)
+            clean_b, tail_typed = parse_structured_tail_with_kinds(body, seat_names=sess_seat_names)
+            if sp in AGENT_META and clean_b.strip():
+                per_seat_clean_turns.setdefault(sp, []).append((ph, clean_b.strip()))
+
             pts_for_msg: List[str] = []
             for ti in tail_typed:
                 tk = str(ti.get("kind") or "")
@@ -5021,58 +5821,127 @@ class RoundtableOrchestrator:
                 else:
                     pts_for_msg.append(f"({tk}) {tt}")
             if not pts_for_msg:
-                for kp in self._extract_key_points(clean_b, max_items=3):
+                for kp in self._extract_key_points(clean_b, max_items=8):
                     pts_for_msg.append(kp)
             if pts_for_msg:
-                round_outcomes_by_seat.append(
-                    f"  · [{ph} · {sp_name}] " + "；".join(self._smart_clip(x, 150) for x in pts_for_msg[:4])
-                )
+                raw_outcomes_by_msg.append((ph, sp_name, pts_for_msg[:8]))
 
         abandoned_list = [x for x in (wb.get("abandoned_proposals") or []) if isinstance(x, dict) and str(x.get("text") or "").strip()]
         abandoned_norm_set = {_norm_dedupe_key(str(x.get("text") or "")) for x in abandoned_list}
 
-        # 过滤掉任何命中弃案哈希的旧轮次摘录，确保只向决议模型喂入存活成果 + 显式负面清单
         surviving_outcomes: List[str] = []
-        for line_o in round_outcomes_by_seat:
-            if any(ab_k and len(ab_k) >= 8 and ab_k in _norm_dedupe_key(line_o) for ab_k in abandoned_norm_set):
-                continue
-            surviving_outcomes.append(line_o)
+        for ph_o, sp_o, pts_o in raw_outcomes_by_msg:
+            kept_pts: List[str] = []
+            for pt_txt in pts_o:
+                nk_pt = _norm_dedupe_key(pt_txt)
+                if any(ab_k and len(ab_k) >= 8 and ab_k in nk_pt for ab_k in abandoned_norm_set):
+                    continue
+                kept_pts.append(self._smart_clip(pt_txt, 360))
+            if kept_pts:
+                surviving_outcomes.append(f"  · [{ph_o} · {sp_o}] " + "；".join(kept_pts))
 
+        seat_essence_blocks: List[str] = []
+        seat_essence_by_aid: Dict[str, str] = {}
+        for sp_id, turns_for_seat in per_seat_clean_turns.items():
+            s_disp = seat_disp_by_id.get(sp_id, sp_id)
+            p_lbl = get_persona_spec(sess.seat_personas.get(sp_id, ""), sp_id)["label"]
+            sampled_turns = (
+                turns_for_seat
+                if len(turns_for_seat) <= 5
+                else (turns_for_seat[:1] + turns_for_seat[-4:])
+            )
+            combined_seat_md = "\n\n".join(f"[{ph_s}]\n{cb_s}" for ph_s, cb_s in sampled_turns)
+            snap_s = self._extract_seat_lossless_essence_snapshot(combined_seat_md, abandoned_norm_set, max_chars=3200)
+            if snap_s:
+                seat_essence_by_aid[sp_id] = snap_s
+                seat_essence_blocks.append(f"  ▸ 【{s_disp}（{p_lbl}）独创精华与终态关键契约快照】：\n{snap_s}")
+
+        all_disagreements = [
+            d for d in (wb.get("disagreements") or [])
+            if isinstance(d, dict) and str(d.get("claim") or "").strip()
+        ]
+        open_disagreements = [d for d in all_disagreements if not d.get("resolved")]
+        resolved_disagreements = [d for d in all_disagreements if d.get("resolved")]
+        verified_disagreements = [
+            d for d in resolved_disagreements if d.get("verification_state") == "verified_by_challenger"
+        ]
+        disputed_disagreements = [
+            d for d in open_disagreements if d.get("verification_state") == "disputed_locked"
+        ]
         absent_list = [x for x in (wb.get("absent_seats") or []) if isinstance(x, dict)]
         epi_badge = str(wb.get("epistemic_badge") or "[同源模型多视角推演 · 误差相关]")
 
         dossier_parts: List[str] = [
-            "【全轮次会议成果与废案隔离审计档案（系统自动汇编 · 严禁遗漏存活项、严禁回流弃案）】：",
+            "【全轮次多 AI 思想精华与废案隔离审计档案（双层无损汇编 · 严禁遗漏存活精华与关键契约、严禁回流弃案）】：",
             f"- 认知独立性标记：{epi_badge}",
             f"- 覆盖研讨阶段：{' → '.join(covered_rounds) if covered_rounds else '直接汇总'}",
             f"- 实际参评席位：{'、'.join(covered_seats) if covered_seats else '暂无席位发言'}",
         ]
         if absent_list:
             absent_desc = "；".join(f"{a.get('seat_name')}（{a.get('reason')}）" for a in absent_list)
-            dossier_parts.append(f"- 未参评/缺席席位（须在第三节如实披露）：{absent_desc}")
+            dossier_parts.append(f"- 未参评/缺席席位（须在第六节如实披露）：{absent_desc}")
         if chair_hard_list:
-            dossier_parts.append("1) 主持人硬约束与历次追问诉求（100% 强制保留）：\n" + "\n".join(f"  · {c}" for c in chair_hard_list[:24]))
-        if revised_highlights:
-            dossier_parts.append("2) 经质询答辩演进后的终态修正方案（优先采纳终态，勿回退初版草案）：\n" + "\n".join(revised_highlights[:20]))
+            dossier_parts.append("1) 主持人硬约束与历次追问诉求（100% 强制保留）：\n" + "\n".join(f"  · {c}" for c in chair_hard_list[:32]))
+        if absorbed_highlights:
+            dossier_parts.append("2) 跨席互认的高价值思想精华（须在第二节与第三节显式保留并署名溯源）：\n" + "\n".join(absorbed_highlights[:28]))
+        if revised_highlights or resolved_disagreements:
+            rev_lines = list(revised_highlights[:24])
+            for rd in resolved_disagreements[:20]:
+                v_tag = "质询验收通过" if rd.get("verification_state") == "verified_by_challenger" else "已修正闭环"
+                note_sfx = f" → 答辩：{rd.get('resolution_note')}" if rd.get("resolution_note") else f"（状态：{rd.get('stance_delta')}）"
+                if rd.get("challenger_note"):
+                    note_sfx += f" → 质询验收：{rd.get('challenger_note')}"
+                rev_lines.append(
+                    f"  · [{rd.get('issue_code') or 'D?'} {v_tag} · {rd.get('challenger_name', '')} → {rd.get('target_name', '')}] {rd.get('claim', '')}{note_sfx}"
+                )
+            dossier_parts.append("3) 经质询答辩与验收后的 D1..Dn 纠偏闭环对照链（优先采纳终态并写入第三节演进表）：\n" + "\n".join(rev_lines[:36]))
         if surviving_outcomes:
-            dossier_parts.append("3) 各轮次存活核心结论与行动建议索引（须全量核对吸纳）：\n" + "\n".join(surviving_outcomes[:36]))
+            dossier_parts.append("4) 各轮次按席位存活核心结论与行动建议索引（须逐席核对吸纳）：\n" + "\n".join(surviving_outcomes[:60]))
+        if open_disagreements:
+            open_lines: List[str] = []
+            for d in open_disagreements[:24]:
+                st_tag = "质询维持异议" if d.get("verification_state") == "disputed_locked" else "未决"
+                tail_d = ""
+                if d.get("resolution_note"):
+                    tail_d += f" → 答辩反证：{d['resolution_note']}"
+                if d.get("challenger_note"):
+                    tail_d += f" → 质询方保留意见：{d['challenger_note']}"
+                open_lines.append(
+                    f"  · [{d.get('issue_code') or 'D?'} {st_tag} · {d.get('challenger_name', '')} → {d.get('target_name', '')}] {d.get('claim', '')}{tail_d}"
+                )
+            dossier_parts.append(
+                "5) 尚未完全收敛的未决争议与保留异议项（严禁伪装为无条件共识，有条件成立者写入第五节『条件触发预案』，风险写入第六节）：\n"
+                + "\n".join(open_lines)
+            )
         if abandoned_list:
             dossier_parts.append(
-                "4) 已确认放弃 / 证伪淘汰差方案负面清单（严禁混入采纳结论或执行任务，须单独列入第二节）：\n"
+                "6) 已确认放弃 / 证伪淘汰差方案负面清单（严禁混入第二节或第六节，须单独列入第四节）：\n"
                 + "\n".join(
                     f"  · [淘汰] {ab['text']}（来源：{ab.get('seat_name', '')} · 原因：{ab.get('reason', '证伪淘汰')}）"
-                    for ab in abandoned_list[:24]
+                    for ab in abandoned_list[:32]
                 )
             )
         else:
-            dossier_parts.append("4) 已确认放弃 / 证伪淘汰差方案负面清单：当前无显式声明弃案（若讨论记录中存在被推翻的次优方案，请主动归纳至第二节）。")
+            dossier_parts.append("6) 已确认放弃 / 证伪淘汰差方案负面清单：当前无显式声明弃案（若讨论记录中存在被推翻的次优方案，请主动归纳至第四节）。")
+        if seat_essence_blocks:
+            dossier_parts.append(
+                "7) 逐席独创思想与终态关键技术契约无损快照（保留接口签名、代码块、公式与量化阈值，严禁概括抹平）：\n"
+                + "\n\n".join(seat_essence_blocks)
+            )
 
         meta = {
             "epistemic_badge": epi_badge,
             "covered_rounds": covered_rounds,
             "covered_seats": covered_seats,
             "chair_constraint_count": len(chair_hard_list),
+            "absorbed_count": len(absorbed_highlights),
             "surviving_outcome_count": len(surviving_outcomes) + len(revised_highlights),
+            "seat_essence_count": len(seat_essence_blocks),
+            "seat_essence_by_aid": seat_essence_by_aid,
+            "resolved_disagreement_count": len(resolved_disagreements),
+            "verified_disagreement_count": len(verified_disagreements),
+            "disputed_disagreement_count": len(disputed_disagreements),
+            "open_disagreement_count": len(open_disagreements),
             "abandoned_count": len(abandoned_list),
             "absent_count": len(absent_list),
         }
@@ -5083,6 +5952,39 @@ class RoundtableOrchestrator:
         sess.active_task = asyncio.create_task(self._finalize_consensus_internal(sess, clear_task_on_exit=True))
         await self._broadcast_meta(sess)
 
+    @classmethod
+    def _extract_audit_patches_from_body(cls, abody: str, aname: str) -> List[str]:
+        """支持块级 Markdown 会签补丁（保留多行代码块、表格与阈值）及单行方括号补丁提取。"""
+        if not abody or "[终稿无遗漏]" in abody:
+            return []
+        cleaned_a = re.sub(r"\n?\[(?:状态|徽章|白板|白板要点)[:：][^\]]*\]", "", abody).strip()
+        if not cleaned_a or "[终稿无遗漏]" in cleaned_a:
+            return []
+
+        patches: List[str] = []
+        block_pat = re.compile(
+            r"(?:#{2,4}\s*\[?(?:补录章节|遗漏补录|废案回流预警|少数派预案)[^\n]*\]?)[\s\S]*?(?=\n#{2,4}\s*\[?(?:补录章节|遗漏补录|废案回流预警|少数派预案)|\Z)"
+        )
+        for bm in block_pat.finditer(cleaned_a):
+            blk = bm.group(0).strip()
+            if len(blk) >= 12:
+                if len(blk) > 2400:
+                    blk = blk[:2400].rstrip() + "…"
+                patches.append(f"  · [{aname} 块级会签补丁]\n{blk}")
+
+        inline_pat = re.compile(r"\[(?:遗漏补录|废案回流预警|少数派预案)[:：]\s*([^\]]+)\]")
+        for tm in inline_pat.finditer(cleaned_a):
+            tag_full = tm.group(0).strip()
+            if all(tag_full not in ex_p for ex_p in patches):
+                patches.append(f"  · [{aname}] {tag_full}")
+
+        if not patches and len(cleaned_a) >= 16 and any(
+            k in cleaned_a for k in ("遗漏", "补录", "废案回流", "少数派", "条件触发预案", "漏写", "缺失")
+        ):
+            clipped_fb = cleaned_a[:1600].rstrip() + ("…" if len(cleaned_a) > 1600 else "")
+            patches.append(f"  · [{aname} 核验补录]\n{clipped_fb}")
+        return patches
+
     async def _finalize_consensus_internal(
         self,
         sess: MeetingSession,
@@ -5090,29 +5992,32 @@ class RoundtableOrchestrator:
     ) -> None:
         owner_task = asyncio.current_task()
         try:
-            await self._set_stage(sess, "concluded", "正在全量盘点各轮成果并剥离淘汰方案，合成《会议最终决议》…")
+            await self._set_stage(sess, "concluded", "正在盘点双层无损精华卷宗并隔离废案，合成 6 段式《会议最终决议》…")
             dossier_block, dossier_meta = self._build_resolution_synthesis_dossier(sess)
             sess.whiteboard["_synthesis_dossier_block"] = dossier_block
 
             ready_agents, _ = self._get_ready_enabled_agents(sess)
             synthesizer = self._pick_lead_synthesizer(sess, ready_agents) or (ready_agents[0] if ready_agents else None)
 
-            sec4_title = {
-                "code_patch": "四、文件级待执行任务清单（模块路径 · 改动职责 · 回归验证）",
-                "decision_matrix": "四、方案对比决策矩阵与落地行动清单",
-                "ux_checklist": "四、产品体验分级走查与验收打磨清单",
-                "doc_export": "四、根因排查闭环与结构化定稿交付清单",
-            }.get(sess.artifact_type, "四、待执行交付任务清单")
+            sec6_title = {
+                "code_patch": "六、边界风险防线、参会披露与文件级待执行任务清单（模块路径 · 改动职责 · 回归验证）",
+                "decision_matrix": "六、边界风险防线、参会披露与决策落地行动清单",
+                "ux_checklist": "六、边界风险防线、参会披露与产品体验分级走查清单",
+                "doc_export": "六、边界风险防线、参会披露与根因排查定稿交付清单",
+            }.get(sess.artifact_type, "六、边界风险防线、参会披露与待执行任务清单")
 
             synthesized_ok = False
             res_msg_id = ""
+            draft_msg_obj: Optional[dict] = None
             if synthesizer and sess.messages:
                 synth_cue = (
-                    "请严格依据【全轮次会议成果与废案隔离审计档案】及完整讨论记录，输出一份零遗漏、零废案回流的旗舰级《会议最终决议》：\n"
-                    "## 一、已确认共识与全量采纳成果（完整保留主持约束、历次追问定论与各席经答辩修正后的终态方案）\n"
-                    "## 二、已确认放弃与证伪淘汰方案（防回流负面清单：逐条列出被放弃/证伪/被替代的旧方案及淘汰理由，严禁混入任务区）\n"
-                    "## 三、边界风险防线、未决争议与参会披露（含异常回退护栏、未决分歧及缺席/同源认知标记）\n"
-                    f"## {sec4_title}"
+                    "请严格依据【全轮次多 AI 思想精华与废案隔离审计档案】（含第 7 部分逐席独创精华与关键契约快照）及完整讨论记录，输出零精华遗漏、零契约截断、零废案回流的 6 段式《会议最终决议》：\n"
+                    "## 一、核心决策总览（TL;DR：一句话定调最终路线、核心取舍原则与不可突破底线）\n"
+                    "## 二、已确认共识与完整实施方案（完整保留主持约束、历次追问定论与各席修正后的终态参数、接口契约及关键代码块，显式标注思想来源席位）\n"
+                    "## 三、多 AI 思想精华与纠偏演进表（表格：核心议题 | 初始方案 | 纠偏来源与盲区指出 | 终态采纳方案与精华归属）\n"
+                    "## 四、已确认放弃与证伪淘汰方案（防回流负面清单：逐条列出被放弃/证伪/被替代的旧方案及淘汰理由）\n"
+                    "## 五、高价值少数派意见与条件触发预案（若未来触发 X 条件 → 启用 Y 方案，注明来源席位）\n"
+                    f"## {sec6_title}"
                 )
                 ok, _, _, _ = await self._run_single_agent_turn(
                     sess,
@@ -5125,9 +6030,102 @@ class RoundtableOrchestrator:
                 )
                 synthesized_ok = ok
                 if ok and sess.messages:
-                    res_msg_id = str(sess.messages[-1].get("id") or "")
+                    draft_msg_obj = sess.messages[-1]
+                    res_msg_id = str(draft_msg_obj.get("id") or "")
+
+            audit_verified = False
+            audit_patch_count = 0
+            auditor_seat_names: List[str] = []
+            if synthesized_ok and draft_msg_obj is not None and len(ready_agents) >= 2:
+                auditors = [a for a in ready_agents if a != synthesizer]
+                if auditors:
+                    draft_content = str(draft_msg_obj.get("content") or "").strip()
+                    sess.whiteboard["_resolution_draft_block"] = draft_content
+                    essence_map = dossier_meta.get("seat_essence_by_aid") or {}
+                    all_dis_audit = [
+                        d for d in (sess.whiteboard.get("disagreements") or []) if isinstance(d, dict)
+                    ]
+                    self_anchors: Dict[str, str] = {}
+                    for a_id in auditors:
+                        anchor_lines: List[str] = []
+                        own_ess = str(essence_map.get(a_id) or "").strip()
+                        if own_ess:
+                            anchor_lines.append(f"▸ 你本场终态独创贡献与关键契约：\n{own_ess[:1600]}")
+                        own_challenges = [d for d in all_dis_audit if d.get("challenger") == a_id]
+                        if own_challenges:
+                            ch_lines = [
+                                f"  - [{d.get('issue_code', 'D?')} · {'已闭环' if d.get('resolved') else '未决/保留异议'}] 你质询 @{d.get('target_name', '')}：{d.get('claim', '')}"
+                                + (f" → 对方答辩：{d.get('resolution_note')}" if d.get("resolution_note") else "")
+                                for d in own_challenges[:10]
+                            ]
+                            anchor_lines.append("▸ 你发起的 D# 争议及对方答辩对照：\n" + "\n".join(ch_lines))
+                        if anchor_lines:
+                            self_anchors[a_id] = "\n\n".join(anchor_lines)
+                    sess.whiteboard["_resolution_audit_self_anchors"] = self_anchors
+                    auditor_names_str = "、".join(self._seat_name(sess, a) for a in auditors)
+                    await self._set_stage(sess, "concluded", f"多席终稿会签：{auditor_names_str} 正在对照自身原稿执行块级查漏…")
+                    audit_start_idx = len(sess.messages)
+                    audit_outcomes = await self._run_agent_batch(
+                        sess,
+                        auditors,
+                        "resolution_audit",
+                        "终稿核验",
+                        ingest_whiteboard=False,
+                    )
+                    audit_msgs = sess.messages[audit_start_idx:]
+                    actionable_patches: List[str] = []
+                    succeeded_auditors = 0
+                    for aid_a, (ok_a, _, _, _) in zip(auditors, audit_outcomes):
+                        if ok_a:
+                            succeeded_auditors += 1
+                            auditor_seat_names.append(self._seat_name(sess, aid_a))
+                    for am in audit_msgs:
+                        if not isinstance(am, dict) or am.get("error") or am.get("skipped"):
+                            continue
+                        abody = str(am.get("content") or "").strip()
+                        aname = str(am.get("speaker_name") or am.get("speaker") or "席位")
+                        actionable_patches.extend(self._extract_audit_patches_from_body(abody, aname))
+
+                    if succeeded_auditors > 0:
+                        audit_verified = True
+                        audit_patch_count = len(actionable_patches)
+                    if actionable_patches and synthesizer:
+                        draft_msg_obj["phase_label"] = "决议初稿"
+                        draft_msg_obj["badge"] = "已提交终稿核验"
+                        await self.broadcast(sess, "msg_done", draft_msg_obj)
+                        sess.whiteboard["_resolution_audit_patches_block"] = (
+                            "【他席终稿块级会签补漏清单（必须逐条完整吸纳对应契约/代码块/风险与少数派预案，严禁简化遗漏）】：\n"
+                            + "\n\n".join(actionable_patches[:24])
+                        )
+                        await self._set_stage(
+                            sess,
+                            "concluded",
+                            f"正在合入 {audit_patch_count} 项他席会签补丁，定稿《会议最终决议》…",
+                        )
+                        ok_merge, _, _, _ = await self._run_single_agent_turn(
+                            sess,
+                            synthesizer,
+                            "resolution_merge",
+                            "最终决议",
+                            cue_instruction=(
+                                f"其余席位（{auditor_names_str}）在终稿会签中提交了 {audit_patch_count} 项补漏与保留意见。"
+                                "请完整保留初稿全部有效内容与代码契约，并将全部会签补丁无缝融入 6 段式《会议最终决议》对应章节后输出终稿。"
+                            ),
+                            ingest_whiteboard=False,
+                            is_solo_mode=False,
+                        )
+                        if ok_merge and sess.messages:
+                            res_msg_id = str(sess.messages[-1].get("id") or "")
+                        else:
+                            draft_msg_obj["phase_label"] = "最终决议"
+                            draft_msg_obj["badge"] = "决议初稿（合入未完成）"
+                            await self.broadcast(sess, "msg_done", draft_msg_obj)
+                            res_msg_id = str(draft_msg_obj.get("id") or "")
 
             sess.whiteboard.pop("_synthesis_dossier_block", None)
+            sess.whiteboard.pop("_resolution_draft_block", None)
+            sess.whiteboard.pop("_resolution_audit_patches_block", None)
+            sess.whiteboard.pop("_resolution_audit_self_anchors", None)
 
             if synthesized_ok and res_msg_id:
                 await self.update_whiteboard_manual(sess, {"op": "import_resolution", "message_id": res_msg_id})
@@ -5138,6 +6136,7 @@ class RoundtableOrchestrator:
                 ab_norms = {_norm_dedupe_key(str(x.get("text") or "")) for x in ab_items if isinstance(x, dict)}
                 epi_badge = str(wb.get("epistemic_badge") or "[同源模型多视角推演 · 误差相关]")
                 absent_seats = [x for x in (wb.get("absent_seats") or []) if isinstance(x, dict)]
+                absorbed_items = [x for x in (wb.get("absorbed_highlights") or []) if isinstance(x, dict) and str(x.get("text") or "").strip()]
 
                 dec_items = [
                     it for it in items
@@ -5160,6 +6159,10 @@ class RoundtableOrchestrator:
                     f"- {'[主持指定约束] ' if it.get('origin_tier') == 'chair_directive' else ''}{it['text']}"
                     for it in (dec_items + prov_dec_items)
                 ) or "- 暂无已锁定记录"
+                ess_lines = "\n".join(
+                    f"- [{hl.get('absorber_name', '')} 吸收 @{hl.get('source_seat_name', '')}] {hl['text']}"
+                    for hl in absorbed_items
+                ) or "- （已按白板定论归档，完整演进见历史发言）"
                 ab_lines = "\n".join(
                     f"- [已淘汰] {ab['text']}（原因：{ab.get('reason', '讨论证伪淘汰')}）"
                     for ab in ab_items
@@ -5179,10 +6182,12 @@ class RoundtableOrchestrator:
                 summary_md = (
                     f"# 《会议最终决议》 — {sess.title or sess.topic}\n\n"
                     f"> 认知防伪标识：`{epi_badge}` · 覆盖阶段：{' → '.join(dossier_meta['covered_rounds']) or '归档汇总'}\n\n"
-                    f"## 一、已确认共识与全量采纳成果\n{dec_lines}\n\n"
-                    f"## 二、已确认放弃与证伪淘汰方案（防回流负面清单）\n{ab_lines}\n\n"
-                    f"## 三、边界风险防线、未决争议与参会披露\n" + "\n".join(disclosure_lines) + "\n\n"
-                    f"## {sec4_title}\n{act_lines}"
+                    f"## 一、核心决策总览（TL;DR）\n- 围绕议题「{sess.title or sess.topic}」已完成多视角收敛，详见以下共识约束与执行清单。\n\n"
+                    f"## 二、已确认共识与完整实施方案\n{dec_lines}\n\n"
+                    f"## 三、多 AI 思想精华与纠偏演进表\n{ess_lines}\n\n"
+                    f"## 四、已确认放弃与证伪淘汰方案（防回流负面清单）\n{ab_lines}\n\n"
+                    f"## 五、高价值少数派意见与条件触发预案\n- 本场无额外未决少数派预案\n\n"
+                    f"## {sec6_title}\n" + "\n".join(disclosure_lines) + "\n\n" + act_lines
                 )
                 fallback_msg = await self._append_non_agent_message(
                     sess,
@@ -5195,12 +6200,17 @@ class RoundtableOrchestrator:
                 )
                 res_msg_id = str(fallback_msg.get("id") or "")
 
-            # 更新决议全量覆盖审计元数据，供前端高密度决议卡展示
             wb_final = sess.whiteboard
             final_items = [it for it in (wb_final.get("items") or []) if isinstance(it, dict)]
+            public_dossier_meta = {k: v for k, v in dossier_meta.items() if k != "seat_essence_by_aid"}
+            wb_final["resolution_stale"] = False
+            wb_final["post_resolution_msg_count"] = 0
             wb_final["resolution_meta"] = {
-                **dossier_meta,
+                **public_dossier_meta,
                 "message_id": res_msg_id,
+                "audit_verified": audit_verified,
+                "audit_patch_count": audit_patch_count,
+                "auditor_seats": auditor_seat_names,
                 "adopted_count": sum(1 for it in final_items if it.get("kind") == "decision" or it.get("provisional_decision")),
                 "abandoned_count": len(wb_final.get("abandoned_proposals") or []),
                 "risk_count": sum(1 for it in final_items if it.get("kind") == "risk" and not it.get("provisional_decision")),
@@ -5216,56 +6226,249 @@ class RoundtableOrchestrator:
                 await self._set_stage(sess, "concluded", f"已形成决议 · 请在白板核对勾选待执行任务后交由 {exec_name} 执行")
             else:
                 art_label = SCENARIO_INTENT_PACKS.get(sess.scenario_pack, {}).get("artifact_label", "结构化纪要")
-                await self._set_stage(sess, "concluded", f"已形成决议 · 可一键复制或导出《{art_label}》")
+                await self._set_stage(sess, "concluded", f"已形成决议 · 可一键复制决策包或导出《{art_label}》")
             await self.broadcast(sess, "whiteboard_update", sess.whiteboard)
         except asyncio.CancelledError:
             sess.whiteboard.pop("_synthesis_dossier_block", None)
+            sess.whiteboard.pop("_resolution_draft_block", None)
+            sess.whiteboard.pop("_resolution_audit_patches_block", None)
+            sess.whiteboard.pop("_resolution_audit_self_anchors", None)
             raise
         finally:
             sess.whiteboard.pop("_synthesis_dossier_block", None)
+            sess.whiteboard.pop("_resolution_draft_block", None)
+            sess.whiteboard.pop("_resolution_audit_patches_block", None)
+            sess.whiteboard.pop("_resolution_audit_self_anchors", None)
             if clear_task_on_exit:
                 await self._finalize_task_idle_state(sess, owner_task)
                 self._save_persisted_sessions(immediate=True)
                 await self._broadcast_meta(sess)
 
-    def build_session_export_bytes(self, sess: MeetingSession) -> Tuple[bytes, str]:
-        """从服务端会话内存快照安全生成 Markdown 会议纪要字节流（含认知防伪徽章、缺席账本与弃案负面清单）。"""
-        self._refresh_epistemic_status(sess)
-        wb = sess.whiteboard or {}
-        epi_mode = str(wb.get("epistemic_mode") or "homogeneous_warning")
-        epi_badge = str(wb.get("epistemic_badge") or "[同源模型多视角推演 · 误差相关]")
-        pack_label = SCENARIO_INTENT_PACKS.get(sess.scenario_pack, {}).get("label", "工程研发与代码审查包")
+    @staticmethod
+    def _is_entry_already_in_norm_corpus(item_text: str, norm_corpus: str) -> bool:
+        """精确全文归一化判重（修复旧版仅匹配前 18 字符导致同前缀不同约束被误吞的缺陷）。"""
+        if not norm_corpus:
+            return False
+        nk = _norm_dedupe_key(item_text)
+        if not nk:
+            return True
+        if nk in norm_corpus:
+            return True
+        if len(nk) >= 48:
+            return (nk[:36] in norm_corpus) and (nk[-24:] in norm_corpus)
+        return False
 
+    def _refresh_resolution_staleness(self, sess: MeetingSession) -> Tuple[Optional[dict], bool, List[dict]]:
+        """检测最新《最终决议》之后是否发生了追问、点名或再辩等实质研讨变更，防止过期决议静默冒充最新定论。"""
+        msgs = sess.messages or []
+        res_idx = -1
+        res_msg: Optional[dict] = None
+        for idx in range(len(msgs) - 1, -1, -1):
+            m = msgs[idx]
+            if (
+                isinstance(m, dict)
+                and m.get("phase_label") == "最终决议"
+                and not m.get("error")
+                and not m.get("skipped")
+                and str(m.get("content") or "").strip()
+            ):
+                res_idx = idx
+                res_msg = m
+                break
+
+        post_msgs: List[dict] = []
+        if res_msg is not None and res_idx >= 0:
+            non_discussion_phases = {"最终决议", "决议初稿", "终稿核验", "已暂停", "缺席披露", "执行交付", "已回滚"}
+            for later_m in msgs[res_idx + 1 :]:
+                if not isinstance(later_m, dict) or later_m.get("streaming") or later_m.get("error") or later_m.get("skipped"):
+                    continue
+                spk = str(later_m.get("speaker") or "").lower()
+                ph = str(later_m.get("phase_label") or "").strip()
+                if spk in (*AGENT_ORDER, "chair") and ph not in non_discussion_phases and str(later_m.get("content") or "").strip():
+                    post_msgs.append(later_m)
+
+        is_stale = bool(res_msg is not None and post_msgs)
+        if isinstance(sess.whiteboard, dict):
+            sess.whiteboard["resolution_stale"] = is_stale
+            sess.whiteboard["post_resolution_msg_count"] = len(post_msgs) if is_stale else 0
+        return res_msg, is_stale, post_msgs
+
+    def _seat_names_map(self, sess: MeetingSession) -> Dict[str, str]:
+        return {aid_k: self._seat_name(sess, aid_k) for aid_k in ALL_SEAT_IDS}
+
+    def _extract_unmerged_seat_contracts(self, sess: MeetingSession, res_norm: str) -> List[str]:
+        """
+        差集契约守卫（Delta Guard）：逐席倒序扫描最新终态代码块与关键契约小节，
+        仅当主笔终稿漏写或截断该席位独创代码块/量化契约时才自动补录，终稿已收录者零重复输出。
+        """
+        wb = sess.whiteboard or {}
+        abandoned_norms = {
+            _norm_dedupe_key(str(x.get("text") or ""))
+            for x in (wb.get("abandoned_proposals") or [])
+            if isinstance(x, dict) and str(x.get("text") or "").strip()
+        }
+        sess_seat_names = self._seat_names_map(sess)
+        per_seat_turns: Dict[str, List[Tuple[str, str]]] = {}
+        skip_phases = {"最终决议", "决议", "决议初稿", "终稿核验", "已暂停", "缺席披露", "执行交付", "已回滚"}
+        for m in sess.messages or []:
+            if not isinstance(m, dict) or m.get("streaming") or m.get("error") or m.get("skipped"):
+                continue
+            sp = str(m.get("speaker") or "").lower()
+            ph = str(m.get("phase_label") or "").strip()
+            if sp not in AGENT_META or ph in skip_phases:
+                continue
+            clean_b, _ = parse_structured_tail_with_kinds(str(m.get("content") or ""), seat_names=sess_seat_names)
+            if clean_b.strip():
+                per_seat_turns.setdefault(sp, []).append((ph, clean_b.strip()))
+
+        delta_blocks: List[str] = []
+        seen_delta_norms: Set[str] = set()
+        for sp_id, turns in per_seat_turns.items():
+            s_disp = self._seat_name(sess, sp_id)
+            p_lbl = get_persona_spec(sess.seat_personas.get(sp_id, ""), sp_id)["label"]
+            seat_missing_parts: List[str] = []
+            for ph_t, body_t in reversed(turns[-3:]):
+                for cm in reversed(list(re.finditer(r"```[\s\S]*?```", body_t))):
+                    c_blk = cm.group(0).strip()
+                    inner_txt = re.sub(r"^```[A-Za-z0-9_+\-]*\s*|\s*```$", "", c_blk).strip()
+                    nk_inner = _norm_dedupe_key(inner_txt)
+                    if len(nk_inner) < 10 or nk_inner in seen_delta_norms:
+                        continue
+                    if any(ab_k and len(ab_k) >= 10 and ab_k in nk_inner for ab_k in abandoned_norms):
+                        continue
+                    if self._is_entry_already_in_norm_corpus(inner_txt, res_norm):
+                        seen_delta_norms.add(nk_inner)
+                        continue
+                    seen_delta_norms.add(nk_inner)
+                    seat_missing_parts.append(c_blk)
+                    if len(seat_missing_parts) >= 2:
+                        break
+                sig_m = re.search(
+                    r"(?:#{2,4}|\*\*)\s*(?:本席独创贡献与关键契约|本席核心贡献与关键契约|独创贡献|关键契约)[^\n]*\n([\s\S]+?)(?=\n#{2,3}\s|\Z)",
+                    body_t,
+                )
+                if sig_m:
+                    sig_no_code = re.sub(r"```[\s\S]*?```", "", sig_m.group(1)).strip()
+                    for raw_ln in sig_no_code.splitlines():
+                        ln_c = raw_ln.strip()
+                        nk_ln = _norm_dedupe_key(ln_c)
+                        if len(nk_ln) < 8 or nk_ln in seen_delta_norms:
+                            continue
+                        if any(ab_k and len(ab_k) >= 8 and ab_k in nk_ln for ab_k in abandoned_norms):
+                            continue
+                        if self._is_entry_already_in_norm_corpus(ln_c, res_norm):
+                            seen_delta_norms.add(nk_ln)
+                            continue
+                        seen_delta_norms.add(nk_ln)
+                        seat_missing_parts.append(ln_c if ln_c.startswith(("-", "*", "|")) else f"- {ln_c}")
+                        if len(seat_missing_parts) >= 4:
+                            break
+                if seat_missing_parts:
+                    break
+            if seat_missing_parts:
+                joined_parts = "\n".join(seat_missing_parts)
+                delta_blocks.append(f"#### {s_disp}（{p_lbl}）未合入终稿的关键契约补录\n{joined_parts}")
+        return delta_blocks
+
+    def _build_executor_resolution_context(self, sess: MeetingSession) -> str:
+        """为主刀执行席位拼装未截断的最终决议技术契约、差集代码块与防回流弃案禁令。"""
+        res_msg, is_stale, post_msgs = self._refresh_resolution_staleness(sess)
+        sess_seat_names = self._seat_names_map(sess)
+        parts: List[str] = []
+        base_corpus = ""
+        if res_msg and str(res_msg.get("content") or "").strip():
+            clean_res, _ = parse_structured_tail_with_kinds(str(res_msg.get("content") or ""), seat_names=sess_seat_names)
+            base_corpus = clean_res.strip()
+            parts.append(f"▸ 《会议最终决议》完整契约基准：\n{base_corpus[:14000]}")
+        else:
+            conv_msg = next(
+                (
+                    m
+                    for m in reversed(sess.messages or [])
+                    if isinstance(m, dict)
+                    and not m.get("error")
+                    and not m.get("skipped")
+                    and m.get("phase_label") in ("架构裁定", "综合裁定", "优选收敛", "修改方案", "执行清单", "边界自检")
+                    and str(m.get("content") or "").strip()
+                ),
+                None,
+            )
+            if conv_msg:
+                clean_conv, _ = parse_structured_tail_with_kinds(str(conv_msg.get("content") or ""), seat_names=sess_seat_names)
+                base_corpus = clean_conv.strip()
+                parts.append(f"▸ 阶段收敛方案契约基准：\n{base_corpus[:10000]}")
+
+        if is_stale and post_msgs:
+            delta_lines = []
+            for pm in post_msgs[-6:]:
+                p_spk = pm.get("speaker_name") or self._seat_name(sess, str(pm.get("speaker") or ""))
+                p_clean, _ = parse_structured_tail_with_kinds(str(pm.get("content") or ""), seat_names=sess_seat_names)
+                delta_lines.append(f"- [{p_spk} · {pm.get('phase_label', '补充')}] {self._smart_clip(p_clean, 480)}")
+            parts.append("▸ 决议后最新追问与方案修正增量（优先级高于旧决议冲突项）：\n" + "\n".join(delta_lines))
+
+        unmerged = self._extract_unmerged_seat_contracts(sess, _norm_dedupe_key(base_corpus))
+        if unmerged:
+            parts.append("▸ 各席位补充关键代码/接口契约：\n" + "\n\n".join(unmerged[:4]))
+
+        ab_list = [
+            x for x in ((sess.whiteboard or {}).get("abandoned_proposals") or [])
+            if isinstance(x, dict) and str(x.get("text") or "").strip()
+        ]
+        if ab_list:
+            ab_lines = [f"- [严禁回流实现] {ab['text']}（原因：{ab.get('reason', '证伪淘汰')}）" for ab in ab_list[:20]]
+            parts.append("▸ 已淘汰废案负面禁令（实施时严禁采用）：\n" + "\n".join(ab_lines))
+
+        return "\n\n".join(parts).strip()
+
+    def build_decision_brief_markdown(
+        self,
+        sess: MeetingSession,
+        *,
+        include_transcript: bool = False,
+    ) -> Tuple[str, str]:
+        """
+        单一真源《完整决策包》生成器（同时驱动「复制决策包」、「导出 .md」与「复制纪要」三大出口）：
+        - `include_transcript=False`：输出纯净完整决策包（元信息 + 决议脏态增量预警 + 6段式最终决议全文 + D1..Dn 验收闭环与差集契约补录）；
+        - `include_transcript=True`：在上述完整决策包之后附加按时间顺序排列的完整原始发言全录。
+        """
+        self._refresh_epistemic_status(sess)
+        res_msg, is_stale, post_msgs = self._refresh_resolution_staleness(sess)
+        wb = sess.whiteboard or {}
+        r_meta = wb.get("resolution_meta") if isinstance(wb.get("resolution_meta"), dict) else {}
+        epi_badge = str(wb.get("epistemic_badge") or "[同源模型多视角推演 · 误差相关]")
+        epi_mode = str(wb.get("epistemic_mode") or "homogeneous_warning")
+        pack_label = SCENARIO_INTENT_PACKS.get(sess.scenario_pack, {}).get("label", "工程研发与代码审查包")
+        mode_label = COLLAB_MODES.get(sess.collab_mode, {}).get("label", sess.collab_mode)
+        seats_str = "、".join(self._seat_name(sess, a) for a in sess.enabled_agents)
+        audit_str = "未触发"
+        if r_meta.get("audit_verified"):
+            p_cnt = int(r_meta.get("audit_patch_count") or 0)
+            aud_seats = "、".join(r_meta.get("auditor_seats") or [])
+            audit_str = (
+                f"已通过多席会签并合入 {p_cnt} 项补丁（会签席：{aud_seats}）"
+                if p_cnt > 0
+                else f"已通过多席会签 · 无遗漏（会签席：{aud_seats}）"
+            )
+        if is_stale:
+            audit_str += f"（决议后新增 {len(post_msgs)} 条追问/再辩，待重算）"
+
+        res_body = str((res_msg or {}).get("content") or "").strip()
+        if res_body:
+            res_body = re.sub(r"\n?\[(?:白板|白板要点|状态|徽章)[:：][^\]]*\]", "", res_body).strip()
+
+        doc_heading = (
+            f"# 《AI圆桌》完整决策包与会议纪要 — {sess.title or '未命名议题'}"
+            if include_transcript
+            else f"# 《AI圆桌决策包》 — {sess.title or '未命名议题'}"
+        )
         lines: List[str] = [
-            f"# 《AI圆桌》会议纪要 — {sess.title or '未命名议题'}",
+            doc_heading,
             "",
-            f"- **会话 ID**：`{sess.session_id}`",
-            f"- **认知独立性防伪标记**：**`{epi_badge}`**",
-            f"- **场景意图包**：{pack_label}（{COLLAB_MODES.get(sess.collab_mode, {}).get('label', sess.collab_mode)}）",
-            f"- **启用参会席位**：{'、'.join(self._seat_name(sess, a) for a in sess.enabled_agents)}",
-            f"- **导出时间**：{now_display_time()}",
+            f"> 会话 ID：`{sess.session_id}` | 认知防伪：`{epi_badge}` | 场景策略：{pack_label}（{mode_label}） | 参会席位：{seats_str} | 终稿会签：{audit_str} | 生成时间：{now_display_time()}",
             "",
         ]
-
-        absent_seats = [x for x in (wb.get("absent_seats") or []) if isinstance(x, dict)]
-        lines.extend(["## 一、未参评 / 缺席席位披露", ""])
-        if absent_seats:
-            for ab in absent_seats:
-                lines.append(
-                    f"- **{ab.get('seat_name') or ab.get('agent_id')}**：{ab.get('reason', '未完成有效发言')}（阶段：{ab.get('phase') or '会议期间'}）"
-                )
-        else:
-            lines.append("- 全部已启用参会席位均正常完成发言，无缺席记录。")
-
-        lines.extend([
-            "",
-            "## 二、研讨议题与主持约束",
-            "",
-            sess.topic or "（未填写议题）",
-            "",
-        ])
-        for c in wb.get("chair_constraints") or []:
-            lines.append(f"- [主持约束] {c}")
+        if sess.topic:
+            lines.extend(["## 议题与原始背景", "", sess.topic.strip(), ""])
         for att in wb.get("session_attachments") or []:
             if isinstance(att, dict) and att.get("name"):
                 lines.append(f"- [参考附件] {att['name']} ({att.get('size_human') or att.get('mime_type') or ''})")
@@ -5275,61 +6478,225 @@ class RoundtableOrchestrator:
         risks = [it for it in items if it.get("kind") == "risk"]
         actions = [it for it in items if it.get("kind") == "action"]
         abandoned = [x for x in (wb.get("abandoned_proposals") or []) if isinstance(x, dict) and str(x.get("text") or "").strip()]
+        absorbed = [x for x in (wb.get("absorbed_highlights") or []) if isinstance(x, dict) and str(x.get("text") or "").strip()]
+        disagreements = [x for x in (wb.get("disagreements") or []) if isinstance(x, dict) and str(x.get("claim") or "").strip()]
+        absent_seats = [x for x in (wb.get("absent_seats") or []) if isinstance(x, dict)]
 
-        sec3_heading = (
-            "## 三、已确认共识与主持约束（异构独立交叉核验）"
-            if epi_mode == "heterogeneous"
-            else f"## 三、已锁定结论与主持约束 {epi_badge}"
-        )
-        lines.extend(["", sec3_heading, ""])
-        if decisions:
-            for it in decisions:
-                tier = str(it.get("origin_tier") or "")
-                prefix = "[主持指定约束] " if (tier == "chair_directive" or it.get("author") == "chair") else ""
-                lines.append(f"- {prefix}{it['text']}")
+        if res_body:
+            if is_stale and post_msgs:
+                sess_seat_names = self._seat_names_map(sess)
+                lines.extend([
+                    "",
+                    f"> ⚠️ **决议时效提醒**：自上次生成《会议最终决议》后，本场新增了 {len(post_msgs)} 条追问/再辩发言。下方已先行置顶最新变更增量（与旧决议冲突处以最新增量及文末台账为准；建议点击「形成决议」重新合成终稿）。",
+                    "",
+                    "## 零、决议后最新追问与方案纠偏增量",
+                ])
+                for pm in post_msgs:
+                    p_spk = pm.get("speaker_name") or ("主持人" if pm.get("speaker") == "chair" else self._seat_name(sess, str(pm.get("speaker") or "")))
+                    p_ph = pm.get("phase_label") or "补充研讨"
+                    p_clean, _ = parse_structured_tail_with_kinds(str(pm.get("content") or ""), seat_names=sess_seat_names)
+                    lines.append(f"- **[{p_spk} · {p_ph}]** {self._smart_clip(p_clean.strip(), 520)}")
+            lines.extend(["", res_body])
         else:
-            lines.append("- （暂无已锁定结论或主持约束）")
+            lines.extend([
+                "",
+                "*（当前尚未点击「形成决议」生成合成终稿，以下为结构化白板完整决策快照）*",
+                "",
+                "## 一、未参评 / 缺席席位披露",
+            ])
+            if absent_seats:
+                for ab_s in absent_seats:
+                    lines.append(
+                        f"- **{ab_s.get('seat_name') or ab_s.get('agent_id')}**：{ab_s.get('reason', '未完成有效发言')}（阶段：{ab_s.get('phase') or '会议期间'}）"
+                    )
+            else:
+                lines.append("- 全部已启用参会席位均正常完成发言，无缺席记录。")
 
-        lines.extend(["", "## 四、已确认放弃与证伪淘汰方案（防回流负面清单）", ""])
-        if abandoned:
-            for ab in abandoned:
-                lines.append(f"- [已淘汰] {ab['text']}（来源：{ab.get('seat_name', '圆桌')} · 原因：{ab.get('reason', '证伪淘汰')}）")
-        else:
-            lines.append("- （本场讨论无已归档淘汰方案）")
+            sec_dec_title = (
+                "## 二、已确认共识与主持约束（异构独立交叉核验）"
+                if epi_mode == "heterogeneous"
+                else f"## 二、已锁定结论与主持约束 {epi_badge}"
+            )
+            lines.extend(["", sec_dec_title])
+            if decisions:
+                for it in decisions:
+                    tier = str(it.get("origin_tier") or "")
+                    prefix = "[主持指定约束] " if (tier == "chair_directive" or it.get("author") == "chair") else ""
+                    lines.append(f"- {prefix}{it['text']}")
+            else:
+                lines.append("- （暂无已锁定结论或主持约束）")
 
-        lines.extend(["", "## 五、待决争议与风险项", ""])
-        if risks:
-            for it in risks:
-                tag = " [单源初评待核验]" if it.get("provisional_decision") else ""
-                lines.append(f"- {it['text']}{tag}")
-        else:
-            lines.append("- （暂无未决风险项）")
+            lines.extend(["", "## 三、跨席互认思想精华与争议演进"])
+            if absorbed or disagreements:
+                for hl in absorbed:
+                    lines.append(f"- [跨席吸收 · {hl.get('absorber_name', '')} 采纳 @{hl.get('source_seat_name', '')}] {hl['text']}")
+                for d in disagreements:
+                    v_st = str(d.get("verification_state") or "")
+                    if d.get("resolved"):
+                        st_lbl = "质询验收闭环" if v_st == "verified_by_challenger" else "已修正闭环"
+                    else:
+                        st_lbl = "质询维持异议" if v_st == "disputed_locked" else "待裁决"
+                    note_s = f" → 答辩：{d['resolution_note']}" if d.get("resolution_note") else ""
+                    if d.get("challenger_note"):
+                        note_s += f" → 质询验收：{d['challenger_note']}"
+                    lines.append(f"- [{d.get('issue_code') or 'D?'} · {st_lbl}] {d.get('challenger_name', '')} → {d.get('target_name', '')}：{d['claim']}{note_s}")
+            else:
+                lines.append("- （暂无结构化互评记录）")
 
-        lines.extend(["", "## 六、交付与执行任务清单", ""])
-        if actions:
-            for it in actions:
-                mark = "x" if it.get("checked", False) else " "
-                lines.append(f"- [{mark}] {it['text']}")
-        else:
-            lines.append("- （暂无待执行任务）")
+            lines.extend(["", "## 四、已确认放弃与证伪淘汰方案（防回流负面清单）"])
+            if abandoned:
+                for ab in abandoned:
+                    lines.append(f"- [已淘汰] {ab['text']}（来源：{ab.get('seat_name', '圆桌')} · 原因：{ab.get('reason', '证伪淘汰')}）")
+            else:
+                lines.append("- （本场讨论无已归档淘汰方案）")
 
-        lines.extend(["", "## 七、完整发言记录", ""])
-        for m in sess.messages:
-            if not isinstance(m, dict) or not str(m.get("content") or "").strip():
-                continue
-            sp = m.get("speaker_name") or m.get("speaker") or "成员"
-            rl = m.get("role_title") or ""
-            ph = m.get("phase_label") or ""
-            ts = m.get("timestamp") or ""
-            lines.append(f"### {sp}（{rl} · {ph}） {ts}".strip())
-            lines.append("")
-            lines.append(str(m.get("content") or "").strip())
-            lines.append("")
+            lines.extend(["", "## 五、待决争议与风险项"])
+            if risks:
+                for it in risks:
+                    tag = " [单源初评待核验]" if it.get("provisional_decision") else ""
+                    lines.append(f"- {it['text']}{tag}")
+            else:
+                lines.append("- （暂无未决风险项）")
 
-        safe_title = "".join(c for c in (sess.title or "会议纪要") if c.isalnum() or c in ("-", "_"))[:24] or "纪要"
+            lines.extend(["", "## 六、交付与执行任务清单（含已勾选与未勾选全集）"])
+            if actions:
+                for it in actions:
+                    mark = "x" if it.get("checked", False) else " "
+                    lines.append(f"- [{mark}] {it['text']}")
+            else:
+                lines.append("- （暂无待执行任务）")
+
+        if res_body:
+            res_norm = _norm_dedupe_key(res_body)
+            extra_decisions = [
+                it for it in decisions if not self._is_entry_already_in_norm_corpus(it["text"], res_norm)
+            ]
+            extra_absorbed = [
+                hl for hl in absorbed if not self._is_entry_already_in_norm_corpus(hl["text"], res_norm)
+            ]
+            checked_actions = [it["text"] for it in actions if bool(it.get("checked", False))]
+            unchecked_actions = [
+                it["text"]
+                for it in actions
+                if not bool(it.get("checked", False)) and not self._is_entry_already_in_norm_corpus(it["text"], res_norm)
+            ]
+            extra_risks = [
+                it["text"] for it in risks if not self._is_entry_already_in_norm_corpus(it["text"], res_norm)
+            ]
+            res_body_low = res_body.lower()
+            open_dis_extra = [
+                d
+                for d in disagreements
+                if not d.get("resolved")
+                and (
+                    d.get("verification_state") == "disputed_locked"
+                    or not self._is_entry_already_in_norm_corpus(d["claim"], res_norm)
+                )
+            ]
+            resolved_dis_extra = [
+                d
+                for d in disagreements
+                if d.get("resolved")
+                and str(d.get("issue_code") or "").lower() not in res_body_low
+                and not self._is_entry_already_in_norm_corpus(d["claim"], res_norm)
+            ]
+            unmerged_seat_contracts = self._extract_unmerged_seat_contracts(sess, res_norm)
+            extra_abandoned = [
+                ab for ab in abandoned if not self._is_entry_already_in_norm_corpus(ab["text"], res_norm)
+            ]
+            extra_absent = [
+                ab_s for ab_s in absent_seats
+                if str(ab_s.get("seat_name") or ab_s.get("agent_id") or "") and not self._is_entry_already_in_norm_corpus(str(ab_s.get("seat_name") or ""), res_norm)
+            ]
+            exec_diff_txt = str(wb.get("exec_diff") or "").strip()
+
+            if (
+                extra_decisions
+                or extra_absorbed
+                or resolved_dis_extra
+                or unmerged_seat_contracts
+                or checked_actions
+                or unchecked_actions
+                or extra_risks
+                or open_dis_extra
+                or extra_abandoned
+                or extra_absent
+                or exec_diff_txt
+            ):
+                lines.extend(["", "## 附：会议白板全量台账同步（零遗漏核对）"])
+                if extra_absent:
+                    lines.append("### 未参评 / 缺席席位补充披露")
+                    for ab_s in extra_absent:
+                        lines.append(f"- **{ab_s.get('seat_name') or ab_s.get('agent_id')}**：{ab_s.get('reason', '未完成有效发言')}")
+                if extra_decisions:
+                    lines.append("### 新增/置顶共识与主持硬约束")
+                    for it in extra_decisions:
+                        p_tag = "[主持约束] " if (it.get("author") == "chair" or it.get("origin_tier") == "chair_directive") else ""
+                        lines.append(f"- {p_tag}{it['text']}")
+                if extra_absorbed:
+                    lines.append("### 跨席互认思想精华补录")
+                    for hl in extra_absorbed:
+                        lines.append(f"- [{hl.get('absorber_name', '')} 吸收 @{hl.get('source_seat_name', '')}] {hl['text']}")
+                if resolved_dis_extra:
+                    lines.append("### D1..Dn 纠偏闭环与质询验收补录")
+                    for d_rs in resolved_dis_extra:
+                        v_lbl = "质询验收闭环" if d_rs.get("verification_state") == "verified_by_challenger" else "已修正闭环"
+                        r_tail = f" → 答辩：{d_rs['resolution_note']}" if d_rs.get("resolution_note") else ""
+                        if d_rs.get("challenger_note"):
+                            r_tail += f" → 验收：{d_rs['challenger_note']}"
+                        lines.append(
+                            f"- [{d_rs.get('issue_code') or 'D?'} · {v_lbl}] {d_rs.get('challenger_name', '')} → {d_rs.get('target_name', '')}：{d_rs['claim']}{r_tail}"
+                        )
+                if unmerged_seat_contracts:
+                    lines.append("### 未合入独创技术契约与代码块差集补录")
+                    lines.extend(unmerged_seat_contracts)
+                if checked_actions or unchecked_actions:
+                    lines.append("### 待执行与候选任务全集")
+                    for a_chk in checked_actions:
+                        lines.append(f"- [x] {a_chk}")
+                    for a_unchk in unchecked_actions:
+                        lines.append(f"- [ ] {a_unchk}")
+                if extra_risks or open_dis_extra:
+                    lines.append("### 补充风险与未决争议台账")
+                    for d_op in open_dis_extra:
+                        op_lbl = "质询维持异议" if d_op.get("verification_state") == "disputed_locked" else "未决"
+                        op_tail = f" → 答辩反证：{d_op['resolution_note']}" if d_op.get("resolution_note") else ""
+                        if d_op.get("challenger_note"):
+                            op_tail += f" → 质询保留意见：{d_op['challenger_note']}"
+                        lines.append(f"- [{d_op.get('issue_code') or 'D?'} {op_lbl}] {d_op.get('challenger_name', '')} → {d_op.get('target_name', '')}：{d_op['claim']}{op_tail}")
+                    for r_txt in extra_risks:
+                        lines.append(f"- {r_txt}")
+                if extra_abandoned:
+                    lines.append("### 补充隔离弃案（防回流）")
+                    for ab in extra_abandoned:
+                        lines.append(f"- [已淘汰] {ab['text']}（来源：{ab.get('seat_name', '圆桌')} · 原因：{ab.get('reason', '证伪淘汰')}）")
+                if exec_diff_txt:
+                    diff_preview = exec_diff_txt[:2400] + ("\n..." if len(exec_diff_txt) > 2400 else "")
+                    lines.extend(["### 已生成变更补丁预览", f"```diff\n{diff_preview}\n```"])
+
+        if include_transcript:
+            lines.extend(["", "## 完整发言记录", ""])
+            for m in sess.messages:
+                if not isinstance(m, dict) or not str(m.get("content") or "").strip():
+                    continue
+                sp = m.get("speaker_name") or m.get("speaker") or "成员"
+                rl = m.get("role_title") or ""
+                ph = m.get("phase_label") or ""
+                ts = m.get("timestamp") or ""
+                lines.append(f"### {sp}（{rl} · {ph}） {ts}".strip())
+                lines.append("")
+                lines.append(str(m.get("content") or "").strip())
+                lines.append("")
+
+        prefix_tag = "会议纪要" if include_transcript else "决策包"
+        safe_title = "".join(c for c in (sess.title or prefix_tag) if c.isalnum() or c in ("-", "_"))[:24] or prefix_tag
         ts_str = time.strftime("%Y%m%d_%H%M%S", time.localtime())
-        filename = f"AI圆桌_{safe_title}_{ts_str}.md"
-        return ("\n".join(lines) + "\n").encode("utf-8"), filename
+        return "\n".join(lines).strip() + "\n", f"AI圆桌_{prefix_tag}_{safe_title}_{ts_str}.md"
+
+    def build_session_export_bytes(self, sess: MeetingSession) -> Tuple[bytes, str]:
+        """统一使用单一真源决策包 + 完整原始发言全录生成 .md 导出文件，彻底消除三端信息落差。"""
+        full_md, filename = self.build_decision_brief_markdown(sess, include_transcript=True)
+        return full_md.encode("utf-8"), filename
 
     async def acknowledge_previous_snapshot(self, sess: MeetingSession) -> dict:
         """显式确认并归档上一轮可回滚快照，解锁新一轮工作区写入准入。"""
@@ -5968,6 +7335,7 @@ class RoundtableOrchestrator:
                 sess.whiteboard["exec_logs"].append(snap_line)
                 await self.broadcast(sess, "term_log", {"line": snap_line})
 
+            sess.whiteboard["_exec_resolution_context"] = self._build_executor_resolution_context(sess)
             exec_kwargs = dict(
                 topic=sess.topic or sess.title,
                 whiteboard=sess.whiteboard,
@@ -6138,6 +7506,7 @@ class RoundtableOrchestrator:
                 if ws_lock is not None:
                     ws_lock.release()
 
+            sess.whiteboard.pop("_exec_resolution_context", None)
             sess.whiteboard["can_rollback"] = sess.has_unacked_rollbackable()
             await self.broadcast(sess, "whiteboard_update", sess.whiteboard)
             if clear_task_on_exit:

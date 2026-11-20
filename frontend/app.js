@@ -2531,6 +2531,9 @@ function createOrUpdateMessageCard(msgInput, options = {}) {
   const hoverBtns = [];
   if (isResolution && !msg.streaming && hasContent) {
     hoverBtns.push(
+      `<button type="button" class="msg-copy-brief-btn" data-msg-act="copy-brief" title="一键复制纯净 6 段式完整决策包（含白板最新锁定约束与勾选任务，不含冗长讨论过程）">复制决策包</button>`
+    );
+    hoverBtns.push(
       `<button type="button" class="msg-sync-wb-btn" data-msg-act="sync-resolution" title="提取最终决议中的共识、风险与任务项同步至右侧会议白板">同步决议至白板</button>`
     );
   }
@@ -2601,13 +2604,49 @@ function createOrUpdateMessageCard(msgInput, options = {}) {
     const actionCnt =
       rMeta.action_count ?? wbItemsNow.filter((it) => it.kind === "action").length;
 
+    const auditVerified = Boolean(rMeta.audit_verified);
+    const auditPatchCnt = Number(rMeta.audit_patch_count || 0);
+    const absorbedCnt = Number(
+      rMeta.absorbed_count ?? (state.whiteboard?.absorbed_highlights?.length || 0)
+    );
+    const seatEssenceCnt = Number(rMeta.seat_essence_count || 0);
+    const resolvedDisCnt = Number(rMeta.resolved_disagreement_count || 0);
+    const verifiedDisCnt = Number(rMeta.verified_disagreement_count || 0);
+    const disputedDisCnt = Number(rMeta.disputed_disagreement_count || 0);
+    const isStaleRes = Boolean(state.whiteboard?.resolution_stale);
+    const postResCnt = Number(state.whiteboard?.post_resolution_msg_count || 0);
+    const stalePillHtml = isStaleRes
+      ? `<span class="audit-metric-pill is-abandoned">决议后新增 ${postResCnt || 1} 条讨论 · 建议重算决议</span>`
+      : "";
+    const auditPillHtml = auditVerified
+      ? `<span class="audit-metric-pill is-verified">${auditPatchCnt > 0 ? `多席会签 · 合入 ${auditPatchCnt} 项补丁` : "多席会签通过 · 无遗漏"}</span>`
+      : "";
+    const absorbedPillHtml = absorbedCnt > 0
+      ? `<span class="audit-metric-pill">互认精华 ${absorbedCnt}</span>`
+      : "";
+    const essenceSnapPillHtml = seatEssenceCnt > 0
+      ? `<span class="audit-metric-pill">无损契约 ${seatEssenceCnt} 席</span>`
+      : "";
+    const resolvedDisPillHtml = resolvedDisCnt > 0
+      ? `<span class="audit-metric-pill">闭环争议 ${resolvedDisCnt}${verifiedDisCnt > 0 ? `（质询签收 ${verifiedDisCnt}）` : ""}</span>`
+      : "";
+    const disputedDisPillHtml = disputedDisCnt > 0
+      ? `<span class="audit-metric-pill is-abandoned">保留异议 ${disputedDisCnt}</span>`
+      : "";
+
     resolutionAuditHtml =
       `<div class="resolution-audit-strip">` +
+        stalePillHtml +
         (epBadge ? `<span class="audit-metric-pill">${escapeHtml(epBadge)}</span>` : "") +
+        auditPillHtml +
         (roundsArr.length
           ? `<span class="audit-metric-pill">覆盖阶段：${escapeHtml(roundsArr.join(" · "))}</span>`
           : "") +
         `<span class="audit-metric-pill is-retained">采纳成果 ${Number(retainedCnt)}</span>` +
+        essenceSnapPillHtml +
+        absorbedPillHtml +
+        resolvedDisPillHtml +
+        disputedDisPillHtml +
         `<span class="audit-metric-pill is-abandoned">隔离弃案 ${Number(abandonedCnt)}</span>` +
         `<span class="audit-metric-pill">交付清单 ${Number(actionCnt)}</span>` +
       `</div>`;
@@ -2619,23 +2658,36 @@ function createOrUpdateMessageCard(msgInput, options = {}) {
     const matchedRs = roundSummaries.find((rs) => rs && rs.after_msg_id === msg.id);
     if (matchedRs) {
       const rsLabel = matchedRs.round_label || matchedRs.phase_label || "回合演进摘要";
-      const rsText =
-        matchedRs.summary ||
-        matchedRs.text ||
-        (Array.isArray(matchedRs.highlights) ? matchedRs.highlights.join("；") : "");
+      const claimList = Array.isArray(matchedRs.claims)
+        ? matchedRs.claims
+        : Array.isArray(matchedRs.highlights)
+        ? matchedRs.highlights
+        : [];
       const openDisCnt = Number(
-        matchedRs.open_disagreements ?? matchedRs.disagreement_count ?? 0
+        matchedRs.open_disagreements ??
+          matchedRs.new_disagreements ??
+          matchedRs.disagreement_count ??
+          0
       );
       const shiftCnt = Number(
-        matchedRs.revised_count ??
+        (matchedRs.revised_count || 0) +
+          (matchedRs.abandoned_count || 0) +
           (Array.isArray(matchedRs.stance_shifts) ? matchedRs.stance_shifts.length : 0)
       );
+      const absRoundCnt = Number(matchedRs.absorbed_count || 0);
+      const fallbackStats = [
+        absRoundCnt > 0 ? `跨席吸收 ${absRoundCnt} 项` : "",
+        `待决争议 ${openDisCnt} 项`,
+        `纠偏演进 ${shiftCnt} 项`,
+        claimList.length ? claimList.slice(0, 2).join("；") : "",
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      const rsText = matchedRs.summary || matchedRs.text || fallbackStats;
       roundSummaryBarHtml =
         `<div class="round-disagreement-bar">` +
           `<span class="round-bar-tag">${escapeHtml(rsLabel)}</span>` +
-          `<span class="round-bar-summary">${escapeHtml(
-            rsText || `待决分歧 ${openDisCnt} 项 · 立场演进 ${shiftCnt} 项`
-          )}</span>` +
+          `<span class="round-bar-summary">${escapeHtml(rsText)}</span>` +
         `</div>`;
     }
   }
@@ -2851,6 +2903,13 @@ function bindCardInteractiveEvents(card, msg) {
         await retrySeatTurn(msg.speaker, msg.id, mode);
       } else if (act === "open-settings") {
         openSettingsModal();
+      } else if (act === "copy-brief") {
+        btn.disabled = true;
+        const oldTxt = btn.textContent;
+        btn.textContent = "生成中…";
+        await copyDecisionBriefToClipboard();
+        btn.textContent = oldTxt;
+        btn.disabled = false;
       } else if (act === "sync-resolution") {
         btn.disabled = true;
         await syncResolutionToWhiteboard(msg.id);
@@ -2910,6 +2969,23 @@ async function retrySeatTurn(agentId, messageId, mode = "unlimited") {
     if (existing) {
       createOrUpdateMessageCard(existing, { skipEnterAnim: true });
     }
+  }
+}
+
+async function copyDecisionBriefToClipboard() {
+  if (!state.currentSessionId) return;
+  try {
+    const res = await apiFetch(`/api/sessions/${state.currentSessionId}/decision-brief`);
+    if (res && res.markdown) {
+      const toastMsg = res.resolution_stale
+        ? "已复制决策包（已置顶决议后新增讨论增量，建议点击「形成决议」刷新正文）"
+        : "已复制完整决策包（含差集契约核对与白板最新勾选）";
+      await copyTextToClipboard(res.markdown, toastMsg);
+    } else {
+      showToast("未获取到可复制的决策包内容", "warn", 2400);
+    }
+  } catch (err) {
+    showToast(err.message || "获取决策包失败", "err", 3000);
   }
 }
 
@@ -3100,6 +3176,7 @@ const CROSS_INQUIRY_PHASES_SET = new Set([
 const CROSS_REBUTTAL_PHASES_SET = new Set([
   "定向答辩",
   "防御修正",
+  "质询验收",
   "优选收敛",
   "修改方案",
   "执行清单",
@@ -3112,7 +3189,7 @@ function classifyMessageRoundBucket(msg, index, currentBucket) {
   const spk = String(msg.speaker || "system").toLowerCase();
   const ph = String(msg.phase_label || "").trim();
 
-  if (ph === "最终决议") {
+  if (ph === "最终决议" || ph === "决议初稿" || ph === "终稿核验") {
     return { kind: "resolution", stageKey: "consensus", title: "最终决议与行动清单", forceNew: currentBucket?.kind !== "resolution" };
   }
   if (ph === "执行交付" || ph === "已回滚") {
@@ -4099,6 +4176,7 @@ function normalizeClientWhiteboard(rawWb) {
   wb.absent_acknowledged = Boolean(wb.absent_acknowledged);
   wb.disagreements = Array.isArray(wb.disagreements) ? wb.disagreements : [];
   wb.abandoned_proposals = Array.isArray(wb.abandoned_proposals) ? wb.abandoned_proposals : [];
+  wb.absorbed_highlights = Array.isArray(wb.absorbed_highlights) ? wb.absorbed_highlights : [];
   wb.round_summaries = Array.isArray(wb.round_summaries) ? wb.round_summaries : [];
   wb.resolution_meta = wb.resolution_meta && typeof wb.resolution_meta === "object" ? wb.resolution_meta : null;
   wb.epistemic_badge = String(wb.epistemic_badge || "");
@@ -4570,6 +4648,7 @@ function renderWhiteboard(rawWb, forceRender = false, isInitialSnapshot = false)
   const actionItems = allItems.filter((it) => it.kind === "action");
   const checkedActionCount = actionItems.filter((it) => it.checked === true).length;
   const abandonedItems = Array.isArray(wb.abandoned_proposals) ? wb.abandoned_proposals : [];
+  const absorbedItems = Array.isArray(wb.absorbed_highlights) ? wb.absorbed_highlights : [];
   const absentSeats = Array.isArray(wb.absent_seats) ? wb.absent_seats : [];
 
   const totalCount = allItems.length;
@@ -4772,6 +4851,37 @@ function renderWhiteboard(rawWb, forceRender = false, isInitialSnapshot = false)
     "新增任务默认不勾选；请显式勾选需在本轮交付的任务项后再触发执行"
   );
 
+  // 5b. 跨席互认思想精华谱系 (#wbCardAbsorbed / #wbAbsorbedCount / #wbAbsorbedList)
+  const absCard = el("wbCardAbsorbed");
+  const absCount = el("wbAbsorbedCount");
+  const absList = el("wbAbsorbedList");
+  if (absCard) {
+    absCard.classList.toggle("hidden", absorbedItems.length === 0);
+  }
+  if (absCount) {
+    absCount.textContent = String(absorbedItems.length);
+  }
+  if (absList) {
+    absList.innerHTML = "";
+    absorbedItems.forEach((hl) => {
+      if (!hl || typeof hl !== "object") return;
+      const absorberNm = hl.absorber_name || AGENT_NAMES[hl.absorber] || hl.absorber || "席位";
+      const srcNm = hl.source_seat_name || AGENT_NAMES[hl.source_seat] || hl.source_seat || "他席";
+      const hlTxt = String(hl.text || "").trim();
+      if (!hlTxt) return;
+      const li = document.createElement("li");
+      li.className = "wb-absorbed-item";
+      li.title = hl.source_msg_id ? "点击定位至对应跨席互评发言卡片" : "";
+      li.innerHTML =
+        `<span class="wb-absorbed-lineage">${escapeHtml(absorberNm)} 采纳 @${escapeHtml(srcNm)}</span>` +
+        `<span class="wb-absorbed-text">${formatInlineMarkdown(escapeHtml(hlTxt))}</span>`;
+      if (hl.source_msg_id) {
+        li.addEventListener("click", () => scrollToSourceMessage(hl.source_msg_id));
+      }
+      absList.appendChild(li);
+    });
+  }
+
   // 6. 弃案与证伪淘汰方案负面清单 (#wbCardAbandoned / #wbAbandonedCount / #wbAbandonedList)
   const abCard = el("wbCardAbandoned");
   const abCount = el("wbAbandonedCount");
@@ -4863,6 +4973,8 @@ function buildMinutesMarkdown() {
   const risks = items.filter((i) => i.kind === "risk");
   const actions = items.filter((i) => i.kind === "action");
   const abandoned = Array.isArray(wb.abandoned_proposals) ? wb.abandoned_proposals : [];
+  const absorbed = Array.isArray(wb.absorbed_highlights) ? wb.absorbed_highlights : [];
+  const disagreements = Array.isArray(wb.disagreements) ? wb.disagreements : [];
   const absentSeats = Array.isArray(wb.absent_seats) ? wb.absent_seats : [];
   const title = wb.topic_title || state.topic || "AI圆桌会议纪要";
   const modeSpec = COLLAB_MODES[state.collabMode] || COLLAB_MODES.deep_deliberation;
@@ -4875,15 +4987,22 @@ function buildMinutesMarkdown() {
       ? "[单席推演草稿]"
       : familyCnt < 2
       ? "[同源模型多视角推演 · 误差相关]"
-      : "[异构多引擎独立推演]");
+      : "[异构独立引擎交叉核验]");
+
+  let latestResolutionBody = "";
+  for (const msg of state.messages.values()) {
+    if (msg && msg.phase_label === "最终决议" && !msg.error && !msg.skipped && String(msg.content || "").trim()) {
+      latestResolutionBody = stripInternalStatusLines(String(msg.content || "")).trim();
+    }
+  }
 
   const absentSection = absentSeats.length
     ? [
         "",
-        "## 未参评/缺席席位",
+        "## 未参评 / 缺席席位披露",
         ...absentSeats.map((ab) => {
           const aid = typeof ab === "string" ? ab : ab?.agent_id || ab?.seat || "";
-          const nm = (typeof ab === "object" && ab?.name) || AGENT_NAMES[aid] || aid;
+          const nm = (typeof ab === "object" && (ab?.seat_name || ab?.name)) || AGENT_NAMES[aid] || aid;
           const rs = (typeof ab === "object" && (ab?.reason || ab?.error)) || "异常缺席";
           return `- **${nm}**：${rs}`;
         }),
@@ -4891,7 +5010,7 @@ function buildMinutesMarkdown() {
     : [];
 
   const lines = [
-    `# ${title}`,
+    `# 《AI圆桌》完整决策包与会议纪要 — ${title}`,
     "",
     `- **认知防伪标记**：${epBadge}`,
     `- **讨论策略**：${modeSpec.label}（${modeSpec.hint}）`,
@@ -4899,8 +5018,10 @@ function buildMinutesMarkdown() {
     `- **会议状态**：${wb.consensus_status || STAGE_LABELS[state.stage] || "待命"}`,
     wb.topic && wb.topic !== title ? `- **完整议题**：${wb.topic}` : "",
     ...absentSection,
+    ...(latestResolutionBody ? ["", latestResolutionBody] : []),
     "",
-    "## 一、已确认共识与主持约束",
+    "## 白板全量台账同步（共识 · 跨席精华 · 待办全集 · 争议与弃案）",
+    "### 已确认共识与主持约束",
     ...(decisions.length
       ? decisions.map((it) => {
           const isChairDir = it.origin_tier === "chair_directive" || it.author === "chair";
@@ -4913,12 +5034,34 @@ function buildMinutesMarkdown() {
         })
       : ["- 暂无已确认共识记录"]),
     "",
-    "## 二、待决分歧与风险边界",
+    "### 跨席互认思想精华与编号争议演进",
+    ...(absorbed.length || disagreements.length
+      ? [
+          ...absorbed.map(
+            (hl) => `- [跨席吸收 · ${hl.absorber_name || "席位"} 采纳 @${hl.source_seat_name || "他席"}] ${hl.text}`
+          ),
+          ...disagreements.map((d) => {
+            const vState = String(d.verification_state || "");
+            const stLbl = d.resolved
+              ? vState === "verified_by_challenger"
+                ? "质询验收闭环"
+                : "已修正闭环"
+              : vState === "disputed_locked"
+              ? "质询维持异议"
+              : "待裁决";
+            const rNote = d.resolution_note ? ` → 答辩：${d.resolution_note}` : "";
+            const cNote = d.challenger_note ? ` → 质询验收：${d.challenger_note}` : "";
+            return `- [${d.issue_code || "D?"} · ${stLbl}] ${d.challenger_name || ""} → ${d.target_name || ""}：${d.claim || ""}${rNote}${cNote}`;
+          }),
+        ]
+      : ["- 暂无跨席吸收或结构化争议记录"]),
+    "",
+    "### 待决分歧与风险边界",
     ...(risks.length
       ? risks.map((it) => `- ${it.text} *(${AUTHOR_BADGE_META[it.author]?.name || it.author})*`)
       : ["- 暂无待决争议或风险项"]),
     "",
-    "## 三、待执行交付任务清单",
+    "### 待执行与候选任务全集",
     ...(actions.length
       ? actions.map(
           (it) =>
@@ -4928,7 +5071,7 @@ function buildMinutesMarkdown() {
         )
       : ["- [ ] 暂无待执行任务项"]),
     "",
-    "## 四、已确认放弃与证伪淘汰方案",
+    "### 已确认放弃与证伪淘汰方案（负面清单）",
     ...(abandoned.length
       ? abandoned.map((ab) => {
           const txt = typeof ab === "string" ? ab : ab?.text || ab?.proposal || ab?.summary || "";
@@ -4938,7 +5081,7 @@ function buildMinutesMarkdown() {
         })
       : ["- 无已证伪或放弃的历史方案"]),
     "",
-    "## 五、完整研讨记录",
+    "## 完整发言记录",
     "",
   ].filter((x) => x !== "");
 
@@ -4953,6 +5096,24 @@ function buildMinutesMarkdown() {
   }
 
   return lines.join("\n").trim() + "\n";
+}
+
+async function copyFullMinutesToClipboard(okMsg = "完整决策包与会议纪要已复制") {
+  if (state.currentSessionId) {
+    try {
+      const res = await apiFetch(`/api/sessions/${state.currentSessionId}/decision-brief?include_transcript=1`);
+      if (res && res.markdown) {
+        const effMsg = res.resolution_stale
+          ? "已复制完整纪要（含决议后新增追问增量，建议重新点击「形成决议」）"
+          : okMsg;
+        await copyTextToClipboard(res.markdown, effMsg);
+        return;
+      }
+    } catch {
+      // 离线或瞬时异常时平滑回退至同结构本地构建
+    }
+  }
+  await copyTextToClipboard(buildMinutesMarkdown(), okMsg);
 }
 
 async function copyTextToClipboard(text, okMsg = "已复制到剪贴板") {
@@ -8288,12 +8449,12 @@ function bindEvents() {
       showToast("当前会话尚无发言或白板条目，不可复制空纪要", "warn", 2000);
       return;
     }
-    copyTextToClipboard(buildMinutesMarkdown(), "会议纪要 Markdown 已复制");
+    copyFullMinutesToClipboard("完整决策包与会议纪要已复制");
   });
   el("exportMdBtn")?.addEventListener("click", () => exportMinutesMarkdownFile());
   el("wbQuickCopyArtifactBtn")?.addEventListener("click", () => {
     if (!hasExportableSessionContent()) return;
-    copyTextToClipboard(buildMinutesMarkdown(), "结构化交付纪要已复制");
+    copyFullMinutesToClipboard("完整决策包与交付纪要已复制");
   });
   el("wbQuickExportArtifactBtn")?.addEventListener("click", () => exportMinutesMarkdownFile());
   el("wbToExecBtn")?.addEventListener("click", () => {

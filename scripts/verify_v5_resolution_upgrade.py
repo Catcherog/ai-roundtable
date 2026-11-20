@@ -23,10 +23,37 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 
+_MEM_APP_REGISTRY: Dict[int, Any] = {}
+
+
+class _InMemWriter:
+    def __init__(self) -> None:
+        self.buf = bytearray()
+        self._closing = False
+
+    def write(self, data: bytes) -> None:
+        self.buf.extend(data)
+
+    async def drain(self) -> None:
+        await asyncio.sleep(0)
+
+    def is_closing(self) -> bool:
+        return self._closing
+
+    def close(self) -> None:
+        self._closing = True
+
+    async def wait_closed(self) -> None:
+        return
+
+
 def find_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            return int(s.getsockname()[1])
+    except PermissionError:
+        return 18755
 
 
 def make_executable(path: Path, content: str) -> Path:
@@ -43,6 +70,28 @@ async def raw_http_request(
     headers: Optional[Dict[str, str]] = None,
     body: bytes = b"",
 ) -> Tuple[int, Dict[str, str], bytes]:
+    mem_app = _MEM_APP_REGISTRY.get(port)
+    if mem_app is not None:
+        hdrs = {"Host": f"127.0.0.1:{port}", **(headers or {})}
+        if body and "Content-Length" not in hdrs and "content-length" not in hdrs:
+            hdrs["Content-Length"] = str(len(body))
+        raw_req = ("\r\n".join([f"{method} {target} HTTP/1.1"] + [f"{k}: {v}" for k, v in hdrs.items()]) + "\r\n\r\n").encode("latin-1") + body
+        reader = asyncio.StreamReader(limit=65536)
+        reader.feed_data(raw_req)
+        reader.feed_eof()
+        writer = _InMemWriter()
+        await mem_app.handle_client(reader, writer)
+        raw_resp = bytes(writer.buf)
+        sep = raw_resp.find(b"\r\n\r\n")
+        head_lines = raw_resp[:sep].decode("latin-1").split("\r\n")
+        status_code = int(head_lines[0].split(" ", 2)[1])
+        resp_headers: Dict[str, str] = {}
+        for hl in head_lines[1:]:
+            if ":" in hl:
+                k, v = hl.split(":", 1)
+                resp_headers[k.strip().lower()] = v.strip()
+        return status_code, resp_headers, raw_resp[sep + 4 :]
+
     reader, writer = await asyncio.open_connection("127.0.0.1", port)
     try:
         hdrs = {"Host": f"127.0.0.1:{port}", **(headers or {})}
@@ -324,12 +373,16 @@ async def run_v5_verification() -> None:
             boot_token=token,
             boot_id="boot_v5_verify",
         )
-        server = await asyncio.start_server(
-            app.handle_client,
-            host="127.0.0.1",
-            port=port,
-            limit=max(MAX_REQUEST_LINE_BYTES, MAX_HEADER_LINE_BYTES) + 512,
-        )
+        server = None
+        try:
+            server = await asyncio.start_server(
+                app.handle_client,
+                host="127.0.0.1",
+                port=port,
+                limit=max(MAX_REQUEST_LINE_BYTES, MAX_HEADER_LINE_BYTES) + 512,
+            )
+        except PermissionError:
+            _MEM_APP_REGISTRY[port] = app
 
         try:
             st_cfg, _ = await api_json(
@@ -811,8 +864,10 @@ async def run_v5_verification() -> None:
             ok("7. 「形成决议」合成引擎专项验收（全量约束/成果/修正终态 100% 保留 + 弃案 100% 物理隔离至负面清单）")
 
         finally:
-            server.close()
-            await server.wait_closed()
+            _MEM_APP_REGISTRY.pop(port, None)
+            if server is not None:
+                server.close()
+                await server.wait_closed()
             await app.orchestrator.shutdown()
 
     print("\n" + "=" * 76, flush=True)

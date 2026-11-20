@@ -2434,6 +2434,7 @@ class UnifiedAgentRunner:
         self._warm_agy_pool: Dict[Tuple[str, str], WarmAntigravityProcess] = {}
         self._codex_threads: Dict[Tuple[str, str], str] = {}
         self._last_seen_msg_idx: Dict[Tuple[str, str], int] = {}
+        self._seen_msg_ids: Dict[Tuple[str, str], Set[str]] = {}
         self._last_persona_by_seat: Dict[Tuple[str, str], str] = {}
         self._injected_refs: Dict[Tuple[str, str], Set[str]] = {}
         self._binary_semaphores: Dict[Tuple[str, int], asyncio.Semaphore] = {}
@@ -2530,6 +2531,8 @@ class UnifiedAgentRunner:
             self._codex_threads.pop(key, None)
         for key in [k for k in self._last_seen_msg_idx if k[0] == session_id]:
             self._last_seen_msg_idx.pop(key, None)
+        for key in [k for k in self._seen_msg_ids if k[0] == session_id]:
+            self._seen_msg_ids.pop(key, None)
         for key in [k for k in self._last_persona_by_seat if k[0] == session_id]:
             self._last_persona_by_seat.pop(key, None)
         for key in [k for k in self._injected_refs if k[0] == session_id]:
@@ -2539,12 +2542,25 @@ class UnifiedAgentRunner:
             if proc:
                 await proc.close()
 
+    def invalidate_seen_message_id(self, session_id: str, message_id: str) -> None:
+        """单席就地恢复重写消息后，从同会话其余热驻留席位的已读集合中移除该 ID，确保下一轮增量可见。"""
+        if not session_id or not message_id:
+            return
+        mid = str(message_id)
+        for key, seen_set in self._seen_msg_ids.items():
+            if key[0] == session_id and isinstance(seen_set, set):
+                seen_set.discard(mid)
+
     async def cancel_seat_active_stream(self, session_id: str, agent_id: str) -> None:
         """单席跳过本轮时立即终止该席位的常驻流与一次性 CLI 子进程组，释放信号量，绝不阻塞其余席位。"""
         seat_key = (session_id, agent_id)
         proc = self._warm_agy_pool.pop(seat_key, None)
         if proc:
             await proc.close()
+            self._seen_msg_ids.pop(seat_key, None)
+            self._last_seen_msg_idx.pop(seat_key, None)
+            self._last_persona_by_seat.pop(seat_key, None)
+            self._injected_refs.pop(seat_key, None)
         raw_set = self._active_raw_procs.pop(seat_key, None)
         if raw_set:
             for rproc in list(raw_set):
@@ -2865,10 +2881,19 @@ class UnifiedAgentRunner:
                 "（当前为单席专注模式：由你独立负责架构设计、边界自检与实施方案收敛，无需点名其他席位，请给出结构严谨、可直接执行的完整结论。）"
             )
         elif shared_cli_roster:
+            ortho_lens_map = {
+                "carbon": "架构正交性、模块状态边界与长期演进一致性标尺",
+                "grok": "并发竞态、异常输入与极端失效反例证伪标尺",
+                "astra": "改动爆炸半径、接口落地契约与最小侵入实施标尺",
+                "vega": "用户心智路径、交互反馈闭环与边缘体验标尺",
+                "titan": "吞吐延迟预算、内存/锁竞争损耗与扩缩容标尺",
+                "prism": "可观测性、故障恢复幂等与自动化回归验收标尺",
+            }
+            seat_lens = ortho_lens_map.get(agent_id, "本席专属职责独立审计标尺")
             role_header += (
                 f"\n【单引擎多席位并行正交扮演铁律（严禁同源模型自我附和，必须彻底锁定本席专属专业视角独立交锋）】：本场会议由同一底层引擎无状态分次承担多个角色（参会阵容：{shared_cli_roster}）。"
-                f"你本轮仅代表【{seat_display} · {pspec['label']}】，严禁复述前序席位原话或客套附和（禁止出现“同意/赞同/说得好/整体可行/补充一点”），"
-                "必须独立输出当前角色职责视角的实质判断、风险审计或具体工程方案！"
+                f"你本轮仅代表【{seat_display} · {pspec['label']}】，强制锁定专属审查维度：【{seat_lens}】。"
+                "严禁复述前序席位原话或客套附和（禁止出现“同意/赞同/说得好/整体可行/补充一点”），必须独立输出该标尺下的实质判断、具体失效反例或可替换工程方案！"
             )
 
         is_code_review = collab_mode_key == "code_review" or ("代码审查" in collab_mode)
@@ -2886,15 +2911,15 @@ class UnifiedAgentRunner:
             else "篇幅按问题复杂度自然展开，允许输出完整推演链条、反例分析、接口契约或对比表格；严禁客套寒暄与无效复述，确保每段具备实质信息增量"
         )
 
-        # 旗舰级全量防遗漏 + 废案强隔离决议合成通道：永远使用完整讨论档案与全量消息，绝不走增量截断
-        if stage == "synthesis":
+        # 旗舰级全量防遗漏 + 废案强隔离 6 段式无损决议合成与终稿合入通道：永远使用完整讨论档案与全量消息，绝不走增量截断
+        if stage in ("synthesis", "resolution_merge"):
             artifact_type = str(whiteboard.get("artifact_type") or "code_patch").strip().lower()
-            sec4_heading = {
-                "code_patch": "## 四、文件级待执行任务清单（明确模块路径、改动职责与回归验收标准）",
-                "decision_matrix": "## 四、方案对比决策矩阵与落地行动清单（明确选型结论、触发条件与执行动作）",
-                "ux_checklist": "## 四、产品体验分级走查与打磨清单（明确交互节点、预期体感与验收标准）",
-                "doc_export": "## 四、根因排查闭环与结构化定稿清单（明确核验步骤、定稿口径与交付动作）",
-            }.get(artifact_type, "## 四、待执行交付任务清单（明确改动职责与验收标准）")
+            sec6_heading = {
+                "code_patch": "## 六、边界风险防线、参会披露与文件级待执行任务清单（模块路径 · 改动职责 · 回归验收）",
+                "decision_matrix": "## 六、边界风险防线、参会披露与决策落地行动清单（选型结论 · 触发条件 · 执行动作）",
+                "ux_checklist": "## 六、边界风险防线、参会披露与体验分级走查清单（交互节点 · 预期体感 · 验收标准）",
+                "doc_export": "## 六、边界风险防线、参会披露与排查定稿交付清单（核验步骤 · 定稿口径 · 交付动作）",
+            }.get(artifact_type, "## 六、边界风险防线、参会披露与待执行任务清单")
             epistemic_badge = str(whiteboard.get("epistemic_badge") or "").strip()
             epistemic_rule = (
                 f"\n【认知防伪披露硬约束】：当前会话独立性状态为 `{epistemic_badge}`；若处于同源模型或单席模式，正文中严禁出现“多 AI 独立交叉验证共识”字样，须如实保留该认知标记。"
@@ -2903,53 +2928,112 @@ class UnifiedAgentRunner:
             )
             dossier_block = str(whiteboard.get("_synthesis_dossier_block") or "").strip()
             dossier_section = f"\n{dossier_block}\n" if dossier_block else ""
+            audit_patches_block = str(whiteboard.get("_resolution_audit_patches_block") or "").strip()
+            audit_section = f"\n{audit_patches_block}\n" if (stage == "resolution_merge" and audit_patches_block) else ""
+            draft_block = str(whiteboard.get("_resolution_draft_block") or "").strip()
+            draft_section = (
+                f"\n【待修订的决议初稿】：\n{draft_block}\n"
+                if (stage == "resolution_merge" and draft_block)
+                else ""
+            )
             synth_instruction = cue_instruction or (
-                "请基于全轮次会议讨论、演进定论账本与主持约束，输出一份【零成果遗漏、零废案回流】的旗舰级《会议最终决议》"
+                "请基于【决议初稿】与其余席位提交的【终稿反向核验补漏清单】，完整融合每一条有效补录、剔除任何回流废案、补齐少数派条件预案，输出最终定稿《会议最终决议》"
+                if stage == "resolution_merge"
+                else "请基于全轮次会议讨论、多席思想精华卷宗与主持约束，输出一份【零精华遗漏、零废案回流、可溯源纠偏演进】的 6 段式无损《会议最终决议》"
             )
             synth_tail = (
                 f"只读汇总严禁调用工具修改磁盘文件，严禁调用任何 shell 命令或脚本统计字数；{quality_constraint}。{epistemic_rule}\n"
-                "【决议合成铁律（必须 100% 遵守）】：\n"
-                "1. 全量保留不遗漏：主持人的初始硬约束、历次插话追问要求、各轮经质询后达成或修订成熟的方案细节、量化阈值与接口契约必须完整纳入第一节与第四节，严禁概括丢失关键参数！\n"
-                "2. 废案显式剥离防回流：凡在讨论中已被反驳证伪、席位主动声明放弃（[放弃原方案]）、被修订方案取代（[修正原方案] 之前的旧草案）或被主持人否决的差方案，严禁混入第一节『已确认共识』或第四节『待执行任务』，必须单独归档至第二节『已确认放弃与证伪淘汰方案』并注明淘汰理由！\n"
-                f"3. 请严格按以下四节一级结构输出：\n"
-                "   - `## 一、已确认共识与全量采纳成果`\n"
-                "   - `## 二、已确认放弃与证伪淘汰方案（防回流负面清单）`\n"
-                "   - `## 三、边界风险防线、未决争议与参会披露`\n"
-                f"   - `{sec4_heading}`\n"
+                "【无损决策包合成铁律（必须 100% 遵守）】：\n"
+                "1. 全量保留与思想溯源：主持人的初始硬约束、历次插话追问要求、各席位经质询存活的核心洞察、量化阈值与接口契约必须完整保留，并在第三节以表格显式标明「初版方案 → 谁提出什么纠偏 → 终态方案与精华来源」，严禁把多 AI 的独特亮点平滑概括掉！\n"
+                "2. 废案显式剥离防回流：凡在讨论中已被反驳证伪、席位主动声明放弃（[放弃原方案]）、被修订方案取代（[修正原方案] 之前的旧草案）或被主持人否决的差方案，严禁混入第二节『实施方案』或第六节『待执行任务』，必须单独归档至第四节『已确认放弃与证伪淘汰方案』并注明淘汰理由！\n"
+                "3. 少数派高价值意见保护：对逻辑成立但因当前成本/周期暂未采纳的替代思路，严禁丢弃或误归为废案，必须写入第五节『高价值少数派意见与条件触发预案』，写清触发条件与切换路径。\n"
+                f"4. 请严格按以下六节一级结构输出：\n"
+                "   - `## 一、核心决策总览（TL;DR）`（一句话定调最终路线、核心取舍原则与不可突破底线）\n"
+                "   - `## 二、已确认共识与完整实施方案`（整合各席修正后的终态设计与全部硬约束、参数、契约）\n"
+                "   - `## 三、多 AI 思想精华与纠偏演进表`（Markdown 表格：核心议题 | 初始方案 | 纠偏来源与盲区指出 | 终态采纳方案与精华归属）\n"
+                "   - `## 四、已确认放弃与证伪淘汰方案（防回流负面清单）`\n"
+                "   - `## 五、高价值少数派意见与条件触发预案`（若未来触发 X 条件 → 启用 Y 方案，注明来源席位）\n"
+                f"   - `{sec6_heading}`（先列边界风险防线与参会/认知披露，再用 `- [ ]` 列出按优先级排序的可执行任务清单）\n"
                 "末尾必须独立换行附带两行结构化标记（禁止省略）：\n"
-                "[白板: 共识=核心采纳裁定结论（多条以分号分隔） | 弃案=已确认放弃或淘汰的旧方案（多条以分号分隔，无则填无） | 风险=关键边界防线（多条以分号分隔） | 任务=具体待执行动作（多条以分号分隔）]\n"
+                "[白板: 共识=核心采纳裁定结论（多条以分号分隔） | 弃案=已确认放弃或淘汰的旧方案（多条以分号分隔，无则填无） | 风险=关键边界防线或少数派预案（多条以分号分隔） | 任务=具体待执行动作（多条以分号分隔）]\n"
                 "[状态: 决议已成 | 共识: 已达成 | 点名: 无]"
             )
             transcript = cls._format_transcript_within_budget(recent_messages, max_messages=240, max_chars=180000) or "（暂无前序发言）"
             ws_block = f"{workspace_snapshot}\n\n" if workspace_snapshot else ""
             ref_section = f"{extra_ref_block}\n\n" if extra_ref_block else ""
+            stage_banner_txt = "终稿核验修订定稿（融合他席补漏）" if stage == "resolution_merge" else "形成 6 段式无损《会议最终决议》"
             return (
                 f"{role_header}\n"
-                f"【当前环节：形成会议最终决议（全量成果收敛 + 废案剥离）】{synth_instruction}\n"
+                f"【当前环节：{stage_banner_txt}】{synth_instruction}\n"
                 f"【讨论策略】：{collab_mode}\n"
                 f"【议题】：{topic}\n"
                 f"【主持要求】：{constraints}"
                 f"{wb_digest}"
-                f"{dossier_section}\n"
+                f"{dossier_section}"
+                f"{draft_section}"
+                f"{audit_section}\n"
                 f"{ws_block}"
                 f"{ref_section}"
                 f"【会议完整全轮次讨论记录】：\n{transcript}\n\n"
                 f"要求：{synth_tail}"
             )
 
+        # 终稿反向核验与多席块级会签通道：注入审稿席位专属逆向核对锚点，防单主笔锚定效应磨平异构洞察
+        if stage == "resolution_audit":
+            draft_block = str(whiteboard.get("_resolution_draft_block") or "").strip()
+            dossier_block = str(whiteboard.get("_synthesis_dossier_block") or "").strip()
+            self_anchor_map = whiteboard.get("_resolution_audit_self_anchors")
+            self_anchor_raw = (
+                str(self_anchor_map.get(agent_id) or "").strip()
+                if isinstance(self_anchor_map, dict)
+                else ""
+            )
+            self_anchor_section = (
+                f"\n【本席专属逆向核对清单（请重点比对主笔初稿是否将你的终态契约或发起的 D# 质疑漏写、截断或改软）】：\n{self_anchor_raw}\n"
+                if self_anchor_raw
+                else ""
+            )
+            transcript = cls._format_transcript_within_budget(recent_messages, max_messages=120, max_chars=120000) or "（暂无前序发言）"
+            audit_tail = (
+                "只读会签核验严禁修改磁盘文件、严禁调用 shell 脚本统计字数，请直奔技术与逻辑实质（不要重写整份决议，不要客套赞美）：\n"
+                "请先对照上方【本席专属逆向核对清单】，再站在你本场【" + pspec["label"] + "】视角逐项核查《会议最终决议初稿》是否存在以下 3 类问题：\n"
+                "1) 精华或硬核细节遗漏：你或其他席位经纠偏存活的哪条独到洞察、量化阈值、状态机边界、代码块或接口契约被主笔漏写或过度简化了？"
+                "如有，请用块级补丁 `### [补录章节 二/三/六：简述标题]` 紧跟完整技术内容（允许保留必要的代码块、公式或表格），或用单行 `[遗漏补录：...]` 写出；\n"
+                "2) 废案回流或未决争议伪装共识：终稿第二节或第六节中，是否混入了已被证伪放弃的旧方案，或把被质询方未能真正解决的 D# 争议伪装成无条件共识？如有，请写 `### [废案回流预警]` 或 `[废案回流预警：具体条款及淘汰原因]`；\n"
+                "3) 少数派条件预案缺失：高价值替代路线或保留异议的 D# 边界是否应在第五节保留为条件触发预案？如有，请写 `### [少数派预案]` 或 `[少数派预案：触发条件 -> 备选方案]`。\n"
+                "若以上 3 项均无问题，请直接首行输出 `[终稿无遗漏]` 并用一句话确认会签通过！\n"
+                "末尾附带一行状态标记：[状态: 终稿核验完成 | 共识: 已达成 | 点名: 无]"
+            )
+            return (
+                f"{role_header}\n"
+                f"【当前环节：终稿多席块级会签（查漏补缺与硬核精华守护）】{cue_instruction}\n"
+                f"【议题】：{topic}\n"
+                f"【主持要求】：{constraints}\n"
+                f"{self_anchor_section}"
+                f"{dossier_block}\n\n"
+                f"【待核验的《会议最终决议初稿》】：\n{draft_block}\n\n"
+                f"【会议讨论记录参考】：\n{transcript}\n\n"
+                f"要求：{audit_tail}"
+            )
+
         cue_note = f"（专项指引：{cue_instruction}）" if cue_instruction and stage != "cue" else ""
         stance_protocol_hint = (
-            "为便于分歧追踪与淘汰废案识别，请在对应段落开头按需附带显式立场锚点："
-            "质疑他席写 `[反驳 @席位名：核心分歧]`；吸收质疑修正自身前序方案写 `[修正原方案：原设计 -> 新设计]`；"
-            "明确撤回或淘汰劣势方案写 `[放弃原方案：被弃方案及原因]`；确认无实质分歧写 `[无异议]`。"
+            "为保障多 AI 思想碰撞精度、D1..Dn 争议闭环与废案识别，请保留清晰 `@席位名` 路由锚点（支持内联标签或对应小节下 `- @席位名：...` 列表）："
+            "吸纳他席独创精华写 `[吸收 @席位名：值得采纳的核心洞察或关键契约]`；"
+            "证伪他席盲区须先用半句准确强述其核心机制防曲解稻草人，再写 `[反驳 @席位名：具体失效反例与边界漏洞]` 并给出可替换的 `[建议修正 @席位名：具体修改建议]`；"
+            "修正本席原方案写 `[修正原方案：原设计 -> 新设计]`（并在文末更新 `### 本席独创贡献与关键契约` 为修正后的终态）；"
+            "撤回劣势方案写 `[放弃原方案：被弃方案及证伪原因]`；确无实质异议写 `[无异议]`。"
+        )
+        signature_card_hint = (
+            "请在正文最后（白板标记之前）附一小节 `### 本席独创贡献与关键契约`，原样浓缩本席最新终态的核心判断、关键参数阈值或接口/代码契约，供终稿无损合入。"
         )
         stage_desc_map = {
             "opening": (
-                f"【当前环节：单席深度方案设计】请立足【{pspec['label']}】视角，针对议题输出完整的「核心方案主张 + 关键接口/状态设计 + 分阶段实施路径」。{cue_note}"
+                f"【当前环节：单席深度方案设计】请立足【{pspec['label']}】视角，针对议题输出完整的「核心方案主张 + 关键接口/状态设计 + 分阶段实施路径」。{signature_card_hint}{cue_note}"
                 if is_solo_mode
                 else (
-                    f"【当前环节：独立立论（首轮盲评隔离）】请立足【{pspec['label']}】视角独立破题，明确给出：「1. 核心方案主张；2. 成立前提假设；3. 关键实现路径与边界约束」。"
-                    f"严禁客套寒暄或猜测迎合他人观点。{cue_note}"
+                    f"【当前环节：独立立论（首轮盲评隔离）】请立足【{pspec['label']}】视角独立破题，明确给出：「1. 核心方案主张；2. 成立前提假设；3. 关键实现契约与边界约束」。"
+                    f"严禁客套寒暄或猜测迎合他人观点。{signature_card_hint}{cue_note}"
                 )
             ),
             "solo_audit": (
@@ -2957,77 +3041,96 @@ class UnifiedAgentRunner:
                 f"1) 排查隐含假设漏洞、异常/并发回退边界；2) 修正设计瑕疵（若有淘汰初版设计请标注 `[放弃原方案：...]`）并收敛可直接勾选交付的待执行任务清单。{cue_note}"
             ),
             "cross_talk": (
-                f"【当前环节：交叉质询（证伪与边界审计协议）】严禁出现“同意/赞同/说得好/整体可行/补充一点”等附和套话，禁止复述已达成观点！"
-                f"必须严格执行：1) 对存在分歧的设计列出 `方案 A vs 方案 B` 的工程代价对比与具体失效反例；"
-                f"2) 对已达成共识的模块补充极端异常边界或量化验收条件；"
-                f"3) {stance_protocol_hint}{cue_note}"
+                f"【当前环节：全覆盖对等互评与纠偏矩阵】严禁出现“同意/赞同/说得好/整体可行/补充一点”等空洞套话，禁止复述已知观点！"
+                f"请逐一审视本场其余参会席位的首轮方案，按以下 3 个自然小节或三元组强制深度碰撞："
+                f"1) `### 他席洞察吸收`：点明对方方案中比本席更优的硬核亮点（标注 `[吸收 @席位名：...]`）；"
+                f"2) `### 核心纠偏与盲区证伪`：先用半句准确复述对方核心机制（Steel-man 防曲解），再拆穿其隐含不成立前提、极端输入或并发/架构失效反例，给出可直接替换的改进方案（标注 `[反驳 @席位名：...]` 与 `[建议修正 @席位名：...]`）；"
+                f"3) `### 本席独创贡献与关键契约`：若他席暴露了本席短板，主动标注 `[修正原方案：旧 -> 新]` 或 `[放弃原方案：...]`，并在此小节输出修正后的终态关键契约。"
+                f"{stance_protocol_hint}{cue_note}"
             ),
             "rebuttal": (
-                f"【当前环节：定向答辩】你在上一轮交叉质询中被点名质询{cue_note}。"
-                f"请直面质询焦点：对指出的真实漏洞直接吸收并标注 `[修正原方案：...]` 或 `[放弃原方案：...]` 给出修正后的契约；对不成立的质疑给出具体技术依据正面反驳，严禁回避核心问题。"
+                f"【当前环节：D1..Dn 编号争议逐项交锋闭环】你在上一轮互评中收到定向质询{cue_note}。"
+                f"请按争议编号（如 D1、D2）逐条正面闭环，严禁笼统带过或回避任何一条编号争议："
+                f"1) 若质疑成立：写 `[回应 D#：接受修正 | 具体修补契约]` 并同步标注 `[修正原方案：原设计 -> 新设计]` 或 `[放弃原方案：被弃方案及原因]`，同时将更新后的终态契约写入 `### 本席独创贡献与关键契约`；"
+                f"2) 若质疑不成立：写 `[回应 D#：量化反证 | 源码证据或成本边界反证]`（注意：主张反证拒改将触发原质询方独立验收，请给出硬核可核验依据）；"
+                f"3) 若属特定规模/未来场景下的备选路线：写 `[回应 D#：条件预案 | 触发阈值 -> 切换方案]`；同时对可采纳建议标注 `[吸收 @席位名：...]`。"
+            ),
+            "challenger_signoff": (
+                f"【当前环节：质询方答辩验收（防自证销账）】被质询席位对你的挑战给出了反证答辩并主张维持原案{cue_note}。"
+                f"请严格依据源码事实或工程量化边界，对名下待验收的 D# 逐条给出简明验收裁决（每条控制在 120 字以内，直奔判据，严禁寒暄长文）："
+                f"1) 若对方反证确凿、消除了你指出的失效边界：写 `[验收 D#：认可闭环 | 认可依据]`；"
+                f"2) 若对方回避了核心漏洞或反证不成立：写 `[验收 D#：维持异议 | 残余失效风险与建议写入第五节的条件触发预案]`。"
             ),
             "lead_synthesis": (
-                f"【当前环节：架构裁定】请作为本场主控收敛席，综合前序独立立论、交叉质询与定向答辩结果，"
-                f"输出《分歧裁定与阶段推进方案》：明确各项争议的最终采纳结论、已淘汰废案（标注 `[放弃原方案：...]`）、风险防线与分阶段实施任务。{cue_note}"
+                f"【当前环节：架构裁定】请作为本场主控收敛席，综合前序独立立论、对等互评矩阵与 D1..Dn 逐项交锋结果，"
+                f"输出《分歧裁定与阶段推进方案》：逐项交代各争议编号的最终裁定（保留各席独创精华与关键契约署名）、已淘汰废案（标注 `[放弃原方案：...]`）、未决挂起项与条件触发预案、风险防线及分阶段实施任务。{cue_note}"
             ),
             "adv_propose": (
-                f"【当前环节：正反辩证 · 主方案立论】你担任本场正方主方案席，请针对议题先行独立输出一份结构完整、细节扎实的主推荐方案"
-                f"（涵盖核心架构选型、数据流/接口契约、关键实现路径与预期工程收益）。{cue_note}"
+                f"【当前环节：正反辩证 · 主方案立论】你担任本场正方建构席，请针对议题独立输出一份结构完整、细节扎实的主推荐方案"
+                f"（涵盖核心架构选型、数据流/接口契约、关键实现路径与预期工程收益）。{signature_card_hint}{cue_note}"
             ),
             "adv_attack": (
-                f"【当前环节：正反辩证 · 反向压力审计】你担任本场反向压力审计席，请针对正方主方案执行破坏性压力测试："
-                f"1) 拆穿方案中的隐含错误假设；2) 指出极端负载、异常输入或并发竞态下的具体失效点；"
-                f"3) 明确提出至少一条可行的替代路线并对比工程代价。{stance_protocol_hint}{cue_note}"
+                f"【当前环节：正反辩证 · 破坏性反向压力审计】你担任本场反方挑刺席，请针对正方方案执行穿透式证伪压测："
+                f"1) 拆穿方案中的隐含错误假设；2) 指出极端负载、异常输入或并发竞态下的具体失效反例；"
+                f"3) 明确提出可落地的替代路线或纠偏方案并对比工程代价。{stance_protocol_hint}{cue_note}"
             ),
             "adv_defend": (
-                f"【当前环节：正反辩证 · 防御修正】请针对反向压力审计指出的各项实质风险与替代路线正面答辩："
-                f"对确有隐患的环节标注 `[修正原方案：...]` 或 `[放弃原方案：...]` 直接修订原方案架构与状态边界；对不合理的质疑给出量化成本或源码级反驳。{cue_note}"
+                f"【当前环节：正反辩证 · 逐项防御修正】请针对反方挑刺席提出的全部编号质疑（D1..Dn）与替代路线逐条正面答辩："
+                f"对确有隐患的编号标注 `[回应 D#：接受修正 | ...]` 及 `[修正原方案：旧 -> 新]` / `[放弃原方案：...]` 直接修订架构与状态契约；对有价值的建议标注 `[吸收 @席位名：...]`；对不成立的质疑标注 `[回应 D#：量化反证 | ...]` 给出源码或成本级反证，严禁漏答。{cue_note}"
             ),
             "adv_verdict": (
-                f"【当前环节：正反辩证 · 综合裁定】请站在终审裁定席视角，权衡正方主方案、反向压力审计与防御修正，"
-                f"给出最终权衡裁定、明确淘汰的次优/高危方案（标注 `[放弃原方案：...]`）、必须固化的安全护栏以及清晰的执行边界。{cue_note}"
+                f"【当前环节：正反辩证 · 终审复核与综合裁定】请站在终审裁定席视角，逐条核验正方在防御修正中是否真正解决了 D1..Dn 漏洞（警惕口头修补却未改契约），"
+                f"融合正反双方思想精华，给出最终权衡裁定、明确淘汰的次优/高危方案（标注 `[放弃原方案：...]`）、值得保留的条件触发预案与清晰执行边界。{cue_note}"
             ),
             "div_expand": (
                 f"【当前环节：发散收敛 · 多维方案发散】本轮严禁过早自我否定或保守趋同！"
-                f"请严格聚焦分配给你的正交探索维度{cue_note}，尽可能打开解空间，给出逻辑自洽、特色鲜明的完整设计方案与代表性实现方式。"
+                f"请严格聚焦分配给你的正交探索维度{cue_note}，尽可能打开解空间，给出逻辑自洽、特色鲜明的完整设计方案与代表性实现方式。{signature_card_hint}"
             ),
             "div_evaluate": (
-                f"【当前环节：发散收敛 · 可行性与成本评估】请按照「用户感知价值 × 实现复杂度 × 维护风险」三维评估矩阵，"
-                f"横向对比第 1 轮各维度的发散方案（可输出对比表格），明确指出应淘汰的次优项（标注 `[放弃原方案：...]`）及优选项的改造代价。{cue_note}"
+                f"【当前环节：发散收敛 · 对等互评与三维成本评估】请按照「用户感知价值 × 实现复杂度 × 维护风险」三维评估矩阵，"
+                f"横向审视其余席位的正交发散方案（可输出对比表格），用 `[吸收 @席位名：...]` 标出可跨方案嫁接的独创精华，用 `[反驳 @席位名：...]` 指出脱离约束的盲区，并标注应淘汰的次优项（`[放弃原方案：...]`）。{cue_note}"
             ),
             "div_converge": (
-                f"【当前环节：发散收敛 · 优选方案收敛】请基于「用户感知价值 × 实现复杂度 × 维护风险」三维矩阵完成终局收敛，"
-                f"明确剥离淘汰的次优方案（标注 `[放弃原方案：...]`），输出唯一推荐的实施路径、保留约束与分步落地清单。{cue_note}"
+                f"【当前环节：发散收敛 · 优选方案收敛】请基于「用户感知价值 × 实现复杂度 × 维护风险」三维矩阵与互评争议台账完成终局收敛，"
+                f"融合各维度方案中被验证的独创精华（保留席位来源署名），明确剥离淘汰的次优方案（标注 `[放弃原方案：...]`），输出唯一推荐的实施路径、保留约束与分步落地清单。{cue_note}"
             ),
             "cr_locate": (
                 f"【当前环节：代码审查 · 源码证据定位】请严格基于源码证据独立定位问题根因、架构耦合点或潜在缺陷，"
-                f"逐项指明具体文件路径、函数/类名、关键变量或状态流转链路，严禁脱离代码空谈。{cue_note}"
+                f"逐项指明具体文件路径、函数/类名、关键变量或状态流转链路，严禁脱离代码空谈。{signature_card_hint}{cue_note}"
             ),
             "cr_verify": (
-                f"【当前环节：代码审查 · 调用链交叉核验】请交叉核验前序席位定位的源码证据，检查上下游调用链影响面、"
-                f"跨模块状态同步与潜在回归风险，指出遗漏的文件/函数或偏差归因。{stance_protocol_hint}{cue_note}"
+                f"【当前环节：代码审查 · 调用链交叉核验与互评纠偏】请逐一核验其余席位定位的源码证据，检查上下游调用链影响面、"
+                f"跨模块状态同步与潜在回归风险；对准确深刻的定位标注 `[吸收 @席位名：...]`，对误判根因或遗漏边界标注 `[反驳 @席位名：...]` 与 `[建议修正 @席位名：...]`。{stance_protocol_hint}{cue_note}"
             ),
             "cr_plan": (
-                f"【当前环节：代码审查 · 文件级修改方案】请汇总源码证据与调用链核验结论，剥离误判或高风险修补草案，输出精确到"
-                f"「文件路径 → 函数/类名 → 具体修改逻辑 → 验证命令」的文件级修改方案。{cue_note}"
+                f"【当前环节：代码审查 · 文件级修改方案】请汇总全席源码证据与调用链交叉核验结论，剥离误判或高风险修补草案，输出精确到"
+                f"「文件路径 → 函数/类名 → 具体修改逻辑与代码契约 → 验证命令」的文件级修改方案。{cue_note}"
             ),
             "rapid_open": (
-                f"【当前环节：快速合议 · 单轮要点直出】请立足【{pspec['label']}】职责，简明分点直出核心改造要点与不可突破的底线风险。{cue_note}"
+                f"【当前环节：快速合议 · 单轮要点直出】请立足【{pspec['label']}】职责，简明分点直出核心改造要点、关键契约与不可突破的底线风险。{cue_note}"
             ),
             "rapid_align": (
-                f"【当前环节：快速合议 · 生成执行清单】请快速核对各席核心要点与底线风险，剔除冲突劣势做法，去重整合为清晰可勾选执行的任务清单与硬约束。{cue_note}"
+                f"【当前环节：快速合议 · 生成执行清单】请快速核对各席核心要点与底线风险，保留各席互补亮点并剔除冲突劣势做法，去重整合为清晰可勾选执行的任务清单与硬约束。{cue_note}"
             ),
             "redebate": (
                 f"【当前环节：双席定向再辩（1 轮焦点交锋）】请严格围绕指定争议焦点正面交锋，禁止泛化发散！"
-                f"给出明确的技术判据、修正契约（`[修正原方案：...]` / `[放弃原方案：...]`）或量化取舍结论。{cue_note}"
+                f"给出明确的技术判据、修正契约（`[修正原方案：旧 -> 新]` / `[放弃原方案：...]`）或量化取舍结论。{cue_note}"
             ),
-            "interrupt_reply": f"【当前环节：响应主持人追问与约束】请针对主持人最新指示输出增量调整、边界防线或深化设计（若推翻旧方案请标注 `[放弃原方案：...]`），禁止复述旧话。{cue_note}",
+            "interrupt_reply": (
+                f"【当前环节：响应主持人追问与跨席协同纠偏】请针对主持人最新指示输出增量调整、边界防线或深化设计；"
+                f"若需推翻前序方案请显式标注 `[修正原方案：旧 -> 新]` 或 `[放弃原方案：...]`，若对他席调整存在异议或补充亮点请使用 `{stance_protocol_hint[:42]}...` 明确标注，禁止复述旧话。{cue_note}"
+            ),
             "cue": f"【当前环节：主持人定向提问】具体问题：{cue_instruction}",
         }
         stage_desc = stage_desc_map.get(stage, f"【当前环节：会议研讨】{cue_note}")
 
-        mention_cands = "或".join(f"@{seat_names[a]}" for a in ("carbon", "grok", "astra"))
-        mention_hint = "无" if is_solo_mode else f"{mention_cands}或无"
+        active_pool = whiteboard.get("_active_seat_ids") if isinstance(whiteboard, dict) else None
+        if isinstance(active_pool, (list, tuple)) and active_pool:
+            mention_ids = [a for a in active_pool if a in seat_names and a != agent_id]
+        else:
+            mention_ids = [a for a in ("carbon", "grok", "astra") if a != agent_id]
+        mention_cands = "或".join(f"@{seat_names[a]}" for a in mention_ids) if mention_ids else "无"
+        mention_hint = "无" if (is_solo_mode or not mention_ids) else f"{mention_cands}或无"
         tail_rule = (
             f"{quality_constraint}；"
             "圆桌讨论阶段仅允许按需精准只读源码（已提供源码或索引骨架的文件请勿全量重复读取；单轮只读查看收敛在 1–3 处最关键代码段以内，禁止全仓遍历扫盘），严禁修改任何磁盘文件，"
@@ -3478,6 +3581,8 @@ class UnifiedAgentRunner:
         shared_cli_roster: str = "",
         collab_mode_key: str = "",
         turn_override: Optional[dict] = None,
+        seat_names_map: Optional[Dict[str, str]] = None,
+        current_msg_id: str = "",
     ) -> AsyncGenerator[dict, None]:
         start_ts = time.perf_counter()
         ttft_ms: Optional[int] = None
@@ -3493,10 +3598,38 @@ class UnifiedAgentRunner:
         use_stateless = stateless or bool(ov and ov.get("stateless"))
         has_mem = False if use_stateless else self._has_active_session_memory(session_id, agent_id, eff_drv)
         prev_seen = self._last_seen_msg_idx.get(seen_key, 0)
+        seen_ids = self._seen_msg_ids.setdefault(seen_key, set())
+        has_msg_ids = any(isinstance(m, dict) and bool(m.get("id")) for m in recent_messages)
         already_injected = self._injected_refs.setdefault(seen_key, set())
         newly_loaded_refs: Set[str] = set()
 
-        if stage != "synthesis" and has_mem and not persona_switched and all_completed_count > prev_seen and prev_seen > 0:
+        can_use_incremental = (
+            stage not in ("synthesis", "resolution_audit", "resolution_merge")
+            and has_mem
+            and not persona_switched
+        )
+        unseen_by_id: List[Dict[str, str]] = []
+        if can_use_incremental and has_msg_ids and seen_ids:
+            unseen_by_id = [
+                m for m in recent_messages if not m.get("id") or str(m.get("id")) not in seen_ids
+            ]
+
+        if can_use_incremental and has_msg_ids and seen_ids and (unseen_by_id or cue_instruction):
+            msgs_for_prompt = unseen_by_id if unseen_by_id else recent_messages[-1:]
+            incremental = True
+            ws_snapshot = ""
+            inc_corpus = "\n".join(
+                [cue_instruction]
+                + (whiteboard.get("chair_constraints") or [])[-3:]
+                + [m["content"] for m in msgs_for_prompt]
+            )
+            extra_ref_block, newly_loaded_refs = extract_referenced_files_context(
+                eff_ws,
+                inc_corpus,
+                max_total_chars=ref_budget,
+                exclude_refs=already_injected,
+            )
+        elif can_use_incremental and not has_msg_ids and all_completed_count > prev_seen and prev_seen > 0:
             delta_count = min(len(recent_messages), max(1, all_completed_count - prev_seen))
             msgs_for_prompt = recent_messages[-delta_count:]
             incremental = True
@@ -3539,8 +3672,10 @@ class UnifiedAgentRunner:
                 lightweight_hint_only=use_lightweight_ws,
             )
 
+        wb_seat_map = whiteboard.get("_seat_names_map") if isinstance(whiteboard, dict) else None
+        eff_seat_map = seat_names_map if isinstance(seat_names_map, dict) else (wb_seat_map if isinstance(wb_seat_map, dict) else None)
         seat_names_now = {
-            aid_k: self.settings.resolve_seat_name(aid_k)
+            aid_k: (eff_seat_map.get(aid_k) if eff_seat_map and eff_seat_map.get(aid_k) else self.settings.resolve_seat_name(aid_k))
             for aid_k in ALL_SEAT_IDS
         }
         prompt = self._build_prompt(
@@ -3692,8 +3827,14 @@ class UnifiedAgentRunner:
             already_injected.update(newly_loaded_refs)
         if not use_stateless:
             self._last_persona_by_seat[seen_key] = eff_persona
+            for m_seen in msgs_for_prompt:
+                if isinstance(m_seen, dict) and m_seen.get("id"):
+                    seen_ids.add(str(m_seen["id"]))
+            if current_msg_id:
+                seen_ids.add(str(current_msg_id))
             if all_completed_count >= 0:
-                self._last_seen_msg_idx[seen_key] = all_completed_count + 1
+                is_parallel_opening = stage in ("opening", "div_expand", "cr_locate", "rapid_open")
+                self._last_seen_msg_idx[seen_key] = all_completed_count if is_parallel_opening else (all_completed_count + 1)
 
         clean_body, badge, target, wb_typed_items, consensus_reached = self.parse_structured_tail_with_kinds(full_raw, seat_names=seat_names_now)
         wb_points = [it["text"] for it in wb_typed_items]
@@ -4544,6 +4685,13 @@ class UnifiedAgentRunner:
         else:
             mode_instruction = "（当前为方案交付模式：请输出一份结构严谨、细节完整、可直接实施的完整方案文档与验证清单）"
 
+        exec_res_ctx = str(whiteboard.get("_exec_resolution_context") or "").strip()
+        res_ctx_block = (
+            f"\n【四、会议决议终态技术契约与防回流负面禁令（必须完整遵循接口签名/阈值，严禁回流淘汰废案）】：\n{exec_res_ctx}\n"
+            if exec_res_ctx
+            else ""
+        )
+
         exec_prompt = (
             f"你是本次会议指定的执行席位 {cfg.name}（当前角色职责：{pspec['label']}）。"
             f"请严格以「全部已确认共识与约束」+「已勾选的待执行任务项」为核心执行范围完成交付{mode_instruction}：\n"
@@ -4553,6 +4701,7 @@ class UnifiedAgentRunner:
             f"【二、已勾选待执行任务清单（核心执行范围）】：\n{actions_block}\n"
             f"{excluded_block}"
             f"【三、风险审计与安全护栏参考（实施时须规避）】：\n{risks_block}\n"
+            f"{res_ctx_block}"
         )
 
         eff_model = resolve_effective_model_for_driver(eff_drv, cfg.model, is_shared_fb=is_fb)

@@ -745,6 +745,39 @@ class AsyncHTTPServer:
                 )
                 return
 
+            if method == "GET" and action == "decision-brief":
+                if not sess.has_exportable_content():
+                    await self._send_json(
+                        writer,
+                        409,
+                        {
+                            "ok": False,
+                            "error": "当前会话尚无有效决议或白板成果，无法生成决策包",
+                            "reason": "empty_session_export",
+                        },
+                    )
+                    return
+                inc_raw = str((query_params.get("include_transcript") or ["0"])[0]).strip().lower()
+                inc_transcript = inc_raw in ("1", "true", "yes", "full")
+                brief_md, brief_filename = self.orchestrator.build_decision_brief_markdown(
+                    sess,
+                    include_transcript=inc_transcript,
+                )
+                await self._send_json(
+                    writer,
+                    200,
+                    {
+                        "ok": True,
+                        "markdown": brief_md,
+                        "filename": brief_filename,
+                        "include_transcript": inc_transcript,
+                        "resolution_stale": bool(sess.whiteboard.get("resolution_stale", False)),
+                        "post_resolution_msg_count": int(sess.whiteboard.get("post_resolution_msg_count") or 0),
+                        "resolution_meta": sess.whiteboard.get("resolution_meta") or {},
+                    },
+                )
+                return
+
             if method == "GET" and action == "recovery":
                 plan = await self.orchestrator.get_session_recovery_plan(sess)
                 await self._send_json(writer, 200, {"ok": True, "recovery": plan})

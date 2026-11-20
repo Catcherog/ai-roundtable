@@ -6,6 +6,7 @@ AI圆桌.app/
 *.app/
 build/
 dist/
+output/
 
 # Python
 __pycache__/
