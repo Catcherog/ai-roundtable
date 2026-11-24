@@ -9,7 +9,7 @@ AI圆桌 — 纯 Python 无 Git 依赖 CAS 写前字节清单与跨进程排他�
    - 指向 `workspace_realpath` 之外的越界符号链接；
    - Socket / FIFO / 块设备 / 字符设备等特殊文件；
    - 无读权限文件；
-   - 普通文件累计大小 `> 128 MiB`（`MAX_BACKUP_WORKSPACE_BYTES = 134_217_728`）。
+   - 写前快照的受管文件累计上限为 128 MiB。大项目在 macOS 上按本轮目标文本文件建快照。
 3. 落盘可靠性：CAS 对象与 `manifest.json` 均采用同目录临时文件写入 -> `os.fsync(fd)` -> `os.replace` -> 父目录 `fsync_dir`，
    持久化至 `~/.ai-roundtable/backups/<session_id>/<run_id>/`。
 4. 跨进程排他锁：`~/.ai-roundtable/locks/<sha256(workspace_realpath)>.lock` 使用 `fcntl.flock(LOCK_EX | LOCK_NB)` + `O_CLOEXEC`，
@@ -27,10 +27,11 @@ import hashlib
 import json
 import os
 import stat
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Dict, List, Optional, Set, Tuple
 
 if os.name == "nt":
@@ -82,7 +83,7 @@ def fsync_directory(dir_path: Path) -> None:
             pass
 
 
-def atomic_write_bytes_fsync(target_path: Path, data: bytes, mode: int = 0o600) -> None:
+def atomic_write_bytes_fsync(target_path: Path, data: bytes, mode: int = 0o600, *, create_only: bool = False) -> None:
     """同目录临时文件写入 -> fsync(fd) -> chmod -> os.replace -> 父目录 fsync。"""
     target_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_name = f".{target_path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}"
@@ -110,7 +111,13 @@ def atomic_write_bytes_fsync(target_path: Path, data: bytes, mode: int = 0o600) 
         os.chmod(str(tmp_path), mode)
     except OSError:
         pass
-    os.replace(str(tmp_path), str(target_path))
+    try:
+        if create_only:
+            os.link(tmp_path, target_path)
+        else:
+            os.replace(str(tmp_path), str(target_path))
+    finally:
+        tmp_path.unlink(missing_ok=True)
     fsync_directory(target_path.parent)
 
 
@@ -269,7 +276,7 @@ def _resolve_symlink_without_escaping(link_full_path: Path, raw_target: str, roo
     return True
 
 
-def _read_file_nofollow_bytes(full_path: Path) -> Tuple[bytes, os.stat_result]:
+def _read_file_nofollow_bytes(full_path: Path, *, max_bytes: Optional[int] = None) -> Tuple[bytes, os.stat_result]:
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
         if os.name == "nt":
@@ -304,11 +311,17 @@ def _read_file_nofollow_bytes(full_path: Path) -> Tuple[bytes, os.stat_result]:
                 reason="special_file",
                 offending_path=str(full_path),
             )
+        if max_bytes is not None and st.st_size > max_bytes:
+            raise WorkspaceAdmissionError("本轮目标文件合计超过 128 MiB 快照上限", reason="workspace_too_large", offending_path=str(full_path))
         chunks: List[bytes] = []
+        size = 0
         while True:
             buf = os.read(fd, 131072)
             if not buf:
                 break
+            size += len(buf)
+            if max_bytes is not None and size > max_bytes:
+                raise WorkspaceAdmissionError("读取期间目标文件超过快照上限", reason="workspace_too_large", offending_path=str(full_path))
             chunks.append(buf)
         return b"".join(chunks), st
     finally:
@@ -371,10 +384,10 @@ def precheck_workspace_capacity(
     cwd: str,
     *,
     max_bytes: int = MAX_BACKUP_WORKSPACE_BYTES,
+    stop_when_over: bool = False,
 ) -> Tuple[bool, int, List[dict], str]:
     """
-    绑定工作区阶段前置 128 MiB 容量预检：
-    按快照同源排除规则扫描受管普通文件总字节数；超限时当场返回体积排名前列的大子目录清单。
+    按快照规则统计受管普通文件。仅为选择写入方式时可在首次超限处停止。
     """
     real_cwd = os.path.realpath(os.path.expanduser(str(cwd or "").strip()))
     root_path = Path(real_cwd)
@@ -412,6 +425,8 @@ def precheck_workspace_capacity(
                 elif stat.S_ISREG(mode):
                     sz = max(0, int(lst.st_size))
                     total_bytes += sz
+                    if stop_when_over and total_bytes > max_bytes:
+                        return False, total_bytes, [], "超过整目录快照容量"
                     top_bucket = rel_posix.split("/", 1)[0] if "/" in rel_posix else "."
                     dir_bytes[top_bucket] = dir_bytes.get(top_bucket, 0) + sz
 
@@ -430,7 +445,7 @@ def precheck_workspace_capacity(
         cur_mb = total_bytes / (1024 * 1024)
         top_desc = "、".join(f"{d['path']} ({d['size_mb']} MiB)" for d in largest_dirs[:4]) or "根目录大文件"
         err_msg = (
-            f"受管工作区总体积 {cur_mb:.1f} MiB 超出 {mb_cap} MiB 安全准入上限，已拒绝绑定；"
+            f"受管工作区总体积 {cur_mb:.1f} MiB 超出 {mb_cap} MiB 整目录快照上限；"
             f"体积占比较大的目录/位置：{top_desc}"
         )
         return False, total_bytes, largest_dirs, err_msg
@@ -447,6 +462,7 @@ class WorkspaceBackup:
     operation_id: str = ""
     max_workspace_bytes: int = MAX_BACKUP_WORKSPACE_BYTES
     runtime_home: Optional[Path] = None
+    target_paths: Optional[List[str]] = None
 
     def __post_init__(self) -> None:
         self.cwd = os.path.realpath(os.path.expanduser(str(self.cwd)))
@@ -464,6 +480,8 @@ class WorkspaceBackup:
         self.after_total_bytes: int = 0
         self._diff_text: str = ""
         self.changed_paths: List[str] = []
+        self.new_parent_dirs: Set[str] = set()
+        self.applied_entries: Dict[str, Optional[dict]] = {}
 
     @classmethod
     def capture(
@@ -475,6 +493,7 @@ class WorkspaceBackup:
         operation_id: str = "",
         max_workspace_bytes: int = MAX_BACKUP_WORKSPACE_BYTES,
         runtime_home: Optional[Path] = None,
+        target_paths: Optional[List[str]] = None,
     ) -> "WorkspaceBackup":
         """构建并落盘写前 `prepared` CAS 字节清单（兼容旧版 capture 调用，且无需 Git 仓库）。"""
         inst = cls(
@@ -484,9 +503,24 @@ class WorkspaceBackup:
             operation_id=operation_id,
             max_workspace_bytes=max_workspace_bytes,
             runtime_home=runtime_home,
+            target_paths=target_paths,
         )
         inst.prepare()
         return inst
+
+    @classmethod
+    def capture_for_execution(cls, cwd: str, **kwargs) -> "WorkspaceBackup":
+        fits, _, _, _ = precheck_workspace_capacity(cwd, max_bytes=kwargs.get("max_workspace_bytes", MAX_BACKUP_WORKSPACE_BYTES), stop_when_over=True)
+        if not fits:
+            if not Path(cwd).is_dir():
+                raise WorkspaceAdmissionError(f"项目目录不存在：{cwd}", reason="missing_workspace")
+            if sys.platform != "darwin" or not os.access("/usr/bin/sandbox-exec", os.X_OK):
+                raise WorkspaceAdmissionError(
+                    "此工作区可用于研讨。当前系统未提供大项目逐文件写入所需的只读进程保护。",
+                    reason="scoped_write_unavailable",
+                )
+            kwargs["target_paths"] = []
+        return cls.capture(cwd, **kwargs)
 
     @classmethod
     def load_from_manifest(cls, manifest_file: Path) -> "WorkspaceBackup":
@@ -497,6 +531,7 @@ class WorkspaceBackup:
             run_id=raw["run_id"],
             operation_id=raw.get("operation_id", ""),
             runtime_home=manifest_file.parent.parent.parent.parent,
+            target_paths=raw.get("target_paths"),
         )
         inst.backup_dir = manifest_file.parent
         inst.blobs_dir = inst.backup_dir / "blobs"
@@ -509,6 +544,7 @@ class WorkspaceBackup:
         inst.after_total_bytes = int(raw.get("after_total_bytes") or 0)
         inst._diff_text = str(raw.get("diff_text") or "")
         inst.changed_paths = list(raw.get("changed_paths") or [])
+        inst.new_parent_dirs = set(raw.get("new_parent_dirs") or [])
         return inst
 
     def _blob_path(self, sha256_hex: str) -> Path:
@@ -521,6 +557,8 @@ class WorkspaceBackup:
         atomic_write_bytes_fsync(bp, data, mode=0o600)
 
     def _scan_workspace(self, *, store_blobs: bool, enforce_cap: bool) -> Tuple[Dict[str, dict], int]:
+        if self.target_paths is not None:
+            return self.scan_target_files(self.target_paths, store_blobs=store_blobs)
         root_path = Path(self.cwd)
         if not root_path.is_dir():
             raise WorkspaceAdmissionError(f"工作区目录不存在：{self.cwd}", reason="missing_workspace")
@@ -603,7 +641,8 @@ class WorkspaceBackup:
                                 reason="workspace_too_large",
                                 offending_path=rel_posix,
                             )
-                        raw_bytes, fst = _read_file_nofollow_bytes(full_p)
+                        remaining = self.max_workspace_bytes - total_bytes if enforce_cap else None
+                        raw_bytes, fst = _read_file_nofollow_bytes(full_p, max_bytes=remaining)
                         total_bytes += len(raw_bytes)
                         if enforce_cap and total_bytes > self.max_workspace_bytes:
                             mb_cap = self.max_workspace_bytes // (1024 * 1024)
@@ -631,6 +670,46 @@ class WorkspaceBackup:
 
         return entries, total_bytes
 
+    def target_file(self, rel: str) -> Path:
+        """Resolve one regular-file destination without traversing links, devices or Git metadata."""
+        root = Path(self.cwd)
+        parts = rel.split("/")
+        if (not rel or "\\" in rel or "\x00" in rel or PureWindowsPath(rel).drive
+                or any(p in ("", ".", "..") or p.rstrip(" .").casefold() == ".git"
+                       or p.casefold().endswith(".app") for p in parts)):
+            raise WorkspaceAdmissionError(f"无效的项目相对路径：{rel}", offending_path=rel)
+        if os.name == "nt" and any(":" in p or p != p.rstrip(" .") or PureWindowsPath(p).is_reserved() for p in parts):
+            raise WorkspaceAdmissionError(f"无效的 Windows 文件名：{rel}", offending_path=rel)
+        if not root.is_dir() or root.resolve() != root:
+            raise WorkspaceAdmissionError("项目根目录已移动或被替换", offending_path=rel)
+        path = root
+        for i, part in enumerate(parts):
+            path = path / part
+            try:
+                st = path.lstat()
+            except FileNotFoundError:
+                continue
+            expected = stat.S_ISREG if i == len(parts) - 1 else stat.S_ISDIR
+            if not expected(st.st_mode) or getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                raise WorkspaceAdmissionError(f"目标路径包含链接或文件类型不匹配：{rel}", offending_path=rel)
+        return path
+
+    def scan_target_files(self, paths: List[str], *, store_blobs: bool) -> Tuple[Dict[str, dict], int]:
+        entries: Dict[str, dict] = {}
+        total = 0
+        for rel in paths:
+            path = self.target_file(rel)
+            if not path.exists():
+                continue
+            remaining = self.max_workspace_bytes - total
+            data, st = _read_file_nofollow_bytes(path, max_bytes=remaining)
+            digest = hashlib.sha256(data).hexdigest()
+            if store_blobs:
+                self._store_blob_if_needed(digest, data)
+            entries[rel] = {"type": "file", "sha256": digest, "size": len(data), "mode": stat.S_IMODE(st.st_mode)}
+            total += len(data)
+        return entries, total
+
     def _persist_manifest(self) -> None:
         self.backup_dir.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -649,6 +728,9 @@ class WorkspaceBackup:
             "changed_paths": self.changed_paths,
             "diff_text": self._diff_text,
         }
+        if self.target_paths is not None:
+            payload["target_paths"] = self.target_paths
+            payload["new_parent_dirs"] = sorted(self.new_parent_dirs)
         atomic_write_json_fsync(self.manifest_path, payload)
         fsync_directory(self.backup_dir.parent)
 
@@ -720,7 +802,16 @@ class WorkspaceBackup:
 
     def finish(self) -> bool:
         """扫描执行后的 `after` 清单并落盘；返回本次执行是否产生了任何工作区变更。"""
-        after_map, total_a = self._scan_workspace(store_blobs=True, enforce_cap=False)
+        if self.target_paths is None:
+            after_map, total_a = self._scan_workspace(store_blobs=True, enforce_cap=False)
+        else:
+            after_map = dict(self.before_entries)
+            for rel, entry in self.applied_entries.items():
+                if entry is None:
+                    after_map.pop(rel, None)
+                else:
+                    after_map[rel] = entry
+            total_a = sum(e["size"] for e in after_map.values())
         self.after_entries = after_map
         self.after_total_bytes = total_a
         all_paths = sorted(set(self.before_entries.keys()) | set(after_map.keys()))
@@ -875,7 +966,7 @@ class WorkspaceBackup:
             b_ent = self.before_entries.get(rel)
             if b_ent is None:
                 continue
-            target_p = root_path / rel
+            target_p = self.target_file(rel) if self.target_paths is not None else root_path / rel
             target_p.parent.mkdir(parents=True, exist_ok=True)
             if os.path.lexists(str(target_p)) and os.path.isdir(str(target_p)) and not os.path.islink(str(target_p)):
                 os.rmdir(str(target_p))
@@ -893,7 +984,7 @@ class WorkspaceBackup:
         # 阶段 3：全部旧文件写回成功后，逐一二次复核待删新增文件当前 SHA-256 仍等于 after，匹配后执行 unlink
         skipped_added_conflicts: List[str] = []
         for rel in sorted(added_only, key=lambda x: x.count("/"), reverse=True):
-            target_p = root_path / rel
+            target_p = self.target_file(rel) if self.target_paths is not None else root_path / rel
             after_ent = self.after_entries.get(rel)
             if not os.path.lexists(str(target_p)):
                 continue
@@ -925,6 +1016,8 @@ class WorkspaceBackup:
         for d in sorted(touched_dirs, key=lambda p: len(p.parts), reverse=True):
             cur = d
             while cur != root_path and _is_within_realpath(cur, root_path):
+                if self.target_paths is not None and cur.relative_to(root_path).as_posix() not in self.new_parent_dirs:
+                    break
                 try:
                     os.rmdir(str(cur))
                     touched_dirs.add(cur.parent)
@@ -1041,7 +1134,7 @@ class WorkspaceBackup:
 
         if delete_confirmed_new_files:
             for item in sorted(plan["untracked_new_files"], key=lambda x: x["path"].count("/"), reverse=True):
-                tp = root_path / item["path"]
+                tp = self.target_file(item["path"]) if self.target_paths is not None else root_path / item["path"]
                 if os.path.lexists(str(tp)) and not (os.path.isdir(str(tp)) and not os.path.islink(str(tp))):
                     os.unlink(str(tp))
                     touched_dirs.add(tp.parent)
@@ -1049,7 +1142,7 @@ class WorkspaceBackup:
         for item in plan["modified_or_deleted"]:
             rel = item["path"]
             b_ent = self.before_entries[rel]
-            tp = root_path / rel
+            tp = self.target_file(rel) if self.target_paths is not None else root_path / rel
             tp.parent.mkdir(parents=True, exist_ok=True)
             if b_ent.get("type") == "symlink":
                 tmp_lnk = tp.parent / f".{tp.name}.lnk.{uuid.uuid4().hex[:8]}"
@@ -1062,6 +1155,8 @@ class WorkspaceBackup:
         for d in sorted(touched_dirs, key=lambda p: len(p.parts), reverse=True):
             cur = d
             while cur != root_path and _is_within_realpath(cur, root_path):
+                if self.target_paths is not None and cur.relative_to(root_path).as_posix() not in self.new_parent_dirs:
+                    break
                 try:
                     os.rmdir(str(cur))
                     cur = cur.parent

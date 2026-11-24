@@ -159,7 +159,9 @@ bash scripts/start_web.sh
 
 ### 从 v4.0.2 升级提醒
 
-**升级前请先彻底退出应用，并完整备份数据目录**（Mac 默认 `~/.ai-roundtable/`，Windows 默认 `%USERPROFILE%\.ai-roundtable`，或自定义的 `AI_ROUNDTABLE_HOME`）。当前版本保存时保留最近 50 场会议、整场重写保留最近 500 条发言，删除会议无回收站；工作区绑定对受管普通文件设 128 MiB 上限（超大仓库请绑定具体子模块目录）。如需旧版无限历史行为，可[继续使用 v4.0.2](https://github.com/Catcherog/ai-roundtable/releases/tag/v4.0.2)。
+**升级前请先彻底退出应用，并完整备份数据目录**（Mac 默认 `~/.ai-roundtable/`，Windows 默认 `%USERPROFILE%\.ai-roundtable`，或自定义的 `AI_ROUNDTABLE_HOME`）。当前发行版保存时保留最近 50 场会议，整场重写时保留最近 500 条发言，删除会议为永久删除。如需保留旧版的无限历史，可[继续使用 v4.0.2](https://github.com/Catcherog/ai-roundtable/releases/tag/v4.0.2)。
+
+v5.5.1 发行版的工作区绑定上限为 128 MiB 受管文件。从当前 `main` 分支构建的版本可绑定整个项目并跨目录查找源码。macOS 上，受管文件超过 128 MiB 时，圆桌会为每轮已授权的文本编辑按目标文件建立快照。
 
 <p align="center">
   <a href="https://github.com/Catcherog/ai-roundtable/issues">提交 Issue 反馈问题，或分享你觉得最值得上圆桌辩论的真问题 →</a>

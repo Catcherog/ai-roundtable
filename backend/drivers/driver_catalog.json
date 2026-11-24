@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "updated_at": "2026-11-18",
+  "updated_at": "2026-11-22",
   "canonical_efforts": ["low", "medium", "high", "xhigh", "max"],
   "subscription_tiers": {
     "all": {
@@ -45,7 +45,7 @@
       "plans": [
         { "key": "auto", "label": "跟随全局订阅档位", "rank": -1 },
         { "key": "google_free", "label": "Free / AI Plus ($0–$4.99)", "rank": 0 },
-        { "key": "google_pro", "label": "Google AI Pro ($19.99/月)", "rank": 1 },
+        { "key": "google_pro", "label": "Google AI Pro ($19.99/月 · Neon/Argon)", "rank": 1 },
         { "key": "google_ultra", "label": "Google AI Ultra / Enterprise ($99.99+)", "rank": 2 },
         { "key": "google_api", "label": "Gemini API Key 按量计费", "rank": 3 }
       ]
@@ -90,11 +90,13 @@
     }
   },
   "exclusive_default_models": {
+    "gemini-4-neon": "agy",
     "gemini-4-carbon": "agy",
     "gemini-4-argon": "agy",
     "gemini-4-hydrogen": "agy",
     "gemini-pro-orchestrator": "agy",
     "gemini-pro-orchestrator-argon": "agy",
+    "orchestrator (neon)": "agy",
     "orchestrator (carbon)": "agy",
     "orchestrator (argon)": "agy",
     "grok-4.7": "grok",
@@ -126,21 +128,21 @@
       "default_discuss_effort": "high",
       "default_exec_effort": "high",
       "recommended_models": [
+        "gemini-4-neon",
         "gemini-4-carbon",
         "gemini-4-argon",
-        "gemini-4-hydrogen",
-        "orchestrator (carbon)"
+        "gemini-4-hydrogen"
       ],
       "model_groups": [
         {
           "key": "gemini-4",
           "label": "Gemini 4 旗舰系",
           "badge": "1M Ctx",
-          "desc": "Google 2026 主力多模态推理架构，覆盖深度规划、均衡编码与长思维链",
+          "desc": "Google 2026 主力多模态推理架构，新增 Gemini 4 Neon（AI Pro 及以上支持至 xhigh）",
           "subgroups": [
             {
               "label": "深度架构与均衡编码",
-              "models": ["gemini-4-carbon", "gemini-4-argon"]
+              "models": ["gemini-4-neon", "gemini-4-carbon", "gemini-4-argon"]
             },
             {
               "label": "高通量与 xhigh 长思维",
@@ -148,7 +150,7 @@
             },
             {
               "label": "Antigravity 自动编排器（免填档位）",
-              "models": ["orchestrator (carbon)", "orchestrator (argon)"]
+              "models": ["orchestrator (neon)", "orchestrator (carbon)", "orchestrator (argon)"]
             }
           ]
         },
@@ -194,6 +196,23 @@
         }
       ],
       "models": {
+        "gemini-4-neon": {
+          "label": "Gemini 4 Neon",
+          "group": "gemini-4",
+          "subgroup": "深度架构与均衡编码",
+          "context": "1M",
+          "tier_min": 1,
+          "plan_badge": "AI Pro · Ultra · API",
+          "allowed": ["low", "medium", "high", "xhigh"],
+          "default": "high",
+          "supports_effort": true,
+          "note": "Google 最新主力多模态推理模型（Google AI Pro 及以上可用），支持 low ~ xhigh 四档深度思考"
+        },
+        "gemini-4-neon*": {
+          "allowed": ["low", "medium", "high", "xhigh"],
+          "default": "high",
+          "supports_effort": true
+        },
         "gemini-4-carbon": {
           "label": "Gemini 4 Carbon",
           "group": "gemini-4",
@@ -228,12 +247,24 @@
           "allowed": ["low", "medium", "high", "xhigh"],
           "default": "xhigh",
           "supports_effort": true,
-          "note": "全订阅开放的高性价比主力模型，独家支持 xhigh 深度思维档"
+          "note": "全订阅开放的高性价比主力模型，支持 xhigh 深度思维档"
         },
         "gemini-4-hydrogen*": {
           "allowed": ["low", "medium", "high", "xhigh"],
           "default": "xhigh",
           "supports_effort": true
+        },
+        "orchestrator (neon)": {
+          "label": "Orchestrator (Neon)",
+          "group": "gemini-4",
+          "subgroup": "Antigravity 自动编排器（免填档位）",
+          "context": "1M",
+          "tier_min": 1,
+          "plan_badge": "AI Pro · Ultra",
+          "allowed": [],
+          "default": "",
+          "supports_effort": false,
+          "note": "Antigravity Neon 多步自动编排器，Google AI Pro 及以上可用（无需传 --effort）"
         },
         "orchestrator (carbon)": {
           "label": "Orchestrator (Carbon)",

@@ -810,7 +810,7 @@ class AsyncHTTPServer:
                 if not topic:
                     await self._send_json(writer, 400, {"error": "议题内容不能为空"})
                     return
-                ref_errs = self.orchestrator.validate_message_file_references(sess, topic)
+                ref_errs = await asyncio.to_thread(self.orchestrator.validate_message_file_references, sess, topic)
                 if ref_errs:
                     await self._send_json(
                         writer,
@@ -859,7 +859,7 @@ class AsyncHTTPServer:
                 if not msg:
                     await self._send_json(writer, 400, {"error": "发言内容不能为空"})
                     return
-                ref_errs = self.orchestrator.validate_message_file_references(sess, msg)
+                ref_errs = await asyncio.to_thread(self.orchestrator.validate_message_file_references, sess, msg)
                 if ref_errs:
                     await self._send_json(
                         writer,

@@ -2560,7 +2560,6 @@ body {
   padding: 15px 20px 16px;
   border-radius: 14px;
   background: var(--bg-panel-solid);
-  backdrop-filter: blur(16px);
   border: 1px solid var(--border-glass);
   display: flex;
   flex-direction: column;
@@ -5208,11 +5207,12 @@ body {
   }
 }
 
-/* 发言卡角色主题强调色映射 */
+/* 发言卡角色主题强调色映射（启用子树样式/布局/绘制隔离，避免指针滑过长卡片触发跨节点重排） */
 .msg-card {
   --seat-accent: var(--accent-primary);
   position: relative;
   overflow: hidden;
+  contain: layout style paint;
 }
 .msg-card.speaker-carbon { --seat-accent: var(--carbon-color); }
 .msg-card.speaker-grok { --seat-accent: var(--grok-color); }

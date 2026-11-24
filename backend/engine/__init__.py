@@ -12,6 +12,7 @@ import os
 import shlex
 import time
 from typing import Dict, Optional
+from ..project_edits import protect_project_command
 
 from ..drivers.process_watchdog import (
     sanitize_subprocess_env,
@@ -26,6 +27,7 @@ async def run_post_execution_verification(
     workspace_realpath: str,
     env: Dict[str, str],
     timeout_sec: float = 60.0,
+    protect_project: bool = False,
 ) -> dict:
     """在独立受监管进程组中以非 Shell 参数数组（shell=False）执行只读后置验证命令并返回结构化核验报告。"""
     cleaned = str(verify_cmd or "").strip()
@@ -74,7 +76,7 @@ async def run_post_execution_verification(
     handle = None
     try:
         handle = await spawn_supervised_cli(
-            argv,
+            protect_project_command(argv, locked_cwd) if protect_project else argv,
             cwd=locked_cwd,
             env=sanitized_env,
             stdin=asyncio.subprocess.DEVNULL,

@@ -147,6 +147,11 @@ async def run_local_benchmark(orch: RoundtableOrchestrator) -> None:
             sess = orch.create_session(title=f"压测-{mode_key}", collab_mode=mode_key)
             if mode_key == "arch_to_exec":
                 assert sess.collab_mode == "rapid_consensus" and sess.auto_preview_exec is True, "arch_to_exec 兼容归一化失败"
+                sess.artifact_type = "code_patch"
+                await orch.update_whiteboard_manual(sess, {"op": "add", "kind": "action", "text": "预置勾选执行基准项"})
+                for it in sess.whiteboard.get("items", []):
+                    if it.get("kind") == "action":
+                        await orch.update_whiteboard_manual(sess, {"op": "toggle_check", "item_id": it["id"], "checked": True})
 
             t0 = time.perf_counter()
             await orch.start_topic_meeting(sess, "全链路编排拓扑基准测试议题", collab_mode=mode_key)
@@ -235,7 +240,7 @@ async def run_local_benchmark(orch: RoundtableOrchestrator) -> None:
         wb_sess = orch.create_session(title="白板操作验证", collab_mode="deep_deliberation")
         wb_sess.whiteboard = migrated_wb_1
         risk_item = next(it for it in wb_sess.whiteboard["items"] if it["kind"] == "risk")
-        await orch.update_whiteboard_manual(wb_sess, {"op": "adopt_decision", "item_id": risk_item["id"]})
+        await orch.update_whiteboard_manual(wb_sess, {"op": "adopt_decision", "item_id": risk_item["id"], "as_chair_directive": True})
         adopted_item = next(it for it in wb_sess.whiteboard["items"] if it["id"] == risk_item["id"])
         assert adopted_item["kind"] == "decision", "采纳为共识未将 risk 移入 decision"
 
@@ -253,8 +258,12 @@ async def run_local_benchmark(orch: RoundtableOrchestrator) -> None:
         await orch.delete_session(wb_sess.session_id)
         print("[3-zone whiteboard   ] 历史迁移确定性 ID + 噪音黑名单 + 采纳共识 + 勾选过滤 + 乐观锁断言通过")
 
-        # 5. 验证 v2 修复项：normalize_model_effort(strict=True)、僵尸「思考中」卡片自愈、自定义成员名称与单引擎并发加速
+        # 5. 验证 v2 修复项与 Gemini 4 Neon 升级：normalize_model_effort(strict=True)、僵尸「思考中」卡片自愈、自定义成员名称与单引擎并发加速
         assert normalize_model_effort("agy", model="gemini-4-carbon", effort="max", strict=True) == "high"
+        assert normalize_model_effort("agy", model="gemini-4-neon", effort="xhigh", strict=True) == "xhigh"
+        assert normalize_model_effort("agy", model="gemini-4-neon", effort="max", strict=True) == "xhigh"
+        assert normalize_model_effort("agy", model="gemini-4-neon", effort="", strict=True) == "high"
+        assert normalize_model_effort("agy", model="orchestrator (neon)", effort="high", strict=True) == ""
         assert normalize_model_effort("codex", model="gpt-6-astra", effort="max", strict=True) == "max"
         assert set(ROSTER_NAME_PRESETS.keys()) >= {
             "role_experts",

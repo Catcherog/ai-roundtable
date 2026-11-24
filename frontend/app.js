@@ -378,9 +378,12 @@ const PACING_PRESETS = {
 
 const FALLBACK_MODEL_EFFORT_CATALOG = {
   agy: {
+    "gemini-4-neon": { allowed: ["low", "medium", "high", "xhigh"], default: "high", supports_effort: true },
+    "gemini-4-neon*": { allowed: ["low", "medium", "high", "xhigh"], default: "high", supports_effort: true },
     "gemini-4-carbon": { allowed: ["low", "medium", "high"], default: "high", supports_effort: true },
     "gemini-4-argon": { allowed: ["low", "medium", "high"], default: "high", supports_effort: true },
     "gemini-4-hydrogen": { allowed: ["low", "medium", "high", "xhigh"], default: "xhigh", supports_effort: true },
+    "orchestrator (neon)": { allowed: [], default: "", supports_effort: false },
     "orchestrator (carbon)": { allowed: [], default: "", supports_effort: false },
     "orchestrator (argon)": { allowed: [], default: "", supports_effort: false },
     "*": { allowed: ["low", "medium", "high"], default: "high", supports_effort: true },
@@ -6657,6 +6660,7 @@ function applySessionSnapshot(snap, options = {}) {
   const prevScrolledUp = state.userScrolledUp;
 
   const isDifferentSession = snap.session_id !== state.currentSessionId;
+  const loadingDraft = isDifferentSession || state.snapshotLoading;
   if (isDifferentSession) {
     state.userToggledRightPane = false;
     state.checkedAbsentSeats = new Set();
@@ -6714,6 +6718,13 @@ function applySessionSnapshot(snap, options = {}) {
   syncCollabModeUI(state.collabMode, state.autoPreviewExec);
 
   const msgs = Array.isArray(snap.messages) ? snap.messages : [];
+  if (loadingDraft && !msgs.length && state.stage === "idle" &&
+      Array.isArray(snap.available_attachments) && !state.pendingAttachments.length) {
+    state.pendingAttachments = snap.available_attachments.map((attachment) => ({
+      ...attachment, sessionId: snap.session_id, uploading: false,
+    }));
+    renderPendingAttachmentTray();
+  }
   if (isSameSessionReconnect) {
     const incomingIds = new Set(msgs.map((m) => m.id));
     for (const oldId of Array.from(state.messages.keys())) {

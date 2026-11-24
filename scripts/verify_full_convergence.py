@@ -229,6 +229,7 @@ async def run_convergence_suite() -> None:
         from backend.drivers import sanitize_subprocess_env, windows_support
         from backend.engine import run_post_execution_verification
         from backend.server import AsyncHTTPServer
+        from backend.project_edits import apply_edit_reply
         from backend.workspace_backup import (
             HONEST_ROLLBACK_DISCLOSURE,
             MAX_BACKUP_WORKSPACE_BYTES,
@@ -278,7 +279,7 @@ async def run_convergence_suite() -> None:
             tmp_root / "mock_exec_cli",
             """\
             #!/usr/bin/env python3
-            import os, sys
+            import json, os, sys
             from pathlib import Path
             args = sys.argv[1:]
             if "--version" in args:
@@ -292,6 +293,18 @@ async def run_convergence_suite() -> None:
             if leaked:
                 sys.stderr.write(f"LEAKED_ENV:{leaked}\\n")
                 sys.exit(9)
+            if "roundtable-edits" in prompt:
+                assert Path("src/中文.py").read_text() == "value = 1\\n"
+                try:
+                    Path("unapproved.txt").write_text("unexpected")
+                except PermissionError:
+                    pass
+                else:
+                    sys.exit(8)
+                print(json.dumps({"summary":"updated source and test","files":[
+                    {"path":"src/中文.py","replacements":[{"old":"value = 1","new":"value = 2"}]},
+                    {"path":"tests/nested/value.txt","create":"2\\n"}]}))
+                sys.exit(0)
             if "写入本地项目工作区" in prompt or os.environ.get("MOCK_DO_WRITE") == "1":
                 cwd = Path.cwd()
                 (cwd / "core.py").write_text("VALUE = 2\\n", encoding="utf-8")
@@ -332,7 +345,6 @@ async def run_convergence_suite() -> None:
                     is_ok, _, det = app.orchestrator.validate_safe_workspace_path_detailed(bad_p)
                     assert not is_ok and det.get("reason") == exp_reason, f"路径 {bad_p} 未按预期拦截 ({exp_reason}): {det}"
 
-            # 3.2 验证未纳入 Git 跟踪的 `output/` 大型归档自动忽略 + 超 128 MiB 绑定阶段当场拒绝并返回 largest_dirs
             untracked_out = ws_a / "output" / "archives"
             untracked_out.mkdir(parents=True, exist_ok=True)
             with open(untracked_out / "release_bundle.zip", "wb") as f_out:
@@ -344,7 +356,6 @@ async def run_convergence_suite() -> None:
             at_files = list_workspace_files(str(ws_a), query="", limit=50).get("files", [])
             assert all(not f["path"].startswith("output/") for f in at_files), f"@检索泄露了未跟踪 output/: {at_files}"
 
-            # 在受管子目录 heavy_assets/ 中构造 >128 MiB 文件，验证在绑定工作区阶段当场返回 400 + largest_dirs
             oversize_ws = tmp_root / "oversize_ws"
             (oversize_ws / "heavy_assets").mkdir(parents=True)
             with open(oversize_ws / "heavy_assets" / "weights.bin", "wb") as f_big:
@@ -360,9 +371,82 @@ async def run_convergence_suite() -> None:
                 f"/api/sessions/{sid_default}/workspace",
                 {"workspace_dir": str(oversize_ws)},
             )
-            assert st_over == 400 and d_over.get("reason") == "workspace_too_large", f"超 128MiB 未在绑定阶段拦截: {st_over} {d_over}"
-            assert any(x.get("path") == "heavy_assets" for x in d_over.get("largest_dirs", [])), f"未返回大目录清单: {d_over}"
-            ok("3. 爆炸半径硬拦截（/、$HOME、凭证目录、.app）、未跟踪 output/ 忽略与 128 MiB 前置预检")
+            assert st_over == 200 and d_over["workspace_dir"] == str(oversize_ws)
+            nested_source = oversize_ws.joinpath("alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "nested_probe.py")
+            nested_source.parent.mkdir(parents=True)
+            nested_source.write_text("VALUE = 'deep'\n", encoding="utf-8")
+            found = list_workspace_files(str(oversize_ws), query="nested_probe.py", limit=1)
+            assert found["files"][0]["path"] == nested_source.relative_to(oversize_ws).as_posix()
+            src = oversize_ws / "src" / "中文.py"
+            src.parent.mkdir()
+            src.write_bytes(b"value = 1\r\n")
+            new_file = oversize_ws / "tests" / "nested" / "value.txt"
+            if sys.platform == "darwin" and os.access("/usr/bin/sandbox-exec", os.X_OK):
+                snap = WorkspaceBackup.capture_for_execution(str(oversize_ws), runtime_home=rt_home)
+            else:
+                from backend.workspace_backup import WorkspaceAdmissionError
+                try:
+                    WorkspaceBackup.capture_for_execution(str(oversize_ws), runtime_home=rt_home)
+                except WorkspaceAdmissionError as error:
+                    assert error.reason == "scoped_write_unavailable"
+                else:
+                    raise AssertionError("A large-project executor needs a read-only process guard")
+                snap = WorkspaceBackup.capture(str(oversize_ws), runtime_home=rt_home, target_paths=[])
+            assert snap.target_paths == []
+            edit = {"path": "src/中文.py", "replacements": [{"old": "value = 1\n", "new": "value = 2\n"}]}
+            for bad_edit in ({"path": "../outside.py", "create": "x"}, {"path": "missing.py", "replacements": [{"old": "x", "new": "y"}]}):
+                try:
+                    apply_edit_reply(snap, json.dumps({"summary": "test", "files": [edit, bad_edit]}))
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError("invalid batch accepted")
+                assert src.read_bytes() == b"value = 1\r\n"
+            apply_edit_reply(snap, json.dumps({"summary": "test", "files": [edit, {"path": "tests/nested/value.txt", "create": "2\n"}]}))
+            assert src.read_bytes() == b"value = 2\r\n" and new_file.read_text() == "2\n"
+            assert snap.finish() and set(snap.changed_paths) == {"src/中文.py", "tests/nested/value.txt"}
+            restored = WorkspaceBackup.load_from_manifest(snap.manifest_path)
+            src.write_text("manual\n")
+            assert not restored.restore_with_report()[0] and new_file.exists()
+            src.write_bytes(b"value = 2\r\n")
+            unrelated = oversize_ws / "other.txt"
+            unrelated.write_text("concurrent")
+            assert restored.restore_with_report()[0]
+            assert src.read_bytes() == b"value = 1\r\n" and not new_file.exists() and unrelated.read_text() == "concurrent"
+            if sys.platform == "darwin" and os.access("/usr/bin/sandbox-exec", os.X_OK):
+                test_session = (await mem_json(app, tok, "POST", "/api/sessions", {"title": "scoped execution"}))[2]["session"]
+                scoped_api = "/api/sessions/" + test_session["session_id"]
+                bound_status, _, _ = await mem_json(app, tok, "POST", scoped_api + "/workspace", {"workspace_dir": str(oversize_ws)})
+                assert bound_status == 200
+                ready, _, _ = await mem_json(app, tok, "POST", "/api/config", {
+                    "agents": {"carbon": {"driver": "agy", "custom_binary": str(mock_cli), "model": "fixture"}},
+                })
+                assert ready == 200
+                board = (await mem_json(app, tok, "POST", scoped_api + "/whiteboard", {
+                    "op": "add", "kind": "action", "author": "chair", "text": "同步源码和测试",
+                }))[2]["whiteboard"]
+                target_id = next(item["id"] for item in board["items"] if item["kind"] == "action")
+                board = (await mem_json(app, tok, "POST", scoped_api + "/whiteboard", {
+                    "op": "toggle_check", "item_id": target_id, "checked": True,
+                }))[2]["whiteboard"]
+                accepted, _, details = await mem_json(app, tok, "POST", scoped_api + "/execute", {
+                    "allow_workspace_write": True, "executor_id": "carbon", "checked_action_ids": [target_id],
+                    "expected_workspace_dir": str(oversize_ws), "expected_wb_version": board["wb_version"],
+                    "acknowledged_absent_agents": [],
+                    "verify_command": f'"{sys.executable}" -c "from pathlib import Path; assert Path(\'tests/nested/value.txt\').is_file()"',
+                })
+                assert accepted == 202, details.get("error")
+                scoped_session = app.orchestrator.get_session(test_session["session_id"])
+                if scoped_session.active_task:
+                    await asyncio.wait_for(asyncio.shield(scoped_session.active_task), 20)
+                assert src.read_bytes() == b"value = 2\r\n" and new_file.read_text() == "2\n", scoped_session.whiteboard["exec_logs"]
+                assert scoped_session.last_backup.before_total_bytes == len(b"value = 1\r\n")
+                assert scoped_session.whiteboard["last_verification"]["passed"]
+                assert not (oversize_ws / "unapproved.txt").exists()
+                rollback_status, _, _ = await mem_json(app, tok, "POST", scoped_api + "/rollback", {})
+                assert rollback_status == 200 and src.read_bytes() == b"value = 1\r\n"
+                assert not new_file.exists() and unrelated.read_text() == "concurrent"
+            ok("3. 敏感目录防护、未跟踪归档忽略、大项目绑定、跨目录写入、冲突检测与重载后回滚")
 
             # ---------------- 4. 启动鉴权兑换、X-Roundtable-Boot-Id 与 reissue-bootstrap + driver_catalog ----------------
             st_b1, h_b1, d_b1 = await mem_json(app, "", "POST", "/api/auth/bootstrap", {"code": "init_code_123456"})

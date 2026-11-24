@@ -1480,10 +1480,15 @@ export function renderSeatModelAndEffortChips(seatCap) {
     });
   }
 
+  const defDrvModel = String(getCatalogRoot()?.drivers?.[drv]?.default_model || "").trim().toLowerCase();
   chipBar.innerHTML = chips
     .map((c) => {
-      const isAct =
-        c.value.toLowerCase() === curModel.toLowerCase() || (!curModel && chips[0] && c.value === chips[0].value);
+      const cLow = c.value.toLowerCase();
+      const isAct = curModel
+        ? cLow === curModel.toLowerCase()
+        : defDrvModel
+          ? cLow === defDrvModel
+          : Boolean(chips[0] && c.value === chips[0].value);
       const lockCls = c.unlocked === false ? " chip-above-tier" : "";
       const titleTxt = c.unlocked === false ? `需 ${c.requiredBadge || "高阶"} 订阅或 API` : c.value || "跟随驱动默认";
       return `<button type="button" class="v4-model-chip${isAct ? " active" : ""}${lockCls}" data-chip-model="${escapeAttr(c.value)}" title="${escapeAttr(titleTxt)}">${escapeAttr(c.label)}</button>`;
@@ -1956,7 +1961,7 @@ function initTopicTitlePopover() {
 
 const MOTION_STORAGE_KEY = "ai_rt_motion";
 const SPOTLIGHT_SELECTOR =
-  ".msg-card, .seat-card, .intent-pack-card, .scenario-preset-card, .wb-card, .wb-pool-item, .workspace-card, .session-item, .cli-card, .agent-cfg-box, .rail-icon-btn, .v4-composer-dock, .compact-composer-bar, .compact-ring-summary, .stage-fold-group, .v4-cascade-trigger, .v4-glass-select-trigger, .v4-sub-tier-pill";
+  ".seat-card, .intent-pack-card, .scenario-preset-card, .wb-card, .wb-pool-item, .workspace-card, .session-item, .cli-card, .agent-cfg-box, .rail-icon-btn, .v4-composer-dock, .compact-composer-bar, .compact-ring-summary, .stage-fold-group, .v4-cascade-trigger, .v4-glass-select-trigger, .v4-sub-tier-pill";
 
 function parseCssColorToRgb(rawColor, fallback = [124, 113, 245]) {
   const s = String(rawColor || "").trim();
@@ -2974,6 +2979,17 @@ function initV5KineticStageAndSpotlight() {
 
   let pendingSpotEvent = null;
   let spotRafId = 0;
+  let cachedSpotHit = null;
+  let cachedSpotRect = null;
+  let cachedSpotTs = 0;
+
+  const invalidateSpotRectCache = () => {
+    cachedSpotHit = null;
+    cachedSpotRect = null;
+    cachedSpotTs = 0;
+  };
+  window.addEventListener("scroll", invalidateSpotRectCache, { capture: true, passive: true });
+  window.addEventListener("resize", invalidateSpotRectCache, { passive: true });
 
   const flushSpotlightUpdate = () => {
     spotRafId = 0;
@@ -2982,8 +2998,18 @@ function initV5KineticStageAndSpotlight() {
     pendingSpotEvent = null;
     if (!target || typeof target.closest !== "function") return;
     const hit = target.closest(SPOTLIGHT_SELECTOR);
-    if (!hit) return;
-    const rect = hit.getBoundingClientRect();
+    if (!hit) {
+      cachedSpotHit = null;
+      cachedSpotRect = null;
+      return;
+    }
+    const nowTs = performance.now();
+    if (hit !== cachedSpotHit || !cachedSpotRect || nowTs - cachedSpotTs > 240) {
+      cachedSpotHit = hit;
+      cachedSpotRect = hit.getBoundingClientRect();
+      cachedSpotTs = nowTs;
+    }
+    const rect = cachedSpotRect;
     if (rect.width > 0 && rect.height > 0) {
       const rx = Math.max(0, Math.min(100, ((clientX - rect.left) / rect.width) * 100));
       const ry = Math.max(0, Math.min(100, ((clientY - rect.top) / rect.height) * 100));
@@ -3009,6 +3035,14 @@ function initV5KineticStageAndSpotlight() {
       pointer.rawX = e.clientX;
       pointer.rawY = e.clientY;
       pointer.inside = true;
+
+      const targetEl = e.target && typeof e.target.closest === "function" ? e.target : null;
+      const overChatContent = Boolean(targetEl && targetEl.closest("#chatStreamInner"));
+      if (overChatContent) {
+        pointer.energy = Math.min(0.28, pointer.energy + Math.min(0.06, moveDist * 0.004));
+        return;
+      }
+
       pointer.energy = Math.min(1, pointer.energy + Math.min(0.30, moveDist * 0.015));
 
       if (!reducedMotionMql.matches && motionMode !== "calm" && moveDist > 3 && moveDist < 150) {
@@ -3032,9 +3066,11 @@ function initV5KineticStageAndSpotlight() {
         }
       }
 
-      pendingSpotEvent = { clientX: e.clientX, clientY: e.clientY, target: e.target };
-      if (!spotRafId) {
-        spotRafId = requestAnimationFrame(flushSpotlightUpdate);
+      if (targetEl) {
+        pendingSpotEvent = { clientX: e.clientX, clientY: e.clientY, target: targetEl };
+        if (!spotRafId) {
+          spotRafId = requestAnimationFrame(flushSpotlightUpdate);
+        }
       }
     },
     { passive: true }

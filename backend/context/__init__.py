@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import stat
 import threading
 import time
 from typing import Dict, List, Optional, Tuple
@@ -16,8 +17,8 @@ _LINE_COUNT_CACHE_LOCK = threading.Lock()
 # key: real_file_path -> (st_mtime_ns, st_size, line_count)
 _LINE_COUNT_CACHE: Dict[str, Tuple[int, int, int]] = {}
 
-# key: real_ws -> (monotonic_ts, scanned_entries_list)
-_WS_DIR_INDEX_CACHE: Dict[str, Tuple[float, List[dict]]] = {}
+_WS_SCAN_LOCK = threading.Lock()
+_WS_DIR_INDEX_CACHE: Dict[tuple, Tuple[float, Tuple[str, ...]]] = {}
 _WS_INDEX_TTL_SEC = 8.0
 
 
@@ -88,75 +89,85 @@ def is_untracked_output_dir(real_ws: str, rel_dir_posix: str, git_index_bytes: O
     return needle not in idx_buf
 
 
-def scan_workspace_index_cached(
-    real_ws: str,
-    ignored_dirs: set,
-    binary_exts: set,
-    *,
-    force: bool = False,
-    max_depth: int = 5,
-    max_scan: int = 2500,
-) -> List[dict]:
-    """扫描工作区文件清单并复用目录缓存与单文件 (mtime_ns, size) 行数缓存。"""
-    now = time.monotonic()
-    with _LINE_COUNT_CACHE_LOCK:
-        hit = _WS_DIR_INDEX_CACHE.get(real_ws)
-        if not force and hit and (now - hit[0]) < _WS_INDEX_TTL_SEC:
-            return list(hit[1])
-
-    git_idx_bytes = _read_git_index_bytes(real_ws)
-    collected: List[dict] = []
-    for root_d, dirs, files in os.walk(real_ws):
-        rel_dir = os.path.relpath(root_d, real_ws)
-        depth = 0 if rel_dir == "." else rel_dir.count(os.sep) + 1
-        if depth > max_depth:
-            dirs[:] = []
-            continue
-        kept_dirs: List[str] = []
-        for d in sorted(dirs):
-            if d.startswith(".") or d.endswith(".app") or d in ignored_dirs:
-                continue
-            cand_rel_posix = d if rel_dir == "." else f"{rel_dir.replace(os.sep, '/')}/{d}"
-            if d == "output" and is_untracked_output_dir(real_ws, cand_rel_posix, git_idx_bytes):
-                continue
-            kept_dirs.append(d)
-        dirs[:] = kept_dirs
-        for fname in sorted(files):
-            if fname.startswith("."):
-                continue
-            _, ext = os.path.splitext(fname)
-            if ext.lower() in binary_exts:
-                continue
-            full_p = os.path.join(root_d, fname)
-            if os.path.islink(full_p):
-                continue
+def scan_workspace_paths_cached(
+    real_ws: str, ignored_dirs: set, binary_exts: set, *,
+    force: bool = False, max_depth: Optional[int] = 5, max_scan: Optional[int] = 2500,
+) -> Tuple[str, ...]:
+    key = (real_ws, max_depth, max_scan, frozenset(ignored_dirs), frozenset(binary_exts))
+    with _WS_SCAN_LOCK:
+        hit = _WS_DIR_INDEX_CACHE.get(key)
+        ttl = 60.0 if max_scan is None else _WS_INDEX_TTL_SEC
+        if not force and hit and time.monotonic() - hit[0] < ttl:
+            return hit[1]
+        git_index = _read_git_index_bytes(real_ws)
+        paths = []
+        pending = [("", 0)]
+        while pending and (max_scan is None or len(paths) < max_scan):
+            directory, depth = pending.pop()
             try:
-                st = os.stat(full_p)
+                with os.scandir(os.path.join(real_ws, directory)) as entries:
+                    children = sorted(entries, key=lambda e: e.name)
             except OSError:
                 continue
-            rel_p = os.path.relpath(full_p, real_ws).replace(os.sep, "/")
-            entry: dict = {
-                "path": rel_p,
-                "size_kb": round(st.st_size / 1024.0, 1),
-            }
-            ln = count_file_lines_cached(full_p, st)
-            if ln is not None:
-                entry["lines"] = ln
-            collected.append(entry)
-            if len(collected) >= max_scan:
-                break
-        if len(collected) >= max_scan:
-            break
+            dirs = []
+            for entry in children:
+                name = entry.name
+                if name.startswith("."):
+                    continue
+                rel = directory + "/" + name if directory else name
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        if max_depth is not None and depth >= max_depth:
+                            continue
+                        if name in ignored_dirs or name.endswith(".app"):
+                            continue
+                        if name == "output" and is_untracked_output_dir(real_ws, rel, git_index):
+                            continue
+                        dirs.append((rel, depth + 1))
+                    elif os.path.splitext(name)[1].lower() not in binary_exts and entry.is_file(follow_symlinks=False):
+                        paths.append(rel)
+                        if max_scan is not None and len(paths) >= max_scan:
+                            break
+                except OSError:
+                    continue
+            pending.extend(reversed(dirs))
+        result = tuple(paths)
+        _WS_DIR_INDEX_CACHE.pop(key, None)
+        while len(_WS_DIR_INDEX_CACHE) >= 4:
+            del _WS_DIR_INDEX_CACHE[next(iter(_WS_DIR_INDEX_CACHE))]
+        _WS_DIR_INDEX_CACHE[key] = (time.monotonic(), result)
+        return result
 
-    with _LINE_COUNT_CACHE_LOCK:
-        _WS_DIR_INDEX_CACHE[real_ws] = (time.monotonic(), collected)
-    return list(collected)
+
+def describe_workspace_file(real_ws: str, rel: str) -> Optional[dict]:
+    full = os.path.normpath(os.path.join(real_ws, rel))
+    try:
+        if os.path.normcase(os.path.realpath(full)) != os.path.normcase(full):
+            return None
+        st = os.stat(full, follow_symlinks=False)
+        if not stat.S_ISREG(st.st_mode):
+            return None
+    except OSError:
+        return None
+    entry = {"path": rel, "size_kb": round(st.st_size / 1024.0, 1)}
+    lines = count_file_lines_cached(full, st)
+    if lines is not None:
+        entry["lines"] = lines
+    return entry
+
+
+def scan_workspace_index_cached(real_ws: str, ignored_dirs: set, binary_exts: set, **options) -> List[dict]:
+    paths = scan_workspace_paths_cached(real_ws, ignored_dirs, binary_exts, **options)
+    return [entry for rel in paths if (entry := describe_workspace_file(real_ws, rel)) is not None]
 
 
 def invalidate_workspace_index(real_ws: str = "") -> None:
-    with _LINE_COUNT_CACHE_LOCK:
+    with _WS_SCAN_LOCK:
         if real_ws:
-            _WS_DIR_INDEX_CACHE.pop(os.path.realpath(real_ws), None)
+            real = os.path.realpath(real_ws)
+            for key in list(_WS_DIR_INDEX_CACHE):
+                if key[0] == real:
+                    del _WS_DIR_INDEX_CACHE[key]
         else:
             _WS_DIR_INDEX_CACHE.clear()
 
@@ -171,4 +182,6 @@ __all__ = [
     "invalidate_workspace_index",
     "run_index_in_thread",
     "scan_workspace_index_cached",
+    "scan_workspace_paths_cached",
+    "describe_workspace_file",
 ]

@@ -73,7 +73,7 @@
 
   <!-- 隐藏原生多模态文件选择器（兼容 WKWebView NSOpenPanel 与桌面浏览器） -->
   <input type="file" id="v4HiddenImageInput" class="hidden" accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml" multiple />
-  <input type="file" id="v4HiddenFileInput" class="hidden" accept="image/*,.pdf,.md,.markdown,.txt,.log,.csv,.tsv,.json,.yaml,.yml,.toml,.xml,.py,.js,.mjs,.ts,.tsx,.jsx,.vue,.svelte,.html,.css,.scss,.m,.mm,.swift,.c,.cc,.cpp,.h,.hpp,.rs,.go,.java,.kt,.rb,.php,.sh,.sql" multiple />
+  <input type="file" id="v4HiddenFileInput" class="hidden" accept="image/*,.pdf,.xlsx,.zip,.md,.markdown,.txt,.log,.csv,.tsv,.json,.yaml,.yml,.toml,.xml,.py,.js,.mjs,.ts,.tsx,.jsx,.vue,.svelte,.html,.css,.scss,.m,.mm,.swift,.c,.cc,.cpp,.h,.hpp,.rs,.go,.java,.kt,.rb,.php,.sh,.sql" multiple />
 
   <!-- 默认启用 left-collapsed 72px 紧凑图标轨（点左上图标或按 ⌘B 展开完整侧栏） -->
   <div class="app-shell left-collapsed" id="appShell">
@@ -1272,7 +1272,7 @@
       <div class="wb-pane" id="pane-terminal">
         <div id="execGuardBanner" class="exec-guard-banner hidden" role="alert"></div>
         <div id="execWriteSafetyBanner" class="exec-write-safety-banner hidden" role="note">
-          <strong>写前安全快照护栏已就绪：</strong>写入本地工作区前将自动获取跨进程排他锁并生成字节级 CAS 快照清单（上限 128 MiB），异常中断或校验未通过支持一键原子回滚。
+          <strong>写前安全快照护栏已就绪：</strong>写入前会锁定工作区并备份。macOS 上，超过 128 MiB 的项目按本轮编辑的文件备份，支持跨目录修改和回滚。
         </div>
 
         <div class="exec-mode-box">
@@ -1378,11 +1378,13 @@
       </div>
 
       <datalist id="agyModelPresets">
+        <option value="gemini-4-neon">Gemini 4 Neon · AI Pro / Ultra / API（low ~ xhigh）</option>
         <option value="gemini-4-carbon">Gemini 4 Carbon · AI Ultra / API（low ~ high）</option>
         <option value="gemini-4-argon">Gemini 4 Argon · AI Pro / API（low ~ high）</option>
         <option value="gemini-4-hydrogen">Gemini 4 Hydrogen · Free / Plus / Pro（支持至 xhigh）</option>
         <option value="gemini-3.8-flash">Gemini 3.8 Flash · 极速推理（low ~ high）</option>
         <option value="gemini-3.6-flash">Gemini 3.6 Flash · 支持 minimal ~ high</option>
+        <option value="orchestrator (neon)">Orchestrator (Neon) · AI Pro / Ultra（自动省略 --effort）</option>
         <option value="orchestrator (carbon)">Orchestrator (Carbon) · 自动省略 --effort</option>
         <option value="orchestrator (argon)">Orchestrator (Argon) · 自动省略 --effort</option>
       </datalist>
@@ -2066,7 +2068,7 @@
                 <div><span>运行源码根路径：</span><code id="diagRuntimeCodeRoot">读取中…</code></div>
                 <div><span>会话控制面 Boot ID：</span><code id="diagBootId">读取中…</code></div>
                 <div><span>并发调用沙箱机制：</span><code id="diagIsolationSpec">独立 TMPDIR 隔离 · 进程组围栏收割</code></div>
-                <div><span>写盘安全防护基线：</span><code>非阻塞 flock + 字节级 CAS 安全快照（≤128 MiB）</code></div>
+                <div><span>写盘安全防护基线：</span><code>写入锁与字节级快照，macOS 大项目按本轮目标文件备份（≤128 MiB）</code></div>
                 <div><span>多模态附件隔离仓：</span><code>~/.ai-roundtable/attachments/</code></div>
                 <div><span>热加载驱动扩展清单：</span><code>~/.ai-roundtable/drivers.json</code></div>
               </div>

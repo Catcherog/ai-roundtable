@@ -15,6 +15,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import glob
+import heapq
 import json
 import os
 import re
@@ -32,7 +33,8 @@ from .context import (
     count_file_lines_cached,
     invalidate_workspace_index,
     run_index_in_thread,
-    scan_workspace_index_cached,
+    scan_workspace_paths_cached,
+    describe_workspace_file,
 )
 from .domain import (
     ALL_SEAT_IDS,
@@ -47,7 +49,8 @@ from .drivers import (
     spawn_supervised_cli,
     terminate_and_reap_process_group,
 )
-from .attachments import SessionAttachmentManager
+from .attachments import SessionAttachmentManager, escape_prompt_nulls
+from .project_edits import EDIT_INSTRUCTION, protect_project_command
 from .workspace_backup import WorkspaceBackup
 
 
@@ -262,6 +265,16 @@ DRIVER_SPECS: Dict[str, dict] = {
 # 按「CLI 驱动 + 模型名」维度的合法推理档位精确映射表
 MODEL_EFFORT_CAPABILITIES: Dict[str, Dict[str, dict]] = {
     "agy": {
+        "gemini-4-neon": {
+            "allowed": ["low", "medium", "high", "xhigh"],
+            "default": "high",
+            "supports_effort": True,
+        },
+        "gemini-4-neon*": {
+            "allowed": ["low", "medium", "high", "xhigh"],
+            "default": "high",
+            "supports_effort": True,
+        },
         "gemini-4-carbon": {
             "allowed": ["low", "medium", "high"],
             "default": "high",
@@ -281,6 +294,11 @@ MODEL_EFFORT_CAPABILITIES: Dict[str, Dict[str, dict]] = {
             "allowed": ["low", "medium", "high", "xhigh"],
             "default": "xhigh",
             "supports_effort": True,
+        },
+        "orchestrator (neon)": {
+            "allowed": [],
+            "default": "",
+            "supports_effort": False,
         },
         "orchestrator (carbon)": {
             "allowed": [],
@@ -355,11 +373,13 @@ MODEL_EFFORT_CAPABILITIES: Dict[str, Dict[str, dict]] = {
 }
 
 _DRIVER_EXCLUSIVE_DEFAULT_MODELS: Dict[str, str] = {
+    "gemini-4-neon": "agy",
     "gemini-4-carbon": "agy",
     "gemini-4-argon": "agy",
     "gemini-4-hydrogen": "agy",
     "gemini-pro-orchestrator": "agy",
     "gemini-pro-orchestrator-argon": "agy",
+    "orchestrator (neon)": "agy",
     "orchestrator (carbon)": "agy",
     "orchestrator (argon)": "agy",
     "grok-4.7": "grok",
@@ -496,6 +516,15 @@ _BINARY_FILE_EXTS = {
     ".mp4",
     ".mov",
     ".sqlite",
+    ".sqlite3",
+    ".safetensors",
+    ".gguf",
+    ".ckpt",
+    ".pt",
+    ".pth",
+    ".npy",
+    ".npz",
+    ".parquet",
     ".db",
 }
 
@@ -809,38 +838,38 @@ def list_workspace_files(workspace_dir: str, query: str = "", limit: int = 200) 
 
     q_low = (query or "").strip().lower().lstrip("@")
     cap = max(1, min(int(limit or 200), 400))
-    all_items = scan_workspace_index_cached(
-        real_ws,
-        _IGNORED_PROJECT_DIRS,
-        _BINARY_FILE_EXTS,
-        max_depth=5,
-        max_scan=2500,
+    paths = scan_workspace_paths_cached(
+        real_ws, _IGNORED_PROJECT_DIRS, _BINARY_FILE_EXTS,
+        max_depth=None if q_low else 5,
+        max_scan=None if q_low else 2500,
     )
-
-    total_count = len(all_items)
     if q_low:
-        scored: List[Tuple[int, str, dict]] = []
-        for item in all_items:
-            p_low = item["path"].lower()
-            base_low = os.path.basename(p_low)
-            if base_low.startswith(q_low):
-                scored.append((0, p_low, item))
-            elif q_low in base_low:
-                scored.append((1, p_low, item))
-            elif q_low in p_low:
-                scored.append((2, p_low, item))
-        scored.sort(key=lambda x: (x[0], len(x[1]), x[1]))
-        matched = [x[2] for x in scored[:cap]]
+        def matches():
+            for path in paths:
+                lower = path.lower()
+                if q_low in lower:
+                    name = lower.rsplit("/", 1)[-1]
+                    if lower == q_low or name == q_low:
+                        rank = 0
+                    elif name.startswith(q_low):
+                        rank = 1
+                    elif q_low in name:
+                        rank = 2
+                    else:
+                        rank = 3
+                    yield rank, len(lower), lower, path
+        matched = [match[-1] for match in heapq.nsmallest(cap, matches())]
     else:
-        matched = all_items[:cap]
+        matched = paths[:cap]
+    files = [entry for rel in matched if (entry := describe_workspace_file(real_ws, rel)) is not None]
 
     return {
         "ok": True,
         "bound": True,
         "is_git": is_git_workspace(real_ws),
         "workspace_dir": real_ws,
-        "files": matched,
-        "total": total_count,
+        "files": files,
+        "total": len(paths),
     }
 
 
@@ -974,6 +1003,29 @@ def build_file_outline_skeleton(rel_path: str, all_lines: List[str]) -> str:
     return skeleton[:8000]
 
 
+def _read_source_window(stream, first: int, last: int, budget: int) -> Tuple[List[str], int]:
+    """Read a line range with bounded memory even when one training record spans gigabytes."""
+    lines = []
+    number = 1
+    seen = 0
+    at_line_start = True
+    while number <= last and budget > 0:
+        part = stream.readline(65536)
+        if not part:
+            break
+        seen = number
+        if number >= first:
+            if at_line_start:
+                lines.append("")
+            piece = part.removesuffix("\n")[:budget]
+            lines[-1] += piece
+            budget -= len(piece) + int(at_line_start)
+        at_line_start = part.endswith("\n")
+        if at_line_start:
+            number += 1
+    return lines, seen
+
+
 def validate_referenced_files_snapshot(
     workspace_dir: str,
     reference_texts: str,
@@ -1010,16 +1062,16 @@ def validate_referenced_files_snapshot(
         if not os.path.isfile(cand_path):
             errors.append(f"{raw_tok}（工作区内未找到该文件，请核对相对路径）")
             continue
+        if os.path.splitext(cand_path)[1].lower() in _BINARY_FILE_EXTS:
+            errors.append(f"{raw_tok}（源码引用需要文本文件）")
+            continue
         try:
             with open(cand_path, "r", encoding="utf-8", errors="replace") as rf:
-                all_lines = rf.read().splitlines()
-            total_lines = len(all_lines)
-            if start_s:
-                s_ln = int(start_s)
-                e_ln = int(end_s) if end_s else s_ln
-                lo_ln = min(s_ln, e_ln)
-                if total_lines == 0 or lo_ln > total_lines:
-                    errors.append(f"{raw_tok}（文件共 {total_lines} 行，起始行 L{lo_ln} 超出范围）")
+                if start_s:
+                    lo_ln = max(1, min(int(start_s), int(end_s or start_s)))
+                    _, seen = _read_source_window(rf, lo_ln, lo_ln, 1)
+                    if lo_ln > seen:
+                        errors.append(f"{raw_tok}（文件共 {seen} 行，起始行 L{lo_ln} 超出范围）")
         except Exception as exc:
             errors.append(f"{raw_tok}（读取快照失败：{exc}）")
     return errors
@@ -1062,14 +1114,27 @@ def extract_referenced_files_context(
             continue
 
         try:
-            with open(cand_path, "r", encoding="utf-8", errors="replace") as rf:
-                all_lines = rf.read().splitlines()
-            total_lines = len(all_lines)
-            if total_lines == 0:
-                continue
-
             ext = os.path.splitext(rel_raw)[1].lstrip(".")
-            if start_s:
+            if "." + ext.lower() in _BINARY_FILE_EXTS:
+                continue
+            streamed = os.path.getsize(cand_path) > 8 * 1024 * 1024
+            with open(cand_path, "r", encoding="utf-8", errors="replace") as rf:
+                if streamed:
+                    first = max(1, int(start_s or 1))
+                    last = max(1, int(end_s)) if end_s else first + max_lines_per_file - 1
+                    first, last = sorted((first, last))
+                    all_lines, _ = _read_source_window(rf, first, last, eff_file_cap)
+                else:
+                    all_lines = rf.read().splitlines()
+
+            total_lines = len(all_lines)
+            if not all_lines:
+                continue
+            if streamed:
+                body_txt = "\n".join(f"L{i}: {line}" for i, line in enumerate(all_lines, first))
+                block = (f"【引用源码 @{rel_raw}（大文件节选 L{first}–L{first + total_lines - 1}，可指定其他行号）】\n"
+                         f"```{ext}\n{body_txt[:eff_file_cap]}\n```")
+            elif start_s:
                 s_ln = max(1, int(start_s))
                 if end_s:
                     e_ln = int(end_s)
@@ -1195,7 +1260,7 @@ def build_workspace_context_snapshot(
     tree_lines: List[str] = []
     for name in visible_top[:80]:
         full = os.path.join(real_ws, name)
-        if os.path.isdir(full):
+        if os.path.isdir(full) and not os.path.islink(full):
             tree_lines.append(f"  - {name}/")
             try:
                 sub_entries = [
@@ -1205,7 +1270,7 @@ def build_workspace_context_snapshot(
                 ]
                 for sub_name in sub_entries[:35]:
                     sub_full = os.path.join(full, sub_name)
-                    if os.path.isdir(sub_full):
+                    if os.path.isdir(sub_full) and not os.path.islink(sub_full):
                         try:
                             leaf_entries = [
                                 lf
@@ -1243,10 +1308,10 @@ def build_workspace_context_snapshot(
     )
     for mf in manifest_candidates:
         mf_path = os.path.join(real_ws, mf)
-        if os.path.isfile(mf_path):
+        if os.path.isfile(mf_path) and not os.path.islink(mf_path):
             try:
                 with open(mf_path, "r", encoding="utf-8", errors="replace") as f:
-                    head_lines = [ln.rstrip() for _, ln in zip(range(90), f)]
+                    head_lines, _ = _read_source_window(f, 1, 90, 3600)
                 snippet = "\n".join(head_lines).strip()[:3600]
                 if snippet:
                     manifest_snippets.append(f"[{mf} 关键内容]:\n{snippet}")
@@ -1328,6 +1393,8 @@ def get_model_effort_spec(driver_key: str, model: str = "", help_text: str = "")
         matched_spec = drv_table[m_low]
     elif drv == "agy" and "orchestrator" in m_low:
         matched_spec = drv_table["orchestrator (carbon)"]
+    elif drv == "agy" and "neon" in m_low:
+        matched_spec = drv_table["gemini-4-neon"]
     elif drv == "agy" and "hydrogen" in m_low:
         matched_spec = drv_table["gemini-4-hydrogen"]
     else:
@@ -2702,8 +2769,12 @@ class UnifiedAgentRunner:
                 _add(eff_model, step_down)
 
         default_m = DRIVER_SPECS.get(driver_key, DRIVER_SPECS["agy"])["default_model"]
-        if eff_model == default_m and driver_key == "agy":
-            _add("gemini-4-argon", normalize_model_effort("agy", model="gemini-4-argon", effort=norm_e or "high", help_text=help_text))
+        if driver_key == "agy":
+            if eff_model == default_m:
+                _add("gemini-4-neon", normalize_model_effort("agy", model="gemini-4-neon", effort=norm_e or "high", help_text=help_text))
+                _add("gemini-4-argon", normalize_model_effort("agy", model="gemini-4-argon", effort=norm_e or "high", help_text=help_text))
+            elif eff_model == "gemini-4-neon":
+                _add("gemini-4-argon", normalize_model_effort("agy", model="gemini-4-argon", effort=norm_e or "high", help_text=help_text))
         elif eff_model == default_m and driver_key == "codex":
             _add("gpt-6.1-sol", normalize_model_effort("codex", model="gpt-6.1-sol", effort=norm_e or "xhigh", help_text=help_text))
 
@@ -3623,7 +3694,8 @@ class UnifiedAgentRunner:
                 + (whiteboard.get("chair_constraints") or [])[-3:]
                 + [m["content"] for m in msgs_for_prompt]
             )
-            extra_ref_block, newly_loaded_refs = extract_referenced_files_context(
+            extra_ref_block, newly_loaded_refs = await run_index_in_thread(
+                extract_referenced_files_context,
                 eff_ws,
                 inc_corpus,
                 max_total_chars=ref_budget,
@@ -3639,7 +3711,8 @@ class UnifiedAgentRunner:
                 + (whiteboard.get("chair_constraints") or [])[-3:]
                 + [m["content"] for m in msgs_for_prompt]
             )
-            extra_ref_block, newly_loaded_refs = extract_referenced_files_context(
+            extra_ref_block, newly_loaded_refs = await run_index_in_thread(
+                extract_referenced_files_context,
                 eff_ws,
                 inc_corpus,
                 max_total_chars=ref_budget,
@@ -3654,7 +3727,8 @@ class UnifiedAgentRunner:
                 + (whiteboard.get("chair_constraints") or [])
                 + [m["content"] for m in recent_messages[-24:]]
             )
-            full_ref_block, newly_loaded_refs = extract_referenced_files_context(
+            full_ref_block, newly_loaded_refs = await run_index_in_thread(
+                extract_referenced_files_context,
                 eff_ws,
                 ref_corpus,
                 max_total_chars=ref_budget,
@@ -3664,7 +3738,8 @@ class UnifiedAgentRunner:
                 and not full_ref_block
                 and not bool(_CODE_TOPIC_HINT_RE.search(f"{topic}\n{cue_instruction}"))
             )
-            ws_snapshot = build_workspace_context_snapshot(
+            ws_snapshot = await run_index_in_thread(
+                build_workspace_context_snapshot,
                 eff_ws,
                 reference_texts=ref_corpus,
                 prebuilt_ref_block=full_ref_block,
@@ -3953,6 +4028,7 @@ class UnifiedAgentRunner:
         discuss_readonly: bool = True,
         session_attachments: Optional[List[dict]] = None,
     ) -> AsyncGenerator[dict, None]:
+        prompt = escape_prompt_nulls(prompt)
         cwd = cwd_override if (cwd_override and os.path.isdir(cwd_override)) else self._effective_workspace_cwd()
         seat_key = (session_id, agent_id)
         att_mgr = self._get_attachment_manager() if session_attachments else None
@@ -4589,6 +4665,7 @@ class UnifiedAgentRunner:
         persona_key: str = "",
         session_id: str = "",
         on_pgid_spawned=None,
+        file_edits: bool = False,
     ) -> AsyncGenerator[dict, None]:
         """
         多席位动态主刀实时流式执行引擎：
@@ -4599,6 +4676,8 @@ class UnifiedAgentRunner:
         cfg, bpath, help_text, eff_drv, is_fb = self._require_binary(target_aid)
         pspec = get_persona_spec(persona_key or cfg.persona, fallback_agent_id=target_aid)
         cwd = self._effective_workspace_cwd(session_workspace)
+        if file_edits:
+            allow_workspace_write = False
 
         raw_wb_items = whiteboard.get("items")
         chair_c_list = [str(x).strip() for x in (whiteboard.get("chair_constraints") or []) if str(x).strip()]
@@ -4678,7 +4757,9 @@ class UnifiedAgentRunner:
         )
         risks_block = "\n".join(risk_pts) if risk_pts else "- 注意边界输入、并发竞争与异常回退保护"
 
-        if allow_workspace_write:
+        if file_edits:
+            mode_instruction = EDIT_INSTRUCTION
+        elif allow_workspace_write:
             mode_instruction = "（当前已授权写入本地项目工作区：请严格围绕已确认共识与已勾选任务直接修改或创建目标项目文件，并运行必要的语法/单测校验，完成后总结改动清单与验证结果）"
         elif has_real_project:
             mode_instruction = "（当前为只读安全预演模式：请勿改动磁盘文件，严格围绕已确认共识与已勾选任务输出完整详尽的实施方案与关键 Unified Diff 代码补丁预览）"
@@ -4692,7 +4773,7 @@ class UnifiedAgentRunner:
             else ""
         )
 
-        exec_prompt = (
+        exec_prompt = escape_prompt_nulls(
             f"你是本次会议指定的执行席位 {cfg.name}（当前角色职责：{pspec['label']}）。"
             f"请严格以「全部已确认共识与约束」+「已勾选的待执行任务项」为核心执行范围完成交付{mode_instruction}：\n"
             f"【议题】：{topic}\n"
@@ -4798,7 +4879,7 @@ class UnifiedAgentRunner:
                         cmd = list(cmd)
                         cmd[2] = f"{att_b}\n\n{exec_prompt}"
                 sup_handle = await spawn_supervised_cli(
-                    cmd,
+                    protect_project_command(cmd, cwd) if file_edits else cmd,
                     cwd=cwd,
                     env=exec_env,
                     stdin=asyncio.subprocess.DEVNULL,
@@ -4855,7 +4936,8 @@ class UnifiedAgentRunner:
                                     if not collected and res.get("response"):
                                         collected.append(res["response"])
                                         yield {"type": "exec_delta", "text": res["response"]}
-                                continue
+                                if "event" in evt or not file_edits:
+                                    continue
                             except json.JSONDecodeError:
                                 pass
                         elif eff_drv == "claude" and stripped_s.startswith("{"):
@@ -4886,7 +4968,8 @@ class UnifiedAgentRunner:
                                         r_txt = str(evt["result"])
                                         collected.append(r_txt)
                                         yield {"type": "exec_delta", "text": r_txt}
-                                continue
+                                if "type" in evt or not file_edits:
+                                    continue
                             except json.JSONDecodeError:
                                 pass
                         elif eff_drv == "grok" and stripped_s.startswith("{"):
@@ -4906,7 +4989,8 @@ class UnifiedAgentRunner:
                                     stream_err = str(evt.get("message") or evt.get("error") or stream_err)
                                 elif gtype == "end" and evt.get("error"):
                                     stream_err = str(evt["error"])
-                                continue
+                                if "type" in evt or not file_edits:
+                                    continue
                             except json.JSONDecodeError:
                                 pass
                         chunk_line = line_s + "\n"
@@ -4974,7 +5058,7 @@ class UnifiedAgentRunner:
                         cmd.extend(["--image", img_p])
                     cmd.append("-")
             sup_handle = await spawn_supervised_cli(
-                cmd,
+                protect_project_command(cmd, cwd) if file_edits else cmd,
                 cwd=cwd,
                 env=exec_env,
                 stdin=asyncio.subprocess.PIPE,

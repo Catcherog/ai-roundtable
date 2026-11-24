@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
 import mimetypes
 import os
@@ -24,6 +25,7 @@ import struct
 import threading
 import time
 import uuid
+import zipfile
 import zlib
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -52,6 +54,8 @@ CODE_EXTENSIONS = {
 DOC_TEXT_EXTENSIONS = {
     ".md", ".markdown", ".txt", ".log", ".csv", ".tsv", ".rst", ".env", ".gitignore",
 }
+
+ZIP_ATTACHMENT_EXTENSIONS = {".xlsx", ".zip"}
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{2,64}$")
 _SAFE_NAME_CLEAN_RE = re.compile(r"[^A-Za-z0-9_\u4e00-\u9fa5.-]+")
@@ -161,12 +165,24 @@ def _extract_pdf_text_fallback(data: bytes, max_chars: int = 24000) -> str:
     return joined[:max_chars]
 
 
+def escape_prompt_nulls(text: str) -> str:
+    return text.replace("\x00", r"\x00")
+
+
+def _is_zip_attachment(ext: str, data: bytes) -> bool:
+    return (
+        ext in ZIP_ATTACHMENT_EXTENSIONS
+        and data.startswith((b"PK\x03\x04", b"PK\x05\x06"))
+        and zipfile.is_zipfile(io.BytesIO(data))
+    )
+
+
 def _decode_safe_text_bytes(data: bytes) -> Tuple[bool, str]:
     if not data:
         return True, ""
     if data.startswith((b"\xff\xfe", b"\xfe\xff")):
         try:
-            return True, data.decode("utf-16")
+            return True, escape_prompt_nulls(data.decode("utf-16"))
         except Exception:
             return False, ""
     if data.startswith(b"\xef\xbb\xbf"):
@@ -174,7 +190,7 @@ def _decode_safe_text_bytes(data: bytes) -> Tuple[bool, str]:
     null_count = data.count(b"\x00")
     if null_count > 0 and (null_count / max(1, len(data))) > 0.01:
         return False, ""
-    return True, data.decode("utf-8", errors="replace")
+    return True, escape_prompt_nulls(data.decode("utf-8", errors="replace"))
 
 
 def format_byte_size(num_bytes: int) -> str:
@@ -222,19 +238,22 @@ class SessionAttachmentManager:
 
     @staticmethod
     def public_meta(entry: dict) -> dict:
+        ext = str(entry.get("ext") or "")
+        excerpt = str(entry.get("excerpt") or "")
+        legacy_zip_excerpt = ext in ZIP_ATTACHMENT_EXTENSIONS and excerpt.startswith(("PK\x03\x04", "PK\x05\x06"))
         return {
             "id": str(entry.get("id") or ""),
             "name": str(entry.get("name") or ""),
             "kind": str(entry.get("kind") or "doc"),
             "mime_type": str(entry.get("mime_type") or "application/octet-stream"),
-            "ext": str(entry.get("ext") or ""),
+            "ext": ext,
             "size_bytes": int(entry.get("size_bytes") or 0),
             "size_human": format_byte_size(int(entry.get("size_bytes") or 0)),
             "sha256": str(entry.get("sha256") or ""),
             "width": int(entry.get("width") or 0),
             "height": int(entry.get("height") or 0),
-            "line_count": int(entry.get("line_count") or 0),
-            "excerpt": str(entry.get("excerpt") or ""),
+            "line_count": 0 if legacy_zip_excerpt else int(entry.get("line_count") or 0),
+            "excerpt": "" if legacy_zip_excerpt else escape_prompt_nulls(excerpt),
             "created_at": str(entry.get("created_at") or ""),
         }
 
@@ -333,8 +352,13 @@ class SessionAttachmentManager:
             mime_type = "application/pdf"
             ext = ".pdf"
             pdf_txt = _extract_pdf_text_fallback(raw_bytes, max_chars=2400)
-            excerpt = pdf_txt[:600]
+            excerpt = escape_prompt_nulls(pdf_txt)[:600]
             line_count = len(pdf_txt.splitlines()) if pdf_txt else 0
+        elif _is_zip_attachment(orig_ext, raw_bytes):
+            safe_name = sanitize_attachment_filename(filename, fallback_ext=orig_ext)
+            kind = "doc"
+            ext = orig_ext
+            mime_type = mimetypes.guess_type(safe_name)[0] or "application/zip"
         else:
             ok_txt, decoded_txt = _decode_safe_text_bytes(raw_bytes)
             if not ok_txt:
@@ -514,10 +538,19 @@ class SessionAttachmentManager:
                 )
                 continue
 
+            if _is_zip_attachment(f".{ext}", raw_data):
+                label = "Excel 工作簿" if ext == "xlsx" else "ZIP 压缩包"
+                blocks.append(
+                    f"【{label}附件 #{idx}：{safe_name}（{size_h}）】\n"
+                    f"- 本地只读路径：`{dst_path}`\n"
+                    "- 此附件不直接内嵌文本，请按需使用对应的文件读取工具；无法读取时请明确说明。"
+                )
+                continue
+
             if rec.get("mime_type") == "application/pdf" or ext == "pdf":
                 pdf_text = _extract_pdf_text_fallback(raw_data, max_chars=min(12000, max(2000, max_text_budget - used_chars)))
                 snippet_note = (
-                    f"```text\n{pdf_text}\n```"
+                    f"```text\n{escape_prompt_nulls(pdf_text)}\n```"
                     if pdf_text
                     else "（PDF 内嵌扫描图或压缩流，必要时可直接按本地只读路径检查文件）"
                 )

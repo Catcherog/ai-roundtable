@@ -7,6 +7,18 @@
    4. 灵动曲线、呼吸跳动与指针感应追光（--spot-x / --spot-y）：合成器级 60fps 顺滑反馈，流式输出卡片严格防抖，100% 遵循 prefers-reduced-motion。
    ========================================================================== */
 
+@property --spot-x {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 50%;
+}
+
+@property --spot-y {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 50%;
+}
+
 /* ==================== 0. 浅色晶透 & 深色星曜 × 四大氛围色系（8 套完整多层级令牌） ==================== */
 
 html:not([data-theme="dark"])[data-palette="pearl"],
@@ -48,7 +60,7 @@ html:not([data-theme="dark"]):not([data-palette]) {
     radial-gradient(520px 130px at 50% 100%, rgba(99, 102, 241, 0.095), transparent 74%),
     linear-gradient(165deg, rgba(253, 252, 255, 0.90) 0%, rgba(244, 241, 253, 0.84) 100%);
   --msg-surface-grad:
-    linear-gradient(158deg, rgba(254, 253, 255, 0.84) 0%, rgba(245, 243, 253, 0.76) 56%, rgba(240, 244, 253, 0.80) 100%);
+    linear-gradient(158deg, rgba(254, 253, 255, 0.96) 0%, rgba(246, 244, 254, 0.93) 56%, rgba(242, 245, 254, 0.95) 100%);
   --wb-deck-bg:
     radial-gradient(380px 240px at 100% 0%, rgba(124, 113, 245, 0.10), transparent 72%),
     linear-gradient(180deg, rgba(243, 241, 252, 0.80) 0%, rgba(249, 248, 255, 0.74) 100%);
@@ -90,7 +102,7 @@ html:not([data-theme="dark"])[data-palette="alabaster"] {
     radial-gradient(520px 130px at 50% 100%, rgba(180, 83, 9, 0.085), transparent 74%),
     linear-gradient(165deg, rgba(255, 253, 248, 0.91) 0%, rgba(248, 241, 229, 0.85) 100%);
   --msg-surface-grad:
-    linear-gradient(158deg, rgba(255, 253, 249, 0.91) 0%, rgba(249, 242, 231, 0.84) 100%);
+    linear-gradient(158deg, rgba(255, 253, 249, 0.96) 0%, rgba(250, 244, 234, 0.93) 100%);
   --wb-deck-bg:
     linear-gradient(180deg, rgba(248, 241, 229, 0.82) 0%, rgba(254, 250, 243, 0.76) 100%);
   --wb-item-surface: linear-gradient(145deg, rgba(255, 253, 248, 0.86) 0%, rgba(249, 242, 231, 0.78) 100%);
@@ -123,7 +135,7 @@ html:not([data-theme="dark"])[data-palette="glacier"] {
     radial-gradient(520px 130px at 50% 100%, rgba(37, 99, 235, 0.088), transparent 74%),
     linear-gradient(165deg, rgba(252, 254, 255, 0.91) 0%, rgba(240, 247, 255, 0.85) 100%);
   --msg-surface-grad:
-    linear-gradient(158deg, rgba(253, 255, 255, 0.91) 0%, rgba(240, 248, 255, 0.84) 100%);
+    linear-gradient(158deg, rgba(253, 255, 255, 0.96) 0%, rgba(242, 249, 255, 0.93) 100%);
   --wb-deck-bg:
     linear-gradient(180deg, rgba(237, 245, 254, 0.82) 0%, rgba(248, 252, 255, 0.76) 100%);
   --wb-item-surface: linear-gradient(145deg, rgba(255, 255, 255, 0.86) 0%, rgba(241, 248, 255, 0.78) 100%);
@@ -156,7 +168,7 @@ html:not([data-theme="dark"])[data-palette="sage"] {
     radial-gradient(520px 130px at 50% 100%, rgba(13, 138, 99, 0.085), transparent 74%),
     linear-gradient(165deg, rgba(252, 255, 253, 0.91) 0%, rgba(240, 248, 244, 0.85) 100%);
   --msg-surface-grad:
-    linear-gradient(158deg, rgba(253, 255, 254, 0.91) 0%, rgba(240, 248, 244, 0.84) 100%);
+    linear-gradient(158deg, rgba(253, 255, 254, 0.96) 0%, rgba(242, 249, 245, 0.93) 100%);
   --wb-deck-bg:
     linear-gradient(180deg, rgba(237, 246, 241, 0.82) 0%, rgba(248, 253, 250, 0.76) 100%);
   --wb-item-surface: linear-gradient(145deg, rgba(255, 255, 255, 0.86) 0%, rgba(241, 249, 245, 0.78) 100%);
@@ -234,7 +246,7 @@ html:not([data-theme="dark"])[data-palette="sage"] {
     radial-gradient(540px 140px at 50% 100%, rgba(139, 124, 255, 0.16), transparent 74%),
     linear-gradient(165deg, rgba(22, 28, 49, 0.90) 0%, rgba(14, 19, 34, 0.86) 100%);
   --msg-surface-grad:
-    linear-gradient(160deg, rgba(24, 31, 53, 0.82) 0%, rgba(17, 23, 40, 0.76) 58%, rgba(15, 21, 37, 0.82) 100%);
+    linear-gradient(160deg, rgba(25, 32, 55, 0.95) 0%, rgba(18, 24, 42, 0.93) 58%, rgba(16, 22, 39, 0.95) 100%);
   --msg-head-tint: rgba(147, 134, 255, 0.065);
   --wb-deck-bg:
     radial-gradient(400px 260px at 100% 0%, rgba(139, 124, 255, 0.14), transparent 72%),
@@ -293,7 +305,7 @@ html:not([data-theme="dark"])[data-palette="sage"] {
     radial-gradient(520px 140px at 50% 100%, rgba(245, 158, 11, 0.14), transparent 74%),
     linear-gradient(165deg, rgba(36, 30, 25, 0.91) 0%, rgba(23, 19, 16, 0.86) 100%);
   --msg-surface-grad:
-    linear-gradient(160deg, rgba(37, 31, 26, 0.89) 0%, rgba(26, 22, 19, 0.85) 100%);
+    linear-gradient(160deg, rgba(38, 32, 27, 0.95) 0%, rgba(27, 23, 20, 0.93) 100%);
   --wb-deck-bg:
     linear-gradient(180deg, rgba(24, 20, 17, 0.85) 0%, rgba(30, 25, 21, 0.79) 100%);
   --wb-topic-grad: linear-gradient(145deg, rgba(245, 158, 11, 0.15) 0%, rgba(32, 26, 22, 0.90) 70%);
@@ -339,7 +351,7 @@ html:not([data-theme="dark"])[data-palette="sage"] {
     radial-gradient(520px 140px at 50% 100%, rgba(56, 189, 248, 0.15), transparent 74%),
     linear-gradient(165deg, rgba(18, 32, 54, 0.91) 0%, rgba(12, 21, 37, 0.86) 100%);
   --msg-surface-grad:
-    linear-gradient(160deg, rgba(19, 34, 57, 0.89) 0%, rgba(13, 24, 42, 0.85) 100%);
+    linear-gradient(160deg, rgba(20, 35, 58, 0.95) 0%, rgba(14, 25, 43, 0.93) 100%);
   --wb-deck-bg:
     linear-gradient(180deg, rgba(12, 22, 38, 0.85) 0%, rgba(16, 28, 47, 0.79) 100%);
   --wb-topic-grad: linear-gradient(145deg, rgba(56, 189, 248, 0.15) 0%, rgba(16, 28, 47, 0.90) 70%);
@@ -385,7 +397,7 @@ html:not([data-theme="dark"])[data-palette="sage"] {
     radial-gradient(520px 140px at 50% 100%, rgba(52, 211, 153, 0.14), transparent 74%),
     linear-gradient(165deg, rgba(18, 38, 32, 0.91) 0%, rgba(12, 25, 21, 0.86) 100%);
   --msg-surface-grad:
-    linear-gradient(160deg, rgba(19, 40, 34, 0.89) 0%, rgba(13, 28, 24, 0.85) 100%);
+    linear-gradient(160deg, rgba(20, 41, 35, 0.95) 0%, rgba(14, 29, 25, 0.93) 100%);
   --wb-deck-bg:
     linear-gradient(180deg, rgba(12, 26, 22, 0.85) 0%, rgba(16, 33, 28, 0.79) 100%);
   --wb-topic-grad: linear-gradient(145deg, rgba(52, 211, 153, 0.15) 0%, rgba(16, 33, 28, 0.90) 70%);
@@ -985,20 +997,20 @@ body {
   display: none !important;
 }
 
-/* ==================== 2. 精雕多层晶透消息卡片、追光光晕与三态空心线性推演胶囊 ==================== */
+/* ==================== 2. 精雕多层晶透消息卡片、静态折射光晕与三态空心线性推演胶囊 ==================== */
+/* 性能关键准则：聊天流长卡片堆栈位于 60fps 动态画布之上，严禁对 .msg-card 施加实时 backdrop-filter、逐帧 --spot-x/--spot-y 渐变重绘或悬停 translateY 合成层提升，以杜绝 WebKit 大纹理反复模糊与子树样式级联卡顿 */
 .msg-card {
-  --spot-x: 22%;
-  --spot-y: 0%;
   background:
-    radial-gradient(360px 180px at var(--spot-x) var(--spot-y), color-mix(in srgb, var(--seat-accent) 9%, transparent), transparent 72%),
+    radial-gradient(360px 175px at 18% 0%, color-mix(in srgb, var(--seat-accent) 9.5%, transparent), transparent 72%),
     var(--msg-surface-grad) !important;
-  backdrop-filter: blur(22px) saturate(142%);
-  -webkit-backdrop-filter: blur(22px) saturate(142%);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  contain: layout style paint;
   border: 1px solid var(--border-subtle);
   box-shadow:
     inset 0 1px 0 var(--island-highlight),
     var(--shadow-card);
-  transition: transform 0.22s var(--ease-smooth), border-color 0.2s ease, box-shadow 0.22s ease;
+  transition: border-color 0.16s ease;
 }
 
 .msg-card.speaker-carbon,
@@ -1008,7 +1020,7 @@ body {
 .msg-card.speaker-titan,
 .msg-card.speaker-prism {
   background:
-    radial-gradient(380px 190px at var(--spot-x) var(--spot-y), color-mix(in srgb, var(--seat-accent) 11%, transparent), transparent 70%),
+    radial-gradient(390px 180px at 18% 0%, color-mix(in srgb, var(--seat-accent) 11.5%, transparent), transparent 70%),
     radial-gradient(420px 135px at 0% 0%, color-mix(in srgb, var(--seat-accent) 8.5%, transparent), transparent 74%),
     var(--msg-surface-grad) !important;
 }
@@ -1016,7 +1028,7 @@ body {
 .msg-card.speaker-chair {
   --seat-accent: var(--chair-color);
   background:
-    radial-gradient(340px 160px at var(--spot-x) var(--spot-y), color-mix(in srgb, var(--chair-color) 14%, transparent), transparent 72%),
+    radial-gradient(350px 165px at 18% 0%, color-mix(in srgb, var(--chair-color) 14%, transparent), transparent 72%),
     linear-gradient(140deg, color-mix(in srgb, var(--chair-color) 12%, var(--bg-panel-solid)) 0%, var(--bg-panel-solid) 78%) !important;
   border-color: var(--chair-border);
 }
@@ -1024,23 +1036,16 @@ body {
 .msg-card.msg-resolution-card {
   --seat-accent: var(--astra-color);
   background:
-    radial-gradient(460px 190px at var(--spot-x) var(--spot-y), color-mix(in srgb, var(--astra-color) 12%, transparent), transparent 72%),
+    radial-gradient(460px 190px at 20% 0%, color-mix(in srgb, var(--astra-color) 12%, transparent), transparent 72%),
     radial-gradient(560px 170px at 50% 0%, color-mix(in srgb, var(--accent-primary) 10%, transparent), transparent 76%),
     var(--msg-surface-grad) !important;
   border-color: var(--astra-border);
 }
 
-/* 非流式消息卡悬停时：角色色彩描边亮起 + 轻盈微浮起（流式输出中锁死 transform 杜绝抖动） */
-.msg-card:not(.is-streaming):hover {
-  transform: translateY(-1.5px);
-  border-color: color-mix(in srgb, var(--seat-accent) 44%, var(--border-strong));
-  box-shadow:
-    inset 0 1px 0 var(--island-highlight),
-    0 14px 32px -12px color-mix(in srgb, var(--seat-accent) 20%, rgba(0, 0, 0, 0.22));
-}
-
+/* 消息卡悬停时：仅轻量高亮角色描边与左侧导轨，不触发整卡位移动画或阴影重绘 */
+.msg-card:not(.is-streaming):hover,
 .msg-card.is-streaming:hover {
-  border-color: color-mix(in srgb, var(--seat-accent) 42%, var(--border-strong));
+  border-color: color-mix(in srgb, var(--seat-accent) 44%, var(--border-strong));
 }
 
 /* 左侧悬浮发光导轨细线：悬停时微微增亮呼吸 */

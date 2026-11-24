@@ -108,6 +108,8 @@ async function run(){
       window.dispatchEvent(new DragEvent('drop',{dataTransfer:dt,bubbles:true,cancelable:true}));
     });
     await page.waitForFunction(()=>document.querySelectorAll('#v4AttachmentTray .v4-att-card:not(.is-uploading)').length===3);
+    await page.reload({waitUntil:'domcontentloaded'});
+    await page.waitForFunction(()=>document.querySelectorAll('#v4AttachmentTray .v4-att-card:not(.is-uploading)').length===3);
     assert.equal(await page.locator('#topicInput').inputValue(),'');
     const sent=page.waitForResponse(r=>r.request().method()==='POST' && /\/start$/.test(r.url()));
     await page.locator('#primaryActionBtn').click();
