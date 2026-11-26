@@ -8,6 +8,16 @@ build/
 dist/
 output/
 
+# Purchase-only desktop and audit packages are maintained outside this repository.
+ai-roundtable-pro/
+agensi-launch-kit/
+adversarial-pr-architecture-audit/
+adversarial-pr-architecture-audit.zip
+AI-Roundtable-Audit-Pro-*.zip
+backend/audit_pro/
+frontend/audit-studio.js
+frontend/audit-studio.css
+
 # Python
 __pycache__/
 *.pyc

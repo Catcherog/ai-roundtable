@@ -24,6 +24,8 @@
 
 它解决的不是“多开几个聊天框同时问”，而是**让不同 AI 在制度化流程里真正互相纠偏、互认亮点、防假闭环，并把各席不同思想的精华无损收口为一份可以直接拿去研发落地的决策文本**。
 
+上方下载的是免费标准桌面版。Catcherog 单独维护的 **Audit Pro 桌面版**增加了本地 JSON 审计工作台，可校验签核状态并成套导出台账和 Markdown 决策简报。兼容的编码 Agent 也可使用免费的独立代码审查技能。[Agensi 免费技能](https://www.agensi.io/skills/roundtable-steel-man-code-plan-review)
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/roundtable-5.5.1-dark.png">
   <img src="docs/images/roundtable-5.5.1.png" alt="AI 圆桌开场界面：多席位就座，选定红蓝辩证策略，准备围绕真实业务取舍展开独立立论与交叉质询。">
