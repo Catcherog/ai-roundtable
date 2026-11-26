@@ -24,7 +24,7 @@
 
 它解决的不是“多开几个聊天框同时问”，而是**让不同 AI 在制度化流程里真正互相纠偏、互认亮点、防假闭环，并把各席不同思想的精华无损收口为一份可以直接拿去研发落地的决策文本**。
 
-上方下载的是免费标准桌面版。Catcherog 单独维护的 **Audit Pro 桌面版**增加了本地 JSON 审计工作台，可校验签核状态并成套导出台账和 Markdown 决策简报。兼容的编码 Agent 也可使用免费的独立代码审查技能。[Agensi 免费技能](https://www.agensi.io/skills/roundtable-steel-man-code-plan-review)
+上方下载的是免费标准桌面版。Catcherog 单独维护的 **Audit Pro 桌面版**增加了本地 JSON 审计工作台，可校验签核状态并成套导出台账和 Markdown 决策简报。兼容的编码 Agent 也可使用 Agensi 上的独立技能。[免费代码与计划审查](https://www.agensi.io/skills/roundtable-steel-man-code-plan-review) · [付费 PR 与架构审计技能](https://www.agensi.io/skills/adversarial-pr-architecture-audit-pro)
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/roundtable-5.5.1-dark.png">

@@ -20,7 +20,7 @@
   <a href="https://github.com/Catcherog/ai-roundtable/releases/latest">Release notes &amp; SHA-256</a>
 </p>
 
-The downloads above are the free standard desktop edition. Catcherog's separately maintained **Audit Pro desktop edition** adds a local JSON audit workspace with sign-off validation and paired ledger and Markdown exports. A free, standalone code-review skill is also available for compatible coding agents. [Roundtable Steel-Man Code & Plan Review on Agensi](https://www.agensi.io/skills/roundtable-steel-man-code-plan-review)
+The downloads above are the free standard desktop edition. Catcherog's separately maintained **Audit Pro desktop edition** adds a local JSON audit workspace with sign-off validation and paired ledger and Markdown exports. Coding agents can also use the standalone workflows on Agensi. [Free Code & Plan Review](https://www.agensi.io/skills/roundtable-steel-man-code-plan-review) · [Paid PR & Architecture Audit skill](https://www.agensi.io/skills/adversarial-pr-architecture-audit-pro)
 
 AI Roundtable is a local-first Windows and macOS desktop app for architecture, code review, product prioritization, and troubleshooting decisions that deserve real pushback. Seat **1–6 AI roles** around the same problem — starting with a single CLI tool you already use, or mixing **Codex, Claude Code, Antigravity (Gemini), Grok, and Ollama** at the same table with per-seat models and reasoning effort levels.
 
