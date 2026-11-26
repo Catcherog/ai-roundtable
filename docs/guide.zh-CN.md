@@ -10,9 +10,9 @@
 
 两种平台都需要先安装至少一个支持的 CLI 并在终端完成登录。若使用 npm 安装，保留 Node.js 和 CLI 的安装目录。要核对下载文件，可在 Windows 使用 `Get-FileHash 文件名.zip -Algorithm SHA256`，在 macOS 使用 `shasum -a 256 文件名.zip`，对照发行页的 `SHA256SUMS.txt`。
 
-**从 v4.0.2 升级前，请先备份数据。** 彻底退出旧版后，将整个 `~/.ai-roundtable/`（Windows 默认目录为 `%USERPROFILE%\.ai-roundtable`）复制到另一个位置。如曾设置 `AI_ROUNDTABLE_HOME`，请备份该目录。完整备份应包含数据库和附件。5.5.1 保存时裁剪至最近 50 场，整场重写时仅保留最近 500 条发言，删除会议为永久删除。若需保留旧行为，可以[继续使用 v4.0.2](https://github.com/Catcherog/ai-roundtable/releases/tag/v4.0.2)。已裁剪的数据需要从升级前的备份恢复。
+**从 v4.0.2 升级前，请先备份数据。** 彻底退出旧版后，将整个 `~/.ai-roundtable/`（Windows 默认目录为 `%USERPROFILE%\.ai-roundtable`）复制到另一个位置。如曾设置 `AI_ROUNDTABLE_HOME`，请备份该目录。完整备份应包含数据库和附件。当前版本保存时裁剪至最近 50 场，整场重写时仅保留最近 500 条发言，删除会议为永久删除。若需保留旧行为，可以[继续使用 v4.0.2](https://github.com/Catcherog/ai-roundtable/releases/tag/v4.0.2)。已裁剪的数据需要从升级前的备份恢复。
 
-本指南中的大项目绑定、逐文件写入和 Excel、ZIP 附件功能适用于从当前 `main` 分支构建的版本。使用 v5.5.1 发行版时，受管文件总量超过 128 MiB 的项目可绑定较小的子目录。
+大项目绑定和 Excel、ZIP 附件功能自 v5.9.0 起随桌面版发布。受管文件超过 128 MiB 的项目可在 macOS 和 Windows 上用于研讨与只读预演。macOS 在只读沙箱可用时还支持逐文件写入。
 
 ## 配置 1–6 个席位
 

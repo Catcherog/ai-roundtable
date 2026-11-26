@@ -514,7 +514,8 @@ class WorkspaceBackup:
         if not fits:
             if not Path(cwd).is_dir():
                 raise WorkspaceAdmissionError(f"项目目录不存在：{cwd}", reason="missing_workspace")
-            if sys.platform != "darwin" or not os.access("/usr/bin/sandbox-exec", os.X_OK):
+            from .project_edits import can_apply_macos_sandbox
+            if not can_apply_macos_sandbox():
                 raise WorkspaceAdmissionError(
                     "此工作区可用于研讨。当前系统未提供大项目逐文件写入所需的只读进程保护。",
                     reason="scoped_write_unavailable",

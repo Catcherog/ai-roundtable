@@ -666,14 +666,11 @@ body {
 .seat-card,
 .intent-pack-card,
 .scenario-preset-card,
-.wb-card,
 .wb-pool-item,
 .workspace-card,
 .session-item,
 .cli-card,
-.agent-cfg-box,
-.rail-icon-btn,
-.composer-box.v4-composer-dock {
+.rail-icon-btn {
   --spot-x: 50%;
   --spot-y: 50%;
 }
@@ -1494,7 +1491,7 @@ button:not(:disabled):active {
   position: relative;
   border-radius: 20px;
   background:
-    radial-gradient(380px 150px at var(--spot-x) var(--spot-y), var(--spotlight-glow), transparent 74%),
+    radial-gradient(380px 150px at 50% 0%, var(--spotlight-glow), transparent 74%),
     var(--surface-dock-grad, var(--bg-panel-solid));
   backdrop-filter: blur(30px) saturate(150%);
   -webkit-backdrop-filter: blur(30px) saturate(150%);
@@ -2124,7 +2121,7 @@ button:not(:disabled):active {
 
 .agent-cfg-box {
   background:
-    radial-gradient(240px 120px at var(--spot-x) var(--spot-y), var(--spotlight-glow), transparent 74%),
+    radial-gradient(240px 120px at 18% 0%, var(--spotlight-glow), transparent 74%),
     var(--bg-elevated);
   transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s var(--ease-smooth);
 }
@@ -2680,25 +2677,25 @@ button:not(:disabled):active {
 
 .wb-card.wb-topic-card {
   background:
-    radial-gradient(220px 120px at var(--spot-x) var(--spot-y), var(--spotlight-glow), transparent 74%),
+    radial-gradient(220px 120px at 18% 0%, var(--spotlight-glow), transparent 74%),
     var(--wb-topic-grad) !important;
 }
 
 .wb-card.wb-zone-decision {
   background:
-    radial-gradient(220px 120px at var(--spot-x) var(--spot-y), color-mix(in srgb, var(--carbon-color) 11%, transparent), transparent 74%),
+    radial-gradient(220px 120px at 18% 0%, color-mix(in srgb, var(--carbon-color) 11%, transparent), transparent 74%),
     var(--wb-decision-grad) !important;
 }
 
 .wb-card.wb-zone-risk {
   background:
-    radial-gradient(220px 120px at var(--spot-x) var(--spot-y), color-mix(in srgb, var(--grok-color) 11%, transparent), transparent 74%),
+    radial-gradient(220px 120px at 18% 0%, color-mix(in srgb, var(--grok-color) 11%, transparent), transparent 74%),
     var(--wb-risk-grad) !important;
 }
 
 .wb-card.wb-zone-action {
   background:
-    radial-gradient(220px 120px at var(--spot-x) var(--spot-y), color-mix(in srgb, var(--astra-color) 11%, transparent), transparent 74%),
+    radial-gradient(220px 120px at 18% 0%, color-mix(in srgb, var(--astra-color) 11%, transparent), transparent 74%),
     var(--wb-action-grad) !important;
 }
 
@@ -6929,7 +6926,90 @@ details[open] > .msg-error-raw {
   }
 }
 
+/* ==================== 15. 零重排合成器级 GPU 鼠标灵动光晕与席位色彩共鸣层 ==================== */
+.v5-cursor-halo-layer {
+  --halo-c1: var(--accent-primary);
+  position: fixed;
+  inset: 0;
+  z-index: 28;
+  pointer-events: none;
+  overflow: hidden;
+  contain: strict;
+}
+
+.v5-cursor-halo-layer[data-halo-tone="carbon"] {
+  --halo-c1: var(--carbon-color);
+}
+.v5-cursor-halo-layer[data-halo-tone="grok"] {
+  --halo-c1: var(--grok-color);
+}
+.v5-cursor-halo-layer[data-halo-tone="astra"] {
+  --halo-c1: var(--astra-color);
+}
+.v5-cursor-halo-layer[data-halo-tone="vega"] {
+  --halo-c1: var(--vega-color);
+}
+.v5-cursor-halo-layer[data-halo-tone="titan"] {
+  --halo-c1: var(--titan-color);
+}
+.v5-cursor-halo-layer[data-halo-tone="prism"] {
+  --halo-c1: var(--prism-color);
+}
+.v5-cursor-halo-layer[data-halo-tone="chair"] {
+  --halo-c1: var(--chair-color);
+}
+
+.v5-cursor-halo-aura {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 120px;
+  height: 120px;
+  border-radius: 50%;
+  pointer-events: none;
+  opacity: 0;
+  will-change: transform, opacity;
+  backface-visibility: hidden;
+  transform: translate3d(-999px, -999px, 0);
+  background: radial-gradient(
+    circle at 50% 50%,
+    color-mix(in srgb, var(--halo-c1) 9%, transparent) 0%,
+    transparent 70%
+  );
+}
+
+[data-theme="dark"] .v5-cursor-halo-aura {
+  background: radial-gradient(
+    circle at 50% 50%,
+    color-mix(in srgb, var(--halo-c1) 13.5%, transparent) 0%,
+    transparent 72%
+  );
+}
+
+/* 方案 C · 极细书画流丝光痕画布（静止零绘制、跟手零滞后） */
+.v5-cursor-halo-ribbon {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  display: block;
+}
+
+[data-motion="calm"] .v5-cursor-halo-ribbon {
+  display: none !important;
+}
+
+@media (hover: none), (pointer: coarse) {
+  .v5-cursor-halo-layer {
+    display: none !important;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
+  .v5-cursor-halo-layer {
+    display: none !important;
+  }
   .v4-logo-orb.v4-app-icon-orb,
   .v4-app-icon-img,
   .left-sidebar,

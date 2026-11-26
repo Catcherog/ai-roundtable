@@ -168,7 +168,7 @@ bash scripts/start_web.sh
 
 **Quit the app and back up your entire data directory first** (`~/.ai-roundtable/` on Mac, `%USERPROFILE%\.ai-roundtable` on Windows, or your custom `AI_ROUNDTABLE_HOME`). Current releases retain the 50 most recent meetings on save and up to 500 messages on full session rewrite. Meeting deletion is permanent. Users who rely on unlimited legacy retention can [stay on v4.0.2](https://github.com/Catcherog/ai-roundtable/releases/tag/v4.0.2).
 
-The v5.5.1 release limits workspace binding to 128 MiB of managed files. Builds from the current `main` branch can bind a full project and search for source files across directories. On macOS, for workspaces above 128 MiB, the app snapshots the files targeted by each approved text edit.
+Starting with v5.9.0, both desktop apps can bind a full project for discussion and search across its directories. For workspaces above 128 MiB, macOS can apply approved text edits and snapshot only the targeted files when read-only sandboxing is available. Windows supports discussion and read-only preview for workspaces above that size.
 
 <p align="center">
   <a href="https://github.com/Catcherog/ai-roundtable/issues">Report an issue or share a question worth debating →</a>

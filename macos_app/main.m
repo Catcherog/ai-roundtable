@@ -513,7 +513,7 @@ completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler
         @"@keyframes coreBreathe{0%,100%{transform:rotate(45deg) scale(0.88);opacity:0.18}50%{transform:rotate(45deg) scale(1.16);opacity:0.38}}"
         @"</style></head><body>"
         @"<div class='orbit-stage'><div class='core'></div><div class='node n1'></div><div class='node n2'></div><div class='node n3'></div></div>"
-        @"<div>正在启动 AI圆桌 v4 多模态协同工作台…</div></body></html>";
+        @"<div>正在启动 AI圆桌…</div></body></html>";
     [self.webView loadHTMLString:bootHtml baseURL:nil];
 }
 

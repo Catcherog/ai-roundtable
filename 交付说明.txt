@@ -1,9 +1,9 @@
-AI 圆桌 5.5.1 · 好方案，值得一个反对席。
+AI 圆桌 5.9.0 · 好方案，值得一个反对席。
 
 Windows 10/11 x64：完整解压 AI-Roundtable-Windows-x64.zip，运行 AI-Roundtable.exe。
 Apple 芯片 Mac：需要 macOS 12 或以上、Python 3.9+。解压 AI-Roundtable-macOS-arm64.zip，打开 AI圆桌.app。
 
-从 4.0.2 升级前，先退出程序并备份整个 ~/.ai-roundtable/（Windows 为 %USERPROFILE%\.ai-roundtable）。本版保存时保留最近 50 场会议，整场重写时保留最近 500 条发言；删除无回收站。受管文件总量超过 128 MiB 的项目请绑定较小的子目录。
+从 4.0.2 升级前，先退出程序并备份整个 ~/.ai-roundtable/（Windows 为 %USERPROFILE%\.ai-roundtable）。本版保存时保留最近 50 场会议，整场重写时保留最近 500 条发言。删除无回收站。受管文件超过 128 MiB 的工作区可用于研讨和只读预演。macOS 在只读沙箱可用时还支持逐文件写入。
 
 从源码构建 Windows 版需要 PowerShell 7 和 .NET 8 SDK，运行 pwsh -File scripts/build_windows.ps1。
 构建 Mac 版需要 Apple Command Line Tools，运行 bash scripts/build_macos_app.sh。

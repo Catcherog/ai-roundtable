@@ -89,6 +89,14 @@ async function run(){
     assert.equal(await page.locator('#v4ModelChipsCarbon .active').count(),1);
     await page.locator('#closeSettingsBtn').click();
     console.log('PASS settings: rail and native menu default seats, 3/6 filter, model and effort round-trip');
+    await page.mouse.move(740, 310, {steps: 12});
+    await page.waitForFunction(() => Number(document.getElementById('v5CursorHaloAura').style.opacity) > 0);
+    const halo = page.locator('#v5CursorHaloLayer');
+    assert.equal(await halo.evaluate(el => getComputedStyle(el).pointerEvents), 'none');
+    await page.emulateMedia({reducedMotion: 'reduce'});
+    assert.equal(await halo.isVisible(), false);
+    await page.emulateMedia({reducedMotion: 'no-preference'});
+    console.log('PASS cursor halo responds to mouse movement and respects reduced motion');
     const chooserReady=page.waitForEvent('filechooser');
     await page.locator('#v4PlusAttachBtn').click();
     await page.locator('[data-v4-attach-cmd=file]').click();
@@ -110,6 +118,10 @@ async function run(){
     await page.waitForFunction(()=>document.querySelectorAll('#v4AttachmentTray .v4-att-card:not(.is-uploading)').length===3);
     await page.reload({waitUntil:'domcontentloaded'});
     await page.waitForFunction(()=>document.querySelectorAll('#v4AttachmentTray .v4-att-card:not(.is-uploading)').length===3);
+    await page.waitForFunction(() => {
+      const preview = document.querySelector('#v4AttachmentTray img.v4-att-thumb');
+      return preview?.complete && preview.naturalWidth === 640;
+    });
     assert.equal(await page.locator('#topicInput').inputValue(),'');
     const sent=page.waitForResponse(r=>r.request().method()==='POST' && /\/start$/.test(r.url()));
     await page.locator('#primaryActionBtn').click();

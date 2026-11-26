@@ -7519,7 +7519,7 @@ function openSettingsModal(initialTab = "") {
     const prefDisc = state.seatEfforts[aid] || info.discussion_effort || info.effective_discussion_effort || spec.default;
     const prefExec = info.execution_effort || info.effective_execution_effort || spec.default;
     populateEffortSelectElement(discSel, spec.allowed, prefDisc, spec.supports_effort);
-    const execAllowed = (spec.allowed || []).filter((x) => x !== "low");
+    const execAllowed = (spec.allowed || []).filter((x) => x !== "minimal" && x !== "low");
     populateEffortSelectElement(execSel, execAllowed.length ? execAllowed : spec.allowed, prefExec, spec.supports_effort);
 
     if (statusPill) {
@@ -7604,7 +7604,7 @@ function applyQuickSingleCliTriad() {
     refreshSeatEffortSelectInModal(cap, true);
     const spec = getEffortSpecForModel(chosenDrv, dSpec.model, aid);
     populateEffortSelectElement(discEl, spec.allowed, spec.default || dSpec.discussEffort, spec.supports_effort);
-    const execAllowed = (spec.allowed || []).filter((x) => x !== "low");
+    const execAllowed = (spec.allowed || []).filter((x) => x !== "minimal" && x !== "low");
     populateEffortSelectElement(
       execEl,
       execAllowed.length ? execAllowed : spec.allowed,

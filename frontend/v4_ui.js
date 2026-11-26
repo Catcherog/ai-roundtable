@@ -236,6 +236,8 @@ export function handleRemoteAttachmentDeleted(attId, sessionId = "") {
 
 /* ==================== 多模态二进制流直传、预览与删除闭环 ==================== */
 
+const hydratingPendingAttIds = new Set();
+
 async function fetchAttachmentBlobUrl(sessionId, attId, existingPreview = "") {
   if (existingPreview) return existingPreview;
   const cache = getBlobCache();
@@ -257,11 +259,43 @@ async function fetchAttachmentBlobUrl(sessionId, attId, existingPreview = "") {
     if (getCurrentSessionId() !== sessionId) return "";
     const blob = await res.blob();
     if (getCurrentSessionId() !== sessionId) return "";
+    if (cache.has(cacheKey)) return cache.get(cacheKey);
     const objUrl = URL.createObjectURL(blob);
     cache.set(cacheKey, objUrl);
     return objUrl;
   } catch {
     return "";
+  }
+}
+
+async function hydratePendingAttachmentPreviews() {
+  const sid = getCurrentSessionId();
+  if (!sid || !getAuthToken()) return;
+  const candidates = getReadyPendingAttachments(sid).filter((att) => att.kind === "image" && !att.previewUrl);
+  if (!candidates.length) return;
+  let updated = false;
+  await Promise.all(
+    candidates.map(async (att) => {
+      const inflightKey = `${sid}:${att.id}`;
+      if (hydratingPendingAttIds.has(inflightKey)) return;
+      hydratingPendingAttIds.add(inflightKey);
+      try {
+        const blobUrl = await fetchAttachmentBlobUrl(sid, att.id);
+        if (!blobUrl || getCurrentSessionId() !== sid) return;
+        const current = getReadyPendingAttachments(sid).find((item) => item.id === att.id);
+        if (!current) {
+          revokePendingAttachmentUrl({ id: att.id, previewUrl: blobUrl }, sid);
+        } else if (!current.previewUrl) {
+          current.previewUrl = blobUrl;
+          updated = true;
+        }
+      } finally {
+        hydratingPendingAttIds.delete(inflightKey);
+      }
+    })
+  );
+  if (updated && getCurrentSessionId() === sid) {
+    renderPendingAttachmentTray();
   }
 }
 
@@ -428,6 +462,8 @@ export function renderPendingAttachmentTray() {
     };
   });
 
+  void hydratePendingAttachmentPreviews();
+
   tray.querySelectorAll("[data-v4-rm-idx]").forEach((btn) => {
     btn.onclick = async (e) => {
       e.stopPropagation();
@@ -575,11 +611,13 @@ export function hydrateVectorIcons(scopeRoot = document) {
     }
     const adoptBtn = bar.querySelector("[data-wb-act='adopt']");
     if (adoptBtn && !adoptBtn.querySelector("svg")) {
-      adoptBtn.innerHTML = `${LINEAR_UI_ICONS.adopt}<span>采纳为共识</span>`;
+      const lbl = adoptBtn.textContent.trim() || "采纳为共识";
+      adoptBtn.innerHTML = `${LINEAR_UI_ICONS.adopt}<span>${escapeAttr(lbl)}</span>`;
     }
-    const discBtn = bar.querySelector("[data-wb-act='discuss']");
+    const discBtn = bar.querySelector("[data-wb-act='discuss'], [data-wb-act='redebate']");
     if (discBtn && !discBtn.querySelector("svg")) {
-      discBtn.innerHTML = `${LINEAR_UI_ICONS.discuss}<span>定向讨论</span>`;
+      const lbl = discBtn.textContent.trim() || "定向讨论";
+      discBtn.innerHTML = `${LINEAR_UI_ICONS.discuss}<span>${escapeAttr(lbl)}</span>`;
     }
     const editBtn = bar.querySelector("[data-wb-act='edit']");
     if (editBtn && !editBtn.querySelector("svg")) {
@@ -1961,7 +1999,8 @@ function initTopicTitlePopover() {
 
 const MOTION_STORAGE_KEY = "ai_rt_motion";
 const SPOTLIGHT_SELECTOR =
-  ".seat-card, .intent-pack-card, .scenario-preset-card, .wb-card, .wb-pool-item, .workspace-card, .session-item, .cli-card, .agent-cfg-box, .rail-icon-btn, .v4-composer-dock, .compact-composer-bar, .compact-ring-summary, .stage-fold-group, .v4-cascade-trigger, .v4-glass-select-trigger, .v4-sub-tier-pill";
+  ".seat-card, .intent-pack-card, .scenario-preset-card, .wb-pool-item, .workspace-card, .session-item, .cli-card, .rail-icon-btn, .compact-composer-bar, .compact-ring-summary, .stage-fold-group, .v4-cascade-trigger, .v4-glass-select-trigger, .v4-sub-tier-pill";
+const HALO_SEAT_TONES = ["carbon", "grok", "astra", "vega", "titan", "prism", "chair"];
 
 function parseCssColorToRgb(rawColor, fallback = [124, 113, 245]) {
   const s = String(rawColor || "").trim();
@@ -2585,7 +2624,18 @@ function initV5KineticStageAndSpotlight() {
   let height = Math.max(240, window.innerHeight || 900);
   let dpr = Math.min(2, window.devicePixelRatio || 1);
 
-  // 二阶临界阻尼平滑指针追踪器（无瞬移速度尖峰，跟手灵敏）
+  const haloLayerEl = $id("v5CursorHaloLayer");
+  const haloAuraEl = $id("v5CursorHaloAura");
+  const haloRibbonCanvas = $id("v5CursorHaloRing");
+  const haloRibbonCtx = haloRibbonCanvas && typeof haloRibbonCanvas.getContext === "function"
+    ? haloRibbonCanvas.getContext("2d")
+    : null;
+  const haloRibbonPts = [];
+  let haloRibbonDirty = false;
+  const haloRibbonC1 = [85, 74, 224];
+  const haloRibbonC2 = [13, 148, 112];
+
+  // 二阶临界阻尼平滑指针追踪器 + 方案 C（极细书画流丝光痕与零延迟中心微晕）
   const pointer = {
     rawX: width * 0.52,
     rawY: height * 0.44,
@@ -2593,6 +2643,10 @@ function initV5KineticStageAndSpotlight() {
     y: height * 0.44,
     vx: 0,
     vy: 0,
+    attn: 1,
+    targetAttn: 1,
+    haloTone: "default",
+    haloHidden: true,
     initialized: false,
     inside: false,
     presence: 0,
@@ -2634,6 +2688,12 @@ function initV5KineticStageAndSpotlight() {
     canvas.width = Math.round(width * dpr);
     canvas.height = Math.round(height * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (haloRibbonCanvas && haloRibbonCtx) {
+      haloRibbonCanvas.width = Math.round(width * dpr);
+      haloRibbonCanvas.height = Math.round(height * dpr);
+      haloRibbonCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      haloRibbonDirty = true;
+    }
   };
   resizeCanvas();
 
@@ -2982,11 +3042,69 @@ function initV5KineticStageAndSpotlight() {
   let cachedSpotHit = null;
   let cachedSpotRect = null;
   let cachedSpotTs = 0;
+  let cachedSpotRx = -999;
+  let cachedSpotRy = -999;
+  let lastHoverElement = null;
+  let cachedOverChatStream = false;
+
+  const resolveSeatHaloTone = (el) => {
+    if (!el || typeof el.closest !== "function") return "default";
+    const carrier = el.closest("[data-seat-id], .msg-card, .seat-card, .wb-card");
+    if (!carrier) return "default";
+    const dsSeat = String(carrier.dataset?.seatId || carrier.dataset?.seat || "").toLowerCase();
+    if (HALO_SEAT_TONES.includes(dsSeat)) return dsSeat;
+    for (const key of HALO_SEAT_TONES) {
+      if (carrier.classList.contains(`speaker-${key}`) || carrier.classList.contains(`seat-${key}`)) {
+        return key;
+      }
+    }
+    if (carrier.classList.contains("wb-zone-decision")) return "carbon";
+    if (carrier.classList.contains("wb-zone-risk")) return "grok";
+    if (carrier.classList.contains("wb-zone-action")) return "astra";
+    return "default";
+  };
+
+  const syncCursorHaloContext = (targetEl) => {
+    if (targetEl === lastHoverElement) return;
+    lastHoverElement = targetEl;
+    if (!targetEl || typeof targetEl.closest !== "function") {
+      cachedOverChatStream = false;
+      pointer.targetAttn = 1;
+      return;
+    }
+    cachedOverChatStream = Boolean(targetEl.closest("#chatStreamInner"));
+    if (targetEl.closest("textarea, input, select, [contenteditable='true']")) {
+      pointer.targetAttn = 0.28;
+    } else if (
+      targetEl.closest(
+        ".modal-card, .v4-floating-popover, .appearance-popover, .persona-popover, .stage-inspector-popover"
+      )
+    ) {
+      pointer.targetAttn = 0.45;
+    } else if (
+      targetEl.closest(
+        "button, a, summary, [role='button'], .seat-card, .intent-pack-card, .scenario-preset-card, .wb-pool-item, .session-item, .workspace-card, .v4-att-thumb"
+      )
+    ) {
+      pointer.targetAttn = 1.08;
+    } else {
+      pointer.targetAttn = 1;
+    }
+    const nextTone = resolveSeatHaloTone(targetEl);
+    if (nextTone !== pointer.haloTone) {
+      pointer.haloTone = nextTone;
+      if (haloLayerEl) {
+        haloLayerEl.setAttribute("data-halo-tone", nextTone);
+      }
+    }
+  };
 
   const invalidateSpotRectCache = () => {
     cachedSpotHit = null;
     cachedSpotRect = null;
     cachedSpotTs = 0;
+    cachedSpotRx = -999;
+    cachedSpotRy = -999;
   };
   window.addEventListener("scroll", invalidateSpotRectCache, { capture: true, passive: true });
   window.addEventListener("resize", invalidateSpotRectCache, { passive: true });
@@ -3008,13 +3126,19 @@ function initV5KineticStageAndSpotlight() {
       cachedSpotHit = hit;
       cachedSpotRect = hit.getBoundingClientRect();
       cachedSpotTs = nowTs;
+      cachedSpotRx = -999;
+      cachedSpotRy = -999;
     }
     const rect = cachedSpotRect;
     if (rect.width > 0 && rect.height > 0) {
       const rx = Math.max(0, Math.min(100, ((clientX - rect.left) / rect.width) * 100));
       const ry = Math.max(0, Math.min(100, ((clientY - rect.top) / rect.height) * 100));
-      hit.style.setProperty("--spot-x", `${rx.toFixed(1)}%`);
-      hit.style.setProperty("--spot-y", `${ry.toFixed(1)}%`);
+      if (Math.abs(rx - cachedSpotRx) >= 0.6 || Math.abs(ry - cachedSpotRy) >= 0.6) {
+        cachedSpotRx = rx;
+        cachedSpotRy = ry;
+        hit.style.setProperty("--spot-x", `${rx.toFixed(1)}%`);
+        hit.style.setProperty("--spot-y", `${ry.toFixed(1)}%`);
+      }
     }
   };
 
@@ -3029,6 +3153,7 @@ function initV5KineticStageAndSpotlight() {
         pointer.vx = 0;
         pointer.vy = 0;
         pointer.initialized = true;
+        haloRibbonPts.length = 0;
       }
 
       const moveDist = Math.hypot(e.clientX - pointer.rawX, e.clientY - pointer.rawY);
@@ -3037,15 +3162,22 @@ function initV5KineticStageAndSpotlight() {
       pointer.inside = true;
 
       const targetEl = e.target && typeof e.target.closest === "function" ? e.target : null;
-      const overChatContent = Boolean(targetEl && targetEl.closest("#chatStreamInner"));
-      if (overChatContent) {
-        pointer.energy = Math.min(0.28, pointer.energy + Math.min(0.06, moveDist * 0.004));
-        return;
-      }
-
+      syncCursorHaloContext(targetEl);
       pointer.energy = Math.min(1, pointer.energy + Math.min(0.30, moveDist * 0.015));
 
-      if (!reducedMotionMql.matches && motionMode !== "calm" && moveDist > 3 && moveDist < 150) {
+      if (!reducedMotionMql.matches && motionMode !== "calm" && moveDist > 1.5) {
+        if (moveDist > 220) { haloRibbonPts.length = 0; }
+        haloRibbonPts.push({ x: e.clientX, y: e.clientY, age: 0 });
+        if (haloRibbonPts.length > 18) haloRibbonPts.shift();
+      }
+
+      if (
+        !cachedOverChatStream &&
+        !reducedMotionMql.matches &&
+        motionMode !== "calm" &&
+        moveDist > 3 &&
+        moveDist < 150
+      ) {
         pointer.trailCarry += moveDist;
         if (pointer.trailCarry >= 34) {
           pointer.trailCarry = 0;
@@ -3078,6 +3210,8 @@ function initV5KineticStageAndSpotlight() {
 
   const handlePointerExit = () => {
     pointer.inside = false;
+    lastHoverElement = null;
+    haloRibbonPts.length = 0;
   };
   window.addEventListener("pointerleave", handlePointerExit, { passive: true });
   window.addEventListener("blur", handlePointerExit, { passive: true });
@@ -3170,15 +3304,76 @@ function initV5KineticStageAndSpotlight() {
       }
       pointer.x += pointer.vx * dt;
       pointer.y += pointer.vy * dt;
+      pointer.attn += (pointer.targetAttn - pointer.attn) * (1 - Math.exp(-14 * dt));
+    }
+
+    // 1.1 方案 C：零延迟极淡中心微晕 + 1.4px 极细流丝光痕（静止零绘制）
+    const haloPresence = staticOnly ? 0 : pointer.presence * pointer.attn;
+    if (haloPresence > 0.008) {
+      pointer.haloHidden = false;
+      if (haloAuraEl) {
+        const auraAlpha = Math.min(0.36, haloPresence * (isCalm ? 0.22 : 0.28));
+        haloAuraEl.style.transform = `translate3d(${(pointer.rawX - 60).toFixed(1)}px, ${(pointer.rawY - 60).toFixed(1)}px, 0)`;
+        haloAuraEl.style.opacity = auraAlpha.toFixed(3);
+      }
+    } else if (!pointer.haloHidden) {
+      pointer.haloHidden = true;
+      if (haloAuraEl) haloAuraEl.style.opacity = "0";
+    }
+
+    if (haloRibbonCtx) {
+      if (staticOnly || isCalm) {
+        if (haloRibbonPts.length || haloRibbonDirty) {
+          haloRibbonPts.length = 0;
+          haloRibbonCtx.clearRect(0, 0, width, height);
+          haloRibbonDirty = false;
+        }
+      } else if (haloRibbonPts.length || haloRibbonDirty) {
+        const targetC1 = paletteColors[pointer.haloTone] || paletteColors.accent;
+        const targetC2 = pointer.haloTone === "default" ? paletteColors.astra : paletteColors.accent;
+        const colorLerp = 1 - Math.exp(-10 * dt);
+        for (let ci = 0; ci < 3; ci++) {
+          haloRibbonC1[ci] += (targetC1[ci] - haloRibbonC1[ci]) * colorLerp;
+          haloRibbonC2[ci] += (targetC2[ci] - haloRibbonC2[ci]) * colorLerp;
+        }
+        for (let ri = haloRibbonPts.length - 1; ri >= 0; ri--) {
+          haloRibbonPts[ri].age += dt;
+          if (haloRibbonPts[ri].age > 0.20) {
+            haloRibbonPts.splice(ri, 1);
+          }
+        }
+        haloRibbonCtx.clearRect(0, 0, width, height);
+        if (haloRibbonPts.length >= 2) {
+          const maxAlpha = isDark ? 0.50 : 0.42;
+          haloRibbonCtx.lineCap = "round";
+          for (let ri = 1; ri < haloRibbonPts.length; ri++) {
+            const p0 = haloRibbonPts[ri - 1];
+            const p1 = haloRibbonPts[ri];
+            const u = ri / (haloRibbonPts.length - 1);
+            const fade = Math.max(0, 1 - p1.age / 0.20);
+            const alpha = u * fade * maxAlpha * pointer.attn;
+            if (alpha < 0.006) continue;
+            haloRibbonCtx.beginPath();
+            haloRibbonCtx.moveTo(p0.x, p0.y);
+            haloRibbonCtx.lineTo(p1.x, p1.y);
+            haloRibbonCtx.strokeStyle = rgbaStr(u > 0.5 ? haloRibbonC1 : haloRibbonC2, alpha);
+            haloRibbonCtx.lineWidth = 0.6 + u * 1.15;
+            haloRibbonCtx.stroke();
+          }
+          haloRibbonDirty = true;
+        } else {
+          haloRibbonDirty = false;
+        }
+      }
     }
 
     if (pointer.presence > 0.008 && !staticOnly) {
       const auraRadius = isCalm ? 165 : 265;
-      const pEnv = pointer.presence * (0.62 + pointer.energy * 0.38);
+      const pEnv = pointer.presence * (0.52 + pointer.energy * 0.34);
       const auraGrad = ctx.createRadialGradient(pointer.x, pointer.y, 4, pointer.x, pointer.y, auraRadius);
-      auraGrad.addColorStop(0, rgbaStr(paletteColors.accent, (isDark ? 0.16 : 0.105) * pEnv));
-      auraGrad.addColorStop(0.45, rgbaStr(paletteColors.carbon, (isDark ? 0.085 : 0.052) * pEnv));
-      auraGrad.addColorStop(0.78, rgbaStr(paletteColors.astra, (isDark ? 0.04 : 0.024) * pEnv));
+      auraGrad.addColorStop(0, rgbaStr(paletteColors.accent, (isDark ? 0.14 : 0.092) * pEnv));
+      auraGrad.addColorStop(0.45, rgbaStr(paletteColors.carbon, (isDark ? 0.075 : 0.046) * pEnv));
+      auraGrad.addColorStop(0.78, rgbaStr(paletteColors.astra, (isDark ? 0.036 : 0.022) * pEnv));
       auraGrad.addColorStop(1, "rgba(0, 0, 0, 0)");
       ctx.fillStyle = auraGrad;
       ctx.beginPath();

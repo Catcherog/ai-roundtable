@@ -6,11 +6,36 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import unicodedata
 from pathlib import Path
 
 from .workspace_backup import WorkspaceBackup, atomic_write_bytes_fsync, fsync_directory
+
+_MACOS_SANDBOX_PROBE: bool | None = None
+
+
+def can_apply_macos_sandbox() -> bool:
+    """Return True only when macOS Seatbelt sandbox-exec is present and permitted in this process."""
+    global _MACOS_SANDBOX_PROBE
+    if _MACOS_SANDBOX_PROBE is not None:
+        return _MACOS_SANDBOX_PROBE
+    if sys.platform != "darwin" or not os.access("/usr/bin/sandbox-exec", os.X_OK):
+        _MACOS_SANDBOX_PROBE = False
+        return False
+    try:
+        proc = subprocess.run(
+            ["/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)", "/usr/bin/true"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            check=False,
+        )
+        _MACOS_SANDBOX_PROBE = proc.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        _MACOS_SANDBOX_PROBE = False
+    return _MACOS_SANDBOX_PROBE
 
 
 EDIT_INSTRUCTION = """本项目使用逐文件写入。你可以只读检索整个工作区。请读取目标源码，勿自己写文件或运行会写文件的命令。
@@ -23,7 +48,7 @@ EDIT_INSTRUCTION = """本项目使用逐文件写入。你可以只读检索整�
 
 def protect_project_command(argv, root):
     """Enforce a read-only project for the CLI or verification process and its descendants."""
-    if sys.platform != "darwin":
+    if not can_apply_macos_sandbox():
         raise ValueError("当前系统未提供大项目逐文件写入所需的只读进程保护")
     return [
         "/usr/bin/sandbox-exec", "-D", "PROJECT=" + os.path.realpath(root),
@@ -78,13 +103,34 @@ def _publish(backup, rel, previous, entry):
         atomic_write_bytes_fsync(path, data, entry["mode"], create_only=previous is None)
 
 
+def _extract_edit_plan(reply: str):
+    """Extract a JSON edit plan cleanly even with inner code fences in JSON strings or trailing prose."""
+    text = (reply or "").strip()
+    if not text:
+        raise ValueError("empty edit reply")
+    decoder = json.JSONDecoder()
+    for fence_pat in (r"^\x60{3}roundtable-edits[ \t]*\r?\n", r"^\x60{3}json[ \t]*\r?\n"):
+        matches = list(re.finditer(fence_pat, text, re.M))
+        for match in reversed(matches):
+            body_start = match.end()
+            while body_start < len(text) and text[body_start] in " \t\r\n":
+                body_start += 1
+            try:
+                obj, end_idx = decoder.raw_decode(text, body_start)
+            except ValueError:
+                continue
+            tail = text[end_idx:]
+            if re.match(r"^[ \t]*(?:\r?\n)[ \t]*\x60{3}(?:[ \t]*(?:\r?\n|\Z))", tail):
+                return obj
+    return json.loads(text)
+
+
 def apply_edit_reply(backup: WorkspaceBackup, reply: str):
     """Journal the whole batch before publishing; compensate a partially applied batch on an I/O error."""
     if backup.target_paths != []:
         raise ValueError("本次写入已经处理，请先核对当前文件")
-    block = re.search(r"^\x60{3}(?:roundtable-edits|json)[ \t]*\r?\n(.*?)\r?\n\x60{3}[ \t]*\s*\Z", reply.strip(), re.M | re.S)
     try:
-        plan = json.loads(block.group(1) if block else reply)
+        plan = _extract_edit_plan(reply)
     except (TypeError, ValueError) as exc:
         raise ValueError("执行席位未返回有效的文件编辑清单，本次没有写入") from exc
     if not isinstance(plan, dict) or not isinstance(plan.get("files"), list) or not isinstance(plan.get("summary"), str):

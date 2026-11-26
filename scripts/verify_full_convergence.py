@@ -164,7 +164,7 @@ def verify_static_negative_list() -> None:
     html_ids = re.findall(r'\sid="([^"]+)"', index_html)
     known_ids = set(html_ids)
     assert len(html_ids) == len(known_ids), "frontend/index.html 存在重复 ID"
-    for req_id in ("cfgWsBindScopeSeg", "ackSnapshotBtn", "v4AttachmentTray", "wbCardAbsent", "roundtableRing"):
+    for req_id in ("cfgWsBindScopeSeg", "ackSnapshotBtn", "v4AttachmentTray", "wbCardAbsent", "roundtableRing", "v5CursorHaloLayer", "v5CursorHaloAura", "v5CursorHaloRing"):
         assert req_id in known_ids, f"frontend/index.html 缺少 #{req_id}"
 
     seats_cap = ("Carbon", "Grok", "Astra", "Vega", "Titan", "Prism")
@@ -229,7 +229,7 @@ async def run_convergence_suite() -> None:
         from backend.drivers import sanitize_subprocess_env, windows_support
         from backend.engine import run_post_execution_verification
         from backend.server import AsyncHTTPServer
-        from backend.project_edits import apply_edit_reply
+        from backend.project_edits import apply_edit_reply, can_apply_macos_sandbox
         from backend.workspace_backup import (
             HONEST_ROLLBACK_DISCLOSURE,
             MAX_BACKUP_WORKSPACE_BYTES,
@@ -381,7 +381,7 @@ async def run_convergence_suite() -> None:
             src.parent.mkdir()
             src.write_bytes(b"value = 1\r\n")
             new_file = oversize_ws / "tests" / "nested" / "value.txt"
-            if sys.platform == "darwin" and os.access("/usr/bin/sandbox-exec", os.X_OK):
+            if can_apply_macos_sandbox():
                 snap = WorkspaceBackup.capture_for_execution(str(oversize_ws), runtime_home=rt_home)
             else:
                 from backend.workspace_backup import WorkspaceAdmissionError
@@ -413,7 +413,17 @@ async def run_convergence_suite() -> None:
             unrelated.write_text("concurrent")
             assert restored.restore_with_report()[0]
             assert src.read_bytes() == b"value = 1\r\n" and not new_file.exists() and unrelated.read_text() == "concurrent"
-            if sys.platform == "darwin" and os.access("/usr/bin/sandbox-exec", os.X_OK):
+            fenced_snap = WorkspaceBackup.capture(str(oversize_ws), runtime_home=rt_home, target_paths=[])
+            fenced_payload = {
+                "summary": "支持内部三反引号与尾部说明文本",
+                "files": [{"path": "tests/nested/fenced.md", "create": "```python\nprint(1)\n```\n"}],
+            }
+            fenced_reply = f"以下是补丁清单：\n```roundtable-edits\n{json.dumps(fenced_payload, ensure_ascii=False)}\n```\n已完成自检。"
+            apply_edit_reply(fenced_snap, fenced_reply)
+            assert (oversize_ws / "tests" / "nested" / "fenced.md").read_text(encoding="utf-8") == "```python\nprint(1)\n```\n"
+            assert fenced_snap.finish()
+            assert WorkspaceBackup.load_from_manifest(fenced_snap.manifest_path).restore_with_report()[0]
+            if can_apply_macos_sandbox():
                 test_session = (await mem_json(app, tok, "POST", "/api/sessions", {"title": "scoped execution"}))[2]["session"]
                 scoped_api = "/api/sessions/" + test_session["session_id"]
                 bound_status, _, _ = await mem_json(app, tok, "POST", scoped_api + "/workspace", {"workspace_dir": str(oversize_ws)})
