@@ -9,6 +9,8 @@ MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RES_DIR="${CONTENTS_DIR}/Resources"
 EMBED_APP_DIR="${RES_DIR}/app"
 
+python3 "${ROOT_DIR}/scripts/check_standard_release.py" "${ROOT_DIR}"
+
 echo "==> 1. 准备 ${APP_NAME}.app 目录结构..."
 rm -rf "${APP_BUNDLE}"
 mkdir -p "${MACOS_DIR}" "${EMBED_APP_DIR}/backend" "${EMBED_APP_DIR}/frontend"

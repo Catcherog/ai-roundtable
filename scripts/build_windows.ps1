@@ -15,6 +15,8 @@ try {
     $pythonSha = (Get-FileHash $pythonZip -Algorithm SHA256).Hash
     if ($pythonSha -ne '9e35319bffedab8b36ad44d8f377cb4f1733bcec257a0b6d04d94f01486ddb38') { throw 'Python distribution hash mismatch' }
     Expand-Archive -LiteralPath $pythonZip -DestinationPath $runtime
+    & (Join-Path $runtime 'python.exe') -I (Join-Path $root 'scripts/check_standard_release.py') $root
+    if ($LASTEXITCODE) { throw 'The standard release contains paid desktop files.' }
     # The embedded runtime ignores PYTHONPATH and imports only its distribution and our app.
     Set-Content -LiteralPath (Join-Path $runtime 'python313._pth') -Value "python313.zip`n.`n..\app" -Encoding ascii
     $app = New-Item -ItemType Directory -Path (Join-Path $bundle 'app')
